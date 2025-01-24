@@ -465,8 +465,9 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
                         f"value ({p['initial_value']}), min ({p['minimum']}) and max ({p['maximum']}) must be specified for parameter '{p['name']}'  (module {p['model']})")
 
             if not param_error and build:
-                calibration['calib_parameter_file'] = os.path.join(job_data_dir, 'calib_parameter_dir')
-                write_parameter_files(params, calibration['calib_parameter_file'])
+                calibration['calib_parameter_file'] = '/home/peter.a.kronenberg/Downloads/calib_params_tab_delimited'
+                # calibration['calib_parameter_file'] = os.path.join(job_data_dir, 'calib_parameter_dir')
+                # write_parameter_files(params, calibration['calib_parameter_file'])
 
         if NGEN_ENVIRONMENT == NgenEnvironmentEnum.PARALLEL_WORKS:
             config['Parallel'] = parallel
