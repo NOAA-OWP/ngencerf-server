@@ -67,7 +67,7 @@ class Migration(migrations.Migration):
                 ('updated_by', django_currentuser.db.models.fields.CurrentUserField(db_column='updated_by', default=django_currentuser.middleware.get_current_authenticated_user, null=True, on_delete=django.db.models.deletion.RESTRICT, on_update=True, related_name='+', to=settings.AUTH_USER_MODEL)),
             ],
             options={
-                'db_table': 'verification_job',
+                'db_table': 'verification_run',
             },
         ),
     ]
