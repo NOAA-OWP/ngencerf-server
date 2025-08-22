@@ -16,7 +16,7 @@ from rest_framework.response import Response
 
 from calibration.enums import StatusEnum, ValidationType, SlurmStatusEnum, ForcingSourceEnum, ObservationalSourceEnum
 from calibration.enums_vanilla import JobType
-from calibration.models import CalibrationRun, ValidationRun, Iteration, ForecastRun
+from calibration.models import CalibrationRun, ValidationRun, Iteration, ForecastRun, VerificationRun
 from calibration.models.base_run import BaseRun
 from calibration.models.forecast_forcing_download_run import ForecastForcingDownloadRun
 from calibration.util.file_util import get_single_file
@@ -26,10 +26,10 @@ from calibration.util.ngen_locations import get_calibration_input_file, get_vali
     get_forecast_forcing_download_stdout_file, get_forecast_stdout_file, get_geopackage_dir_for_job, get_forecast_forcing_download_path, \
     get_forecast_dir, get_forecast_forcing_config_file, get_validation_iteration_git_info_file, get_forecast_download_git_info_file, \
     get_validation_special_git_info_file, get_calibration_git_info_file, get_forecast_git_info_file, get_forcing_dir_for_job, \
-    get_observational_file_for_job
+    get_verification_git_info_file, get_verification_stdout_file, get_observational_file_for_job
 from calibration.views import ngen_cal_input
 from calibration.views.common import ResponseError, CerfException, create_validation_run_internal, get_job_description, write_ngen_logging_file
-from calibration.views.end_of_job_processing import read_validation_output, read_calibration_output, read_forecast_output
+from calibration.views.end_of_job_processing import read_validation_output, read_calibration_output, read_forecast_output, read_verification_output
 from calibration.views.forecast_forcing_input import build_forecast_forcing_download_config
 from calibration.views.ngen_cal_input import ready_to_run
 from cerfServer.settings import NgenEnvironmentEnum
@@ -56,6 +56,8 @@ def get_job_registry_key(run: BaseRun) -> tuple[int, int]:
         return run.calibration_run.id, run.id
     elif isinstance(run, ForecastForcingDownloadRun):
         return run.forecast_run.calibration_run.id, run.forecast_run.id
+    elif isinstance(run, VerificationRun):
+        return run.id, -1
 
     raise TypeError(f"Unsupported run type: {type(run).__name__}")
 
@@ -326,6 +328,30 @@ def run_forecast_job(forecast_run: ForecastRun) -> None:
     )
 
 
+def run_verification_job(verification_job: VerificationRun) -> None:
+    """
+    Start a verification job by determining input and output file paths.
+
+    This function is intended to be passed as an argument to `submit_job`
+    and not called directly.
+
+    :param verification_job: The VerificationRun object representing the job.
+    """
+    verification_yaml_file_path = verification_job.verification_yaml_file_path
+    verification_dir = verification_job.job_data_dir
+    stdout_file = get_verification_stdout_file(verification_job)
+
+    execute_job(
+        verification_job,
+        {
+            'verification_yaml_file_path': verification_yaml_file_path,
+            'verification_dir': verification_dir
+        },
+        stdout_file,
+        simulate=settings.SIMULATE_FLAGS.get(JobType.VERIFICATION, False)
+    )
+
+
 def submit_job(run: BaseRun, logging_config=None) -> Response | None:
     """
     Submits a job by setting initial metadata and dispatching it to the appropriate execution function.
@@ -336,7 +362,7 @@ def submit_job(run: BaseRun, logging_config=None) -> Response | None:
     - For each run type, a git info file is created prior to execution.
     - If an error occurs during submission, the job status is set to 'FAILED' and the error is logged.
 
-    :param run: A CalibrationRun, ValidationRun, ForecastForcingDownloadRun, or ForecastRun object.
+    :param run: A CalibrationRun, ValidationRun, ForecastForcingDownloadRun, ForecastRun, or VerificationRun object.
     :param logging_config: Optional logging configuration to use when creating calibration job logs.
     :return: None if successful; a DRF Response object if the job is not ready or fails preprocessing.
     :raises CerfException: If the run type is unsupported or job execution fails.
@@ -383,6 +409,10 @@ def submit_job(run: BaseRun, logging_config=None) -> Response | None:
             create_git_info(get_forecast_git_info_file(run))
 
             run_forecast_job(run)
+        elif isinstance(run, VerificationRun):
+            create_git_info(get_verification_git_info_file(run))
+
+            run_verification_job(run)
         else:
             raise CerfException(f"Unsupported run type: {type(run).__name__}")
     except Exception as e:
@@ -616,6 +646,23 @@ def finalize_forecast_after_callback(run: ForecastRun, failed_so_far: bool) -> N
     - False if the job has completed successfully so far.
     """
     read_forecast_output(run, failed_so_far)
+    if failed_so_far:
+        return
+    set_job_status(run, StatusEnum.DONE)  # Update the job's status to DONE in the database.
+
+
+def finalize_verification_after_callback(run: VerificationRun, failed_so_far: bool) -> None:
+    """
+    Finalizes a verification job after it has completed.
+
+    :param run: The VerificationRun object representing the forecast job.
+    - Processes the output of the verification job.
+    - Marks the verification job as DONE in the database, indicating successful completion.
+    :param failed_so_far: Indicates whether the job has failed up to this point.
+    - True if the job encountered a failure.
+    - False if the job has completed successfully so far.
+    """
+    read_verification_output(run, failed_so_far)
     if failed_so_far:
         return
     set_job_status(run, StatusEnum.DONE)  # Update the job's status to DONE in the database.

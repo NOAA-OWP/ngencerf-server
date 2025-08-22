@@ -220,6 +220,7 @@ NGEN_REPO_ROOT = os.path.join(REPO_ROOT, 'ngen')
 CAL_MGR_REPO_ROOT = os.path.join(REPO_ROOT, 'nwm-cal-mgr')
 NGEN_FORECAST_REPO_ROOT = os.path.join(REPO_ROOT, 'nwm-fcst-mgr')
 NGEN_FORCING_REPO_ROOT = os.path.join(REPO_ROOT, 'ngen-forcing')
+NWM_VERF_REPO_ROOT = os.path.join(REPO_ROOT, 'nwm-verf')
 
 # This must match the data location in the ngen/nwm-cal-mgr docker
 # Do not change this location.  You can put your data wherever you want, but you should then create a symbolic link to /ngencerf/data
@@ -239,6 +240,20 @@ NGEN_STATIC_DIR = os.path.join(NGEN_CAL_MOUNT_POINT, 'ngen-static-files')
 NGEN_CAL_WORK_DIR = os.path.join(NGEN_CAL_MOUNT_POINT, 'ngen-cal-work')
 NGEN_FORCING_WORK_DIR = os.path.join(NGEN_CAL_MOUNT_POINT, 'forecast_forcing_work')
 
+# Static file locations for verification
+VERF_STATIC_DIR = os.path.join(NGEN_STATIC_DIR, 'verif')
+VERF_CROSSWALK_NGEN_FILE = os.path.join(VERF_STATIC_DIR,'usgs_ngen_crosswalk_all_domains.parquet')
+VERF_CROSSWALK_NWM_FILE = os.path.join(VERF_STATIC_DIR,'usgs_nwm30_crosswalk_all_domains.parquet')
+VERF_FORECAST_CONFIG_FILE = os.path.join(VERF_STATIC_DIR,'nwm_forecast_configuration.yaml')
+VERF_GAGE_HYDROFABRIC_FILE = os.path.join(VERF_STATIC_DIR,'gage_hydrofabric_all_domains.parquet')
+VERF_LOCATION_LIST_FILE = os.path.join(VERF_STATIC_DIR,'usgs_gages_link_CONUS_calib100.csv')
+VERF_NGENCERF_CONFIG_FILE = os.path.join(VERF_STATIC_DIR,'ngencerf_verification_config.yaml')
+
+# Verification settings
+# 'nwm' is old method - not related to ngenCerf forecasts, downloads external forecast data
+# 'ngen' is new method - related to ngenCerf forecasts, dynamically uses data from forecast/calibration jobs
+VERF_MODES_SUPPORTED = ['nwm','ngen']
+
 # -----------------------------
 # Forcing environments
 # -----------------------------
@@ -249,6 +264,9 @@ FORCING_ENGINE_ENV = 'ngen_forcings_engine_bmi'
 # Directory where all the output runs are stored
 NGEN_CAL_RUN_DIR = os.path.join(NGEN_CAL_WORK_DIR, 'run_calib')
 
+# Directory where verification runs are stored
+NWM_VERF_RUN_DIR = os.path.join(NGEN_CAL_WORK_DIR, 'run_verif')
+
 # Directory containing the nwm-cal-mgr virtual environment
 # This is used only if we are running with NGEN_ENVIRONMENT=LOCAL and not in a separate container
 NGEN_CAL_VENV = os.path.join(NGEN_CAL_WORK_DIR, 'venv.cal')
@@ -258,13 +276,15 @@ NGEN_CAL_VENV = os.path.join(NGEN_CAL_WORK_DIR, 'venv.cal')
 CAL_MGR_DOCKER_CMD = f'docker run --network host -v {NGEN_CAL_MOUNT_POINT}:{NGEN_CAL_MOUNT_POINT} nwm-cal-mgr'
 NGEN_FORCING_DOCKER_CMD = f'docker run --entrypoint /ngen-app/bin/run-ngen-forcing.sh -v {NGEN_CAL_MOUNT_POINT}:{NGEN_CAL_MOUNT_POINT} ngen-bmi-forcing'
 NGEN_FORECAST_DOCKER_CMD = f'docker run -v {NGEN_CAL_MOUNT_POINT}:{NGEN_CAL_MOUNT_POINT} nwm-fcst-mgr'
+NWM_VERF_DOCKER_CMD = f'docker run --network host -v {NGEN_CAL_MOUNT_POINT}:{NGEN_CAL_MOUNT_POINT} nwm-verf'
 
-NGEN_CONTAINERS = ['ngen', 'nwm-cal-mgr', 'ngen-bmi-forcing', 'nwm-fcst-mgr']
+NGEN_CONTAINERS = ['ngen', 'nwm-cal-mgr', 'ngen-bmi-forcing', 'nwm-fcst-mgr', 'ngen-verf']
 
 # Used when running in NGEN_ENVIRONMENT=LOCAL
 CAL_MGR_SCRIPT = os.path.join(CAL_MGR_REPO_ROOT, 'docker', 'run-ngen-cal.sh')
 NGEN_FORECAST_SCRIPT = os.path.join(NGEN_FORECAST_REPO_ROOT, 'docker', 'run-ngen-fcst.sh')
 FORECAST_FORCING_SCRIPT = os.path.join(NGEN_FORCING_REPO_ROOT, 'docker', 'run-ngen-forcing.sh')
+VERIFICATION_SCRIPT = os.path.join(NWM_VERF_REPO_ROOT, 'docker', 'run-ngen-verf.sh')
 
 # -----------------------------
 # Job Simulation Flags for use with NGEN_ENVIRONMENT=LOCAL or DOCKER
@@ -274,6 +294,7 @@ SIMULATE_FLAGS = {
     JobType.VALIDATION: False,
     JobType.FORECAST: False,
     JobType.FORECAST_FORCING_DOWNLOAD: False,
+    JobType.VERIFICATION: False,
 }
 
 RUNTIME_INFO = {
@@ -281,8 +302,8 @@ RUNTIME_INFO = {
     ScriptEnum.VALIDATION: (CAL_MGR_DOCKER_CMD, CAL_MGR_SCRIPT),
     ScriptEnum.VALIDATION_ITERATION: (CAL_MGR_DOCKER_CMD, CAL_MGR_SCRIPT),
     ScriptEnum.FORECAST: (NGEN_FORECAST_DOCKER_CMD, NGEN_FORECAST_SCRIPT),
-    ScriptEnum.FORECAST_FORCING: (NGEN_FORCING_DOCKER_CMD, FORECAST_FORCING_SCRIPT)
-    # TODO Add for Verification
+    ScriptEnum.FORECAST_FORCING: (NGEN_FORCING_DOCKER_CMD, FORECAST_FORCING_SCRIPT),
+    ScriptEnum.VERIFICATION: (NWM_VERF_DOCKER_CMD, VERIFICATION_SCRIPT)
 }
 
 NGEN_ENVIRONMENT_STR = os.getenv('NGEN_ENVIRONMENT', NgenEnvironmentEnum.LOCAL.name)
@@ -303,6 +324,7 @@ SLURM_SUBMIT_CALIBRATION_JOB_ENDPOINT = 'submit-calibration-job'
 SLURM_SUBMIT_VALIDATION_JOB_ENDPOINT = 'submit-validation-job'
 SLURM_SUBMIT_FORECAST_JOB_ENDPOINT = 'submit-forecast-job'
 SLURM_SUBMIT_FORECAST_FORCING_DOWNLOAD_JOB_ENDPOINT = 'submit-forecast-forcing-download-job'
+SLURM_SUBMIT_VERIFICATION_JOB_ENDPOINT = 'submit-verification-job'
 SLURM_JOB_STATUS_ENDPOINT = 'job-status'
 SLURM_CANCEL_JOB_ENDPOINT = 'cancel-job'
 

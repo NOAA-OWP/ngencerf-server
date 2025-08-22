@@ -6,7 +6,8 @@ import calibration.views.calibration_landing_views
 import calibration.views.get_jobs_views
 from calibration.views import calibration_formulation_views, calibration_tuning_views, calibration_gage_views, \
     calibration_optimization_views, calibration_run_views, calibration_plot_views, calibration_import_export_views, calibration_landing_views, \
-    calibration_evaluation_views, calibration_forecast_views, calibration_swe_views, calibration_regionalization_views
+    calibration_evaluation_views, calibration_forecast_views, calibration_swe_views, calibration_regionalization_views, \
+	calibration_verification_views
 
 urlpatterns = [
     ##################################
@@ -106,6 +107,19 @@ urlpatterns = [
     path('calibration/clone_and_run_forecast/', calibration_forecast_views.clone_and_run_forecast_job, name="cloneAndRunForecastJob"),
     path('calibration/delete_forecast_job/', calibration_forecast_views.delete_forecast_job, name="deleteForecastJob"),
 
+    ##################################
+    # Verification
+    ##################################
+    path('calibration/load_verification_job/', calibration_verification_views.load_verification_job, name="loadVerificationJob"),
+    path('calibration/get_verification_jobs/', calibration.views.get_jobs_views.get_verification_jobs, name="getVerificationJobs"),
+    path('calibration/create_verification_job/', calibration_verification_views.create_verification_job, name="createVerificationJob"),
+    path('calibration/upload_verification_yaml_file/', calibration_verification_views.upload_verification_yaml_file, name="uploadVerificationYamlFile"),
+    #path('calibration/save_verification_setup/', calibration_verification_views.save_verification_setup, name="saveVerificationSetup"),
+    path('calibration/get_verification_status/', calibration_verification_views.get_verification_status, name="getVerificationStatus"),
+    path('calibration/run_verification/', calibration_verification_views.run_verification, name="runVerification"),
+    path('calibration/get_verification_plot/', calibration_verification_views.get_verification_plot, name="getVerificationPlot"),
+    path('calibration/delete_verification_job/', calibration_verification_views.delete_verification_job, name="deleteVerificationJob"),
+    
     ##################################
     # SWE
     ##################################

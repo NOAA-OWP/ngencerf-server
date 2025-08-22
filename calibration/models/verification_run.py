@@ -1,0 +1,23 @@
+from django.db import models
+from django.contrib.auth import get_user_model
+
+from calibration.models.base_run import BaseRun
+
+
+class VerificationRun(BaseRun):
+    owner = models.ForeignKey(get_user_model(), null=False, on_delete=models.RESTRICT, db_index=True)
+    verification_yaml_file_path = models.TextField(null=True)
+    job_data_dir = models.CharField(max_length=255, null=False)
+    # mpi_nprocs = models.IntegerField(null=True)
+    is_archived = models.BooleanField(default=False)
+    # is_locked = models.BooleanField(default=False)
+    
+    class Meta:
+        db_table = 'verification_run'
+
+    def __str__(self):
+        return (
+            f"VerificationRun {self.id}, "
+            f"owner: {self.owner.username}, "  # type: ignore[attr-defined]  # Suppress PyCharm warning for unresolved attribute
+            f"status.name: {self.status.name}"
+        )

@@ -8,7 +8,7 @@ from django.contrib.auth import get_user_model
 from rest_framework import status
 
 from calibration.enums import StatusEnum, SlurmStatusEnum
-from calibration.models import CalibrationRun, ValidationRun, ForecastRun
+from calibration.models import CalibrationRun, ValidationRun, ForecastRun, VerificationRun
 from calibration.models.base_run import BaseRun
 from calibration.models.forecast_forcing_download_run import ForecastForcingDownloadRun
 from calibration.run_util.run_common import set_job_status, run_generic_job_end_callback, finalize_calibration_after_callback, \
@@ -31,7 +31,7 @@ def submit_job_to_slurm(run: BaseRun, owner: User, arguments: dict[str, str], st
     constructs the payload with input arguments and authentication token,
     and submits the job using an HTTP POST request.
 
-    :param run: The CalibrationRun, ValidationRun, ForecastRun, or ForecastForcingDownloadRun object.
+    :param run: The CalibrationRun, ValidationRun, ForecastRun, ForecastForcingDownloadRun, or VerificationRun object.
     :param owner: The owner (user instance) of the job, used to generate the auth token.
     :param arguments: Dictionary containing command-line arguments for the job (e.g., 'input_file').
     :param stdout_file: The path to the file where job output will be written.
@@ -74,6 +74,14 @@ def submit_job_to_slurm(run: BaseRun, owner: User, arguments: dict[str, str], st
             'forcing_dir': (None, arguments['forcing_dir']),
             'input_file': (None, arguments['validation_best_input']),
             'forecast_dir': (None, arguments['forecast_dir']),
+            'stdout_file': (None, stdout_file),
+        }
+    elif isinstance(run, VerificationRun):
+        url_endpoint = settings.SLURM_SUBMIT_VERIFICATION_JOB_ENDPOINT
+        payload = {
+            'verification_job_id': (None, run.id),
+            'verification_dir': (None, arguments['verification_dir']),
+            'input_file': (None, arguments['verification_yaml_file_path']),
             'stdout_file': (None, stdout_file),
         }
     else:

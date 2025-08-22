@@ -5,7 +5,7 @@ from typing import Literal
 from django.conf import settings
 
 from calibration.enums import ValidationType
-from calibration.models import CalibrationRun, ForecastRun, ValidationRun, ForecastForcingDownloadRun
+from calibration.models import CalibrationRun, ValidationRun, ForecastRun, ForecastForcingDownloadRun, VerificationRun
 from cerfServer.settings import NGEN_ENVIRONMENT
 
 logger = logging.getLogger(__name__)
@@ -319,6 +319,14 @@ def get_forecast_temp_dir(forecast_run: ForecastRun) -> str:
     return temp_dir
 
 
+def get_verification_stdout_file(verification_job: VerificationRun) -> str:
+    return os.path.join(verification_job.job_data_dir, 'verification_stdout.log')
+
+
+def get_verification_performance_file(verification_job: ForecastRun) -> str:
+    return os.path.join(verification_job.job_data_dir, 'verification_performance.log')
+
+
 def get_validation_performance_file(run: CalibrationRun, worker_name: str, iteration_num: int) -> str:
     return os.path.join(get_output_validation_run_dir(run), f"ngen-cal_validation_{worker_name}_iter{iteration_num}_performance.log")
 
@@ -351,6 +359,10 @@ def get_forecast_download_git_info_file(forecast_forcing_download_run: ForecastF
 
 def get_forecast_git_info_file(forecast_run: ForecastRun) -> str:
     return os.path.join(get_forecast_dir(forecast_run), "git_info_forecast.json")
+
+
+def get_verification_git_info_file(verification_job: VerificationRun) -> str:
+    return os.path.join(verification_job.job_data_dir, "git_info_verification.json")
 
 
 def get_validation_metrics_valid_best_file(run: CalibrationRun) -> str:
