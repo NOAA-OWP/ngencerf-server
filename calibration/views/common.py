@@ -23,7 +23,8 @@ from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import AccessToken
 
 from calibration.enums import StatusEnum, ValidationType, JobGenesis, NgenLogging
-from calibration.models import CalibrationRun, ValidationRun, Status, ForecastCycle, ForecastRun, CustomUser
+from calibration.models import CalibrationRun, ValidationRun, Status, ForecastCycle, ForecastRun, \
+    VerificationRun, CustomUser
 from calibration.models import Iteration
 from calibration.models.base_run import BaseRun
 from calibration.models.forecast_forcing_download_run import ForecastForcingDownloadRun
@@ -172,6 +173,22 @@ def get_forecast_run(
     return get_run_instance(ForecastRun, forecast_run_id, user, run_status, 'calibration_run__owner', 'calibration_run__is_archived')
 
 
+def get_verification_job(
+        verification_job_id: int,
+        user: User | None,
+        run_status: list[StatusEnum] | None = None
+) -> tuple[ForecastRun | None, Response | None]:
+    """
+    Retrieve a VerificationRun by ID, optionally filtering by owner and status.
+
+    :param verification_job_id: The ID of the VerificationRun.
+    :param user: User requesting the VerificationRun; if None, no owner filtering.
+    :param run_status: Allowed statuses for the VerificationRun.
+    :return: Tuple of VerificationRun or None, and Response if error or None.
+    """
+    return get_run_instance(VerificationRun, verification_job_id, user, run_status, 'owner', 'is_archived')
+
+
 def join_with_or(items: list[str]) -> str:
     """
     Join strings into a comma-separated string, using 'or' before the last item.
@@ -317,6 +334,33 @@ def create_forecast_run_internal(
 
     return forecast_run
 
+
+def create_verification_job_internal(user: User, genesis: JobGenesis | None = None) -> VerificationRun:
+    """
+    Create a new VerificationRun for the given user.
+
+    :param user: Owner of the verification job.
+    :param genesis: Origin of the job (optional).
+    :return: New VerificationRun instance.
+    """
+    run = VerificationRun.objects.create(owner=user, status=StatusEnum.SAVED.db_instance)
+
+    # Just get the user part, before the @ sign
+    username = run.owner.username.split('@')[0]
+    run.job_data_dir = os.path.join(settings.NGEN_VERF_RUN_DIR, f"{run.id}_{username}")
+
+    # Clean up any existing directory if it already exists (should not happen in production)
+    if os.path.exists(run.job_data_dir):
+        # Append timestamp to existing directory name to avoid overwriting
+        new_name = f"{run.job_data_dir}_{datetime.now().isoformat()}"
+        os.rename(run.job_data_dir, new_name)
+    
+    # Create the directory
+    os.makedirs(run.job_data_dir, exist_ok=True)
+
+    # This is always true
+    run.save(update_fields=['job_data_dir'])
+    return run
 
 TOKEN_SLURM_SCOPE = 'slurm_callback'
 TOKEN_NGEN_SCOPE = 'ngen'
@@ -619,6 +663,8 @@ def get_job_description(run: BaseRun) -> str:
         return f"Forecast Job {run.id} for Calibration Job {run.calibration_run.id}, user: {run.calibration_run.owner.username}"
     elif isinstance(run, ForecastForcingDownloadRun):
         return f"Forecast Forcing Download Job {run.id} for Forecast Job {run.forecast_run.id} for Calibration Job {run.forecast_run.calibration_run.id}, user: {run.forecast_run.calibration_run.owner.username}"
+    elif isinstance(run, VerificationRun):
+        return f"Verification Job {run.id}, user: {run.owner.username}"
 
     raise ValueError(f"Unknown job type: {type(run).__name__}")
 

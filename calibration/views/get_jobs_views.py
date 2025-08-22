@@ -10,10 +10,11 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 
 from calibration.enums import GetValidationJobsScope, StatusEnum, ValidationType
-from calibration.models import CalibrationFormulation, CalibrationRun, CalibrationStopCriteria, ValidationRun, IterationParameter, ForecastRun
+from calibration.models import CalibrationFormulation, CalibrationRun, CalibrationStopCriteria, \
+    ValidationRun, IterationParameter, ForecastRun, VerificationRun
 from calibration.util.calibration_validators import EmptySerializer, GetCalibrationJobsForEvaluationResponseSerializer, ErrorResponseSerializer, \
     GetCalibrationJobsResponseSerializer, GetCalibrationJobsRequestSerializer, CalibrationRunSerializer, GetValidationJobsResponseSerializer, \
-    GetForecastJobsResponseSerializer
+    GetForecastJobsResponseSerializer, GetVerificationJobsResponseSerializer
 from calibration.views.calibration_evaluation_views import downloadable_statuses
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import handle_exceptions, validate_request, validate_response, truncate_large_fields, get_calibration_run, \
@@ -498,5 +499,58 @@ def get_forecast_jobs(request: Request) -> Response:
     logger.debug(
         f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - '
         f'{json.dumps(truncate_large_fields(response_validator.data, fields_to_truncate=["forecast_jobs"], max_length=10))}'
+    )
+    return Response(response_validator.data)
+
+
+@extend_schema(
+    request=EmptySerializer,
+    responses={
+        200: GetVerificationJobsResponseSerializer,
+        400: OpenApiResponse(
+            response=ErrorResponseSerializer,
+            description="Validation error or parsing error"
+        ),
+        500: OpenApiResponse(
+            response=ErrorResponseSerializer,
+            description="Internal server error"
+        )
+    },
+    description="Get verification jobs"
+)
+@api_view(['POST', 'GET'])
+@handle_exceptions
+def get_verification_jobs(request: Request) -> Response:
+    """
+    Retrieves all verification jobs for a user
+
+    :param request: The HTTP request object containing calibration run data.
+    :return: JSON response with validation jobs or error information.
+    """
+    data = request.data if request.method == 'POST' else request.query_params.dict()
+    logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
+
+    validator, error_return = validate_request(EmptySerializer, data)
+    if error_return:
+        return error_return
+
+    verification_jobs = list(VerificationRun.objects
+                         .filter(owner=request.user)
+                         .values('id', 'created_at', 'submit_date', 'status__name', 
+                                 'verification_yaml_file_path', 'job_data_dir'))
+    for v in verification_jobs:
+        v['verification_job_id'] = v.pop('id')
+        v['status'] = v.pop('status__name')
+
+    response = {'verification_jobs': verification_jobs}
+    response_validator, error_response = validate_response(GetVerificationJobsResponseSerializer, 
+        response, fields_to_truncate=['verification_jobs'], max_length=10)
+    
+    if error_response:
+        return error_response
+
+    logger.debug(
+        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - '
+        f'{json.dumps(truncate_large_fields(response_validator.data, fields_to_truncate=["verification_jobs"], max_length=10))}'
     )
     return Response(response_validator.data)

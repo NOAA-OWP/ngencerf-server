@@ -2,11 +2,13 @@ import json
 import logging
 import os
 import re
+import yaml
 from collections import defaultdict
 from functools import lru_cache
 from typing import Any, cast
 
 import pandas as pd
+from django.db.models import Q
 from django.core.cache import cache
 from drf_spectacular.utils import extend_schema, OpenApiResponse
 from rest_framework.decorators import api_view
@@ -20,7 +22,7 @@ from calibration.util.caching import get_filtered_plot_definitions
 from calibration.util.calibration_validators import EmptySerializer, GetPlotNamesResponseSerializer, \
     GetPlotNamesForComparisonResponseSerializer, ErrorResponseSerializer, GetPlotRequestSerializer, \
     GetPlotResponseSerializer, GetPlotsForComparisonRequestSerializer, GetPlotsForComparisonResponseSerializer, \
-    CalibrationOrValidationOrForecastRunSerializer
+    CalibrationOrValidationOrForecastOrVerificationRunSerializer
 from calibration.util.ngen_locations import get_output_calibration_run_dir, get_output_validation_plot_dir, get_output_iteration_file, \
     get_output_last_iteration_file, get_output_best_iteration_file, get_observational_file_for_job, get_cost_hist_file, \
     NWM_RETROSPECTIVE_DIR, get_output_valid_control_file, get_output_valid_best_file, get_output_validation_iteration_plot_dir, \
@@ -29,14 +31,15 @@ from calibration.views.calibration_evaluation_views import get_iterations_for_ca
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import get_calibration_run, handle_exceptions, validate_response, validate_request, CerfException, \
     ResponseError, truncate_large_fields, get_validation_run, get_job_description, \
-    get_forecast_run, replace_nan_and_inf_with_none, png_to_base64_url, process_worker_dirs, get_user_email, get_elapsed_str
+    get_forecast_run, get_verification_job, replace_nan_and_inf_with_none, png_to_base64_url, \
+    process_worker_dirs, get_user_email, get_elapsed_str
 from calibration.views.get_jobs_views import get_validation_jobs_internal
 
 logger = logging.getLogger(__name__)
 
 
 @extend_schema(
-    request=CalibrationOrValidationOrForecastRunSerializer,
+    request=CalibrationOrValidationOrForecastOrVerificationRunSerializer,
     responses={
         200: GetPlotNamesResponseSerializer,
         400: OpenApiResponse(
@@ -54,21 +57,22 @@ logger = logging.getLogger(__name__)
 @handle_exceptions
 def get_plot_names(request: Request) -> Response:
     """
-    Retrieves the list of plot names and descriptions for a calibration run, filtered by applicable optimizations.
+    Retrieves the list of plot names and descriptions for a run, filtered by applicable optimizations.
 
     :param request: The request containing either POST data or query parameters.
-    :return: A JSON response with the calibration run ID, list of plot names and descriptions, and run status.
+    :return: A JSON response with the run ID, list of plot names and descriptions, and run status.
     """
     data = request.data if request.method == 'POST' else request.query_params.dict()
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
 
-    validator, error_return = validate_request(CalibrationOrValidationOrForecastRunSerializer, data)
+    validator, error_return = validate_request(CalibrationOrValidationOrForecastOrVerificationRunSerializer, data)
     if error_return:
         return error_return
 
     calibration_run_id = validator.get('calibration_run_id')
     validation_run_id = validator.get('validation_run_id')
     forecast_run_id = validator.get('forecast_run_id')
+    verification_job_id = validator.get('verification_job_id')
 
     # Determine job type and retrieve the appropriate run instance
     if calibration_run_id:
@@ -79,32 +83,58 @@ def get_plot_names(request: Request) -> Response:
         run_func = get_validation_run
         run_id = validation_run_id
         run_type = JobType.VALIDATION.value.capitalize()
-    else:
+    elif forecast_run_id:
         run_func = get_forecast_run
         run_id = forecast_run_id
         run_type = JobType.FORECAST.value.capitalize()
-    run, error_return = run_func(run_id, request.user, run_status=[StatusEnum.RUNNING, StatusEnum.DONE, StatusEnum.CANCELLED, StatusEnum.FAILED, StatusEnum.SERVER_ERROR])
+    elif verification_job_id:
+        run_func = get_verification_job
+        run_id = verification_job_id
+        run_type = JobType.VERIFICATION.value.capitalize()
+    else:
+        message = f"Invalid job type sent to {get_caller_name()}"
+        logger.exception(message)
+        return ResponseError(message, response_type='error')
+    run, error_return = run_func(run_id, request.user, run_status=[StatusEnum.RUNNING, StatusEnum.DONE])
     if error_return:
         return error_return
-
-    # Get filtered plot definitions for the run
-    filtered_plot_definitions = get_filtered_plot_definitions(run)
 
     fields = ['name', 'display_name', 'description', 'timeseries_available']
     plot_names = []
 
-    for plot in filtered_plot_definitions:
+    if verification_job_id:
+        # For now, get verification plots directly from the file system
         try:
-            plot_file_path = plot_exists(run, plot)
-            if plot_file_path is not None:
-                plot_names.append({k: plot[k] for k in fields})
-            else:
-                logger.warning(f"Plot file does not exist for '{plot.get('name')}' for {get_job_description(run)}")
+            with open(run.verification_yaml_file_path, 'r') as file:
+                yaml_config_data = yaml.safe_load(file)
+                if 'general' in yaml_config_data and 'nwm_configuration' in yaml_config_data['general']:
+                    verification_plot_location = os.path.join(run.job_data_dir, 'plots', yaml_config_data['general']['nwm_configuration'])
+                    for root, dirs, files in os.walk(verification_plot_location):
+                        if files:
+                            for file_name in files:
+                                plot_names.append({
+                                    'name': os.path.relpath(os.path.join(root, file_name),run.job_data_dir),
+                                    'display_name': file_name,
+                                    'description': f'Placholder description of {file_name}',
+                                    'timeseries_available': False
+                                })
         except Exception as e:
-            logger.warning(f"Skipping plot '{plot.get('name')}' for {get_job_description(run)} due to error: {e}")
+            logger.warning(f"Unable to get plots for {get_job_description(run)} due to error: {e}")
+    else:
+        # Get filtered plot definitions for the run
+        filtered_plot_definitions = get_filtered_plot_definitions(run)
+        for plot in filtered_plot_definitions:
+            try:
+                plot_file_path = plot_exists(run, plot)
+                if plot_file_path is not None:
+                    plot_names.append({k: plot[k] for k in fields})
+                else:
+                    logger.warning(f"Plot file does not exist for '{plot.get('name')}' for {get_job_description(run)}")
+            except Exception as e:
+                logger.warning(f"Skipping plot '{plot.get('name')}' for {get_job_description(run)} due to error: {e}")
 
     response = {
-        f"{run_type.lower()}_run_id": run.id,
+        f"{run_type.lower()}_{'job' if verification_job_id else 'run'}_id": run.id,
         'plot_names': plot_names,
         'status': run.status.name
     }
@@ -244,10 +274,14 @@ def get_plot(request: Request) -> Response:
         run_func = get_validation_run
         run_id = validation_run_id
         run_type = JobType.VALIDATION.value.capitalize()
-    else:
+    elif forecast_run_id:
         run_func = get_forecast_run
         run_id = forecast_run_id
         run_type = JobType.FORECAST.value.capitalize()
+    else:
+        message = f"Invalid job type sent to {get_caller_name()}"
+        logger.exception(message)
+        return ResponseError(message, response_type='error')
 
     run, error_return = run_func(run_id, request.user, run_status=[StatusEnum.RUNNING, StatusEnum.DONE, StatusEnum.CANCELLED, StatusEnum.FAILED, StatusEnum.SERVER_ERROR])
     if error_return:
@@ -302,9 +336,10 @@ def get_plot(request: Request) -> Response:
         }
 
     response = {
-        'calibration_run_id': calibration_run.id,
         'plot_name': plot_name,
     }
+    if calibration_run:
+        response['calibration_run_id'] = calibration_run.id
 
     # Include plot_url based on force_include_plot or whether it was just calculated
     if force_include_plot or plot_url_calculated:
