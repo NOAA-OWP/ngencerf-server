@@ -639,16 +639,6 @@ class LoadGageResponseSerializer(BaseSerializer):
     domain_values = DomainResponseSerializer(many=True)
 
 
-class UpdateGageStatusRequestSerializer(BaseSerializer):
-    gage_id = serializers.CharField(required=True)
-    is_active = serializers.BooleanField(required=False)
-
-
-class UpdateGageStatusResponseSerializer(GenericMessageResponseSerializer):
-    gage_id = serializers.CharField(required=True)
-    is_active = serializers.BooleanField(required=True)
-
-
 class CreateCalibrationRunResponseSerializer(GenericMessageResponseSerializer):
     calibration_run_id = serializers.IntegerField(required=True)
     job_data_dir = serializers.CharField(required=True)
@@ -1101,11 +1091,6 @@ class VerificationJobsResponseSerializer(BaseSerializer):
     yaml_config_data = serializers.JSONField(required=False)
     yaml_config_error_message = serializers.CharField(required=False,allow_null=True)
     job_data_dir = serializers.CharField(required=True)
-<<<<<<< HEAD
-=======
-    is_archived = serializers.BooleanField(default=False)
-    is_locked = serializers.BooleanField(default=False)
->>>>>>> a9d1d5b (Incorporate all verification updates into new branch)
 
 
 class GetVerificationJobsResponseSerializer(BaseSerializer):
@@ -1198,7 +1183,8 @@ class ExportResponseSerializer(BaseSerializer):
     metadata = serializers.JSONField(required=False)
     run_after_import = serializers.BooleanField(default=False)
     gage_id = serializers.CharField(required=True, allow_null=True)
-    forcing_source = serializers.CharField(required=True, allow_null=True, validators=[enum_validator(ForcingSourceEnum)])
+    forcing_source_requested = serializers.CharField(required=True, allow_null=True, validators=[enum_validator(ForcingSourceEnum)])
+    forcing_source_actual = serializers.CharField(required=True, allow_null=True, validators=[enum_validator(ForcingSourceEnum)])
     forcing_user_uploaded_dir_path = serializers.CharField(required=False, allow_blank=False, allow_null=True)
     observational_source = serializers.CharField(required=True, allow_null=True, validators=[enum_validator(ObservationalSourceEnum)])
     observational_user_uploaded_file_path = serializers.CharField(required=False, allow_blank=False, allow_null=True)
