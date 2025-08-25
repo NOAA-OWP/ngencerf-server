@@ -177,7 +177,7 @@ def get_verification_job(
         verification_job_id: int,
         user: User | None,
         run_status: list[StatusEnum] | None = None
-) -> tuple[ForecastRun | None, Response | None]:
+) -> tuple[VerificationRun | None, Response | None]:
     """
     Retrieve a VerificationRun by ID, optionally filtering by owner and status.
 

@@ -460,8 +460,6 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
             parallel['nprocs'] = nprocs
             run.mpi_nprocs = nprocs
 
-    # If not errors, then leave the status alone, either READY or SUBMITTED
-
     if run.status in [StatusEnum.SAVED.db_instance, StatusEnum.READY.db_instance]:
         if run.status == StatusEnum.SAVED.db_instance and not error_object.has_errors() and not error_object.has_warnings():
             run.status = StatusEnum.READY.db_instance

@@ -323,7 +323,7 @@ def get_verification_stdout_file(verification_job: VerificationRun) -> str:
     return os.path.join(verification_job.job_data_dir, 'verification_stdout.log')
 
 
-def get_verification_performance_file(verification_job: ForecastRun) -> str:
+def get_verification_performance_file(verification_job: VerificationRun) -> str:
     return os.path.join(verification_job.job_data_dir, 'verification_performance.log')
 
 

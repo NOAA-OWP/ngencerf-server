@@ -655,7 +655,7 @@ def finalize_verification_after_callback(run: VerificationRun, failed_so_far: bo
     """
     Finalizes a verification job after it has completed.
 
-    :param run: The VerificationRun object representing the forecast job.
+    :param run: The VerificationRun object representing the verification job.
     - Processes the output of the verification job.
     - Marks the verification job as DONE in the database, indicating successful completion.
     :param failed_so_far: Indicates whether the job has failed up to this point.

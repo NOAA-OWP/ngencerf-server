@@ -1101,8 +1101,6 @@ class VerificationJobsResponseSerializer(BaseSerializer):
     yaml_config_data = serializers.JSONField(required=False)
     yaml_config_error_message = serializers.CharField(required=False,allow_null=True)
     job_data_dir = serializers.CharField(required=True)
-    is_archived = serializers.BooleanField(default=False)
-    is_locked = serializers.BooleanField(default=False)
 
 
 class GetVerificationJobsResponseSerializer(BaseSerializer):

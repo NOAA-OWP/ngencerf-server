@@ -155,9 +155,9 @@ run_forecast_forcing_download_job_callback_local = functools.partial(
     run_generic_job_end_callback, check_if_failed=check_local_for_failure, finalize_func=finalize_forecast_forcing_download_after_callback
 )
 
-# Handles the completion of a forecast job in the local environment.
+# Handles the completion of a verification job in the local environment.
 # - Uses `check_local_status` to validate the job's exit code.
-# - Executes `finalize_forecast` to finalize the forecast job and mark it as DONE.
+# - Executes `finalize_verification` to finalize the verification job and mark it as DONE.
 run_verification_job_callback_local = functools.partial(
     run_generic_job_end_callback, check_if_failed=check_local_for_failure, finalize_func=finalize_verification_after_callback
 )

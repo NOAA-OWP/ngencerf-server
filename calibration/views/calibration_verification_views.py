@@ -98,8 +98,7 @@ def load_verification_job(request: Request) -> Response:
         'verification_yaml_file_path': verification_job.verification_yaml_file_path,
         'yaml_config_data': yaml_config_data,
         'yaml_config_error_message': yaml_config_error_message,
-        'job_data_dir': verification_job.job_data_dir,
-        'is_archived': verification_job.is_archived
+        'job_data_dir': verification_job.job_data_dir
     }
 
     response_validator, error_response = validate_response(VerificationJobsResponseSerializer, response)
@@ -123,13 +122,13 @@ def load_verification_job(request: Request) -> Response:
             description="Internal server error"
         )
     },
-    description="Delete a forecast job"
+    description="Delete a verification job"
 )
 @api_view(['POST', 'GET'])
 @handle_exceptions
-def delete_forecast_job(request: Request) -> Response:
+def delete_verification_job(request: Request) -> Response:
     """
-    Delete a verification job. Performs a hard delete if the run status is SAVED or READY, and a soft delete otherwise.
+    Delete a verification job. Performs a hard delete on all statuses.
 
     :param request: The HTTP request object.
     :return: A Response object with the deletion confirmation.
@@ -266,8 +265,6 @@ def upload_verification_yaml_file(request: Request) -> Response:
     """
     data = request.data
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
-    user_agent = request.META.get('HTTP_USER_AGENT', '')
-    cli = user_agent.startswith('curl')
 
     validator, error_return = validate_request(UploadVerificationYamlFileRequestSerializer, data, context={'request': request})
     if error_return:
@@ -305,15 +302,14 @@ def upload_verification_yaml_file(request: Request) -> Response:
             yaml_config_data = yaml.safe_load(file)
 
             # Add hard-coded file paths to YAML
-            verif_static_dir = os.path.join(settings.NGEN_STATIC_DIR, 'verif')
             yaml_config_data['file_paths'] = {
                 'data_dir_root': verif_data_dir_root,
-                'location_list_file': os.path.join(verif_static_dir,'usgs_gages_link_CONUS_calib100.csv'),
+                'location_list_file': settings.VERF_LOCATION_LIST_FILE,
                 'crosswalk_file': {
-                    'nwm30': os.path.join(verif_static_dir,'usgs_nwm30_crosswalk_all_domains.parquet')
+                    'nwm30': settings.VERF_CROSSWALK_FILE
                 },
-                'gage_meta_file': os.path.join(verif_static_dir,'gages_metadata_all_domains.csv'),
-                'geometry_file': os.path.join(verif_static_dir,'usgs_point_geometry_all_domains.parquet')
+                'gage_meta_file': settings.VERF_GAGE_META_FILE,
+                'geometry_file': settings.VERF_GEOMETRY_FILE
             }
 
             # Rename user-uploaded YAML file and then save the updated YAML in the original location
