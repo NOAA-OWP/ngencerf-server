@@ -84,10 +84,10 @@ class Command(BaseCommand):
         if self.DELETE_FLAG:
             Module.objects.all().delete()
 
-        values = [{"name": "Topoflow",
-                   "description": "description",
-                   "groups": ["Glacier"],
-                   "is_active": False},
+        values = [{"name": "Topoflow-Glacier",
+                   "description": "Topoflow-Glacier is the glacier module from Topoflow which calculates runoff based on snow/ice melt",
+                   "groups": ["Rainfall Runoff"],
+                   },
                   {"name": "Noah-OWP-Modular",
                    "description": "An extended, refactored version of the Noah-MP land surface model",
                    "groups": ["Snowmelt", "Evapotranspiration"]},
