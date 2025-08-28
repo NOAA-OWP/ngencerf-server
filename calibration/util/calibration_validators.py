@@ -1126,7 +1126,8 @@ class SaveVerificationSetupRequestSerializer(BaseSerializer):
     verification_yaml_file = serializers.CharField(required=True)
  
 
-class SaveVerificationSetupResponseSerializer(GenericResponseSerializer):
+class SaveVerificationSetupResponseSerializer(GenericMessageAndStatusResponseSerializer):
+    verification_job_id = serializers.IntegerField(required=True)
     verification_yaml_file = serializers.CharField(required=True)
 
 
@@ -1138,7 +1139,8 @@ class RunVerificationJob(VerificationJobSerializer):
     logging_config = LoggingConfigSerializer(required=False)
 
 
-class SubmitVerificationJobResponseSerializer(GenericResponseSerializer):
+class SubmitVerificationJobResponseSerializer(GenericMessageAndStatusResponseSerializer):
+    verification_job_id = serializers.IntegerField(required=True)
     submit_date = serializers.DateTimeField(required=True, allow_null=False)
 
 

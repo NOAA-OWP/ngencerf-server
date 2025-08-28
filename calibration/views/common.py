@@ -347,7 +347,7 @@ def create_verification_job_internal(user: User, genesis: JobGenesis | None = No
 
     # Just get the user part, before the @ sign
     username = run.owner.username.split('@')[0]
-    run.job_data_dir = os.path.join(settings.NGEN_VERF_RUN_DIR, f"{run.id}_{username}")
+    run.job_data_dir = os.path.join(settings.NWM_VERF_RUN_DIR, f"{run.id}_{username}")
 
     # Clean up any existing directory if it already exists (should not happen in production)
     if os.path.exists(run.job_data_dir):

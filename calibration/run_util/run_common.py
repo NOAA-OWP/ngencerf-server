@@ -345,7 +345,6 @@ def run_verification_job(verification_job: VerificationRun) -> None:
         verification_job,
         {
             'verification_yaml_file_path': verification_yaml_file_path,
-            'verification_dir': verification_dir
         },
         stdout_file,
         simulate=settings.SIMULATE_FLAGS.get(JobType.VERIFICATION, False)
