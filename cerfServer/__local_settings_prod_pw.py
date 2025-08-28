@@ -35,13 +35,16 @@ DATABASES = {
         'USER': os.getenv('CERF_SERVER_DATABASE_USER', 'postgres'),
         'PASSWORD': os.getenv('CERF_SERVER_DATABASE_PASSWORD', 'postgres'),
         'HOST': os.getenv('CERF_SERVER_DATABASE_HOST', 'localhost'),
+        # Blackhole ip for timeout testing
+        # 'HOST': '10.255.255.1',
         'PORT': 5432,
         'CONN_MAX_AGE': 10,
         'OPTIONS': {
             'connect_timeout': 10,
             'options': '-c statement_timeout=10000ms',
-            'sslmode': 'require',
-            # 'sslrootcert': '/etc/ssl/certs/rds-combined-ca-bundle.pem',
+            'sslmode': 'verify-full',
+            # See get_aws_cert.sh
+            'sslrootcert': '/ngencerf-app/aws_cert/global-bundle.pem',
         }
     }
 }

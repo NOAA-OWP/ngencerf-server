@@ -29,8 +29,8 @@ pandas~=2.3.1
 
 
 # There is also a dependancy on these 2 entries
-# git+https://gitlab.sh.nextgenwaterprediction.com/NGWPC/nwm-ngen/mswm.git@$development#egg=mswm
-# git+https://gitlab.sh.nextgenwaterprediction.com/NGWPC/nwm-ngen/ngen-forcing.git@development#egg=swe_processing&subdirectory=swe_processing
+# git+https://github.com/NGWPC/nwm-msw-mgr.git@development#egg=mswm"
+# git+https://github.com/NGWPC/ngen-forcing.git@development#egg=swe_processing&subdirectory=swe_processing"
 # These dependancies are installed separately in runCerf.sh in order to ensure that we get the latest code
 
 

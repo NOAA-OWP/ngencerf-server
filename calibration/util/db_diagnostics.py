@@ -55,7 +55,7 @@ def _should_log(alias: str, exc: Exception) -> bool:
 def _test_ssl_handshake(settings_dict: dict):
     """
     Attempt a one-off connection to verify SSL handshake and log cert details.
-    Compatible with psycopg 3.2.9.
+    Confirms if psycopg is using the provided sslrootcert or falling back.
     """
     opts = settings_dict.get("OPTIONS", {}) or {}
     sslmode = opts.get("sslmode", "require")
@@ -88,6 +88,18 @@ def _test_ssl_handshake(settings_dict: dict):
                     logger.error(f"  Server certificate notAfter:  {cert.get('notAfter')}")
                 except Exception as cert_exc:
                     logger.error(f"  Could not extract server cert details: {cert_exc}")
+
+                # NEW: Log which CA file OpenSSL actually used
+                try:
+                    ca_file_used = ssl_obj.context.get_ca_certs()
+                    logger.error(f"  Trusted CA certs loaded: {len(ca_file_used)}")
+                    if sslrootcert:
+                        logger.error(f"  Requested sslrootcert: {sslrootcert}")
+                        logger.error("  psycopg is expected to honor this file if valid.")
+                    else:
+                        logger.error("  No sslrootcert specified; psycopg relied on system defaults.")
+                except Exception as ca_exc:
+                    logger.error(f"  Could not confirm CA file used: {ca_exc}")
             else:
                 logger.error("  No SSL object available — server may not require SSL.")
     except Exception as ssl_exc:
@@ -144,9 +156,8 @@ def _log_ca_certificate_info(sslrootcert: str | None):
         else:
             # No sslrootcert → psycopg will rely on system defaults
             default_paths = ssl.get_default_verify_paths()
-            logger.error(f"[DB Diagnostics] Default verify paths: {default_paths}")
-            cafile = default_paths.cafile
-            capath = default_paths.capath
+            cafile = os.path.abspath(default_paths.cafile) if default_paths.cafile else None
+            capath = os.path.abspath(default_paths.capath) if default_paths.capath else None
 
             logger.error("[DB Diagnostics] No sslrootcert provided — using system defaults:")
             logger.error(
@@ -157,16 +168,11 @@ def _log_ca_certificate_info(sslrootcert: str | None):
                 f"  Default CA path: {capath!r} "
                 f"({'exists' if capath and os.path.isdir(capath) else 'missing'})"
             )
-
-            # Extra info: show where psycopg/postgres will look for certs
-            logger.error(
-                "[DB Diagnostics] psycopg will trust system CA bundle unless "
-                "sslmode=require and the server cert is self-signed."
-            )
-            logger.error(
-                "[DB Diagnostics] To confirm CA validation, set OPTIONS.sslrootcert "
-                "explicitly in DATABASES and compare against system defaults."
-            )
+            logger.error("[DB Diagnostics] psycopg will trust system CA bundle unless "
+                         "sslmode=require and the server cert is self-signed.")
+            logger.error("[DB Diagnostics] To confirm CA validation, "
+                         "set OPTIONS.sslrootcert explicitly in DATABASES "
+                         "and compare against system defaults.")
 
     except Exception as e:
         logger.error(f"[DB Diagnostics] Failed to log CA cert info: {e}")
