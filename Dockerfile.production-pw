@@ -13,7 +13,7 @@ RUN set -eux && \
         python3.11 python3.11-libs python3.11-devel \
         python3.11-pip \
         python3.11-setuptools \
-        singularity-ce \
+        singularity-ce-4.3.2-1.el8 \
         # The following needed for partitionGenerator
         make \
         cmake \
