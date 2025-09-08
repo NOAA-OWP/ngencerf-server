@@ -83,7 +83,7 @@ def get_plot_names(request: Request) -> Response:
         run_func = get_forecast_run
         run_id = forecast_run_id
         run_type = JobType.FORECAST.value.capitalize()
-    run, error_return = run_func(run_id, request.user, run_status=[StatusEnum.RUNNING, StatusEnum.DONE])
+    run, error_return = run_func(run_id, request.user, run_status=[StatusEnum.RUNNING, StatusEnum.DONE, StatusEnum.CANCELLED, StatusEnum.FAILED, StatusEnum.SERVER_ERROR])
     if error_return:
         return error_return
 
@@ -249,7 +249,7 @@ def get_plot(request: Request) -> Response:
         run_id = forecast_run_id
         run_type = JobType.FORECAST.value.capitalize()
 
-    run, error_return = run_func(run_id, request.user, run_status=[StatusEnum.RUNNING, StatusEnum.DONE])
+    run, error_return = run_func(run_id, request.user, run_status=[StatusEnum.RUNNING, StatusEnum.DONE, StatusEnum.CANCELLED, StatusEnum.FAILED, StatusEnum.SERVER_ERROR])
     if error_return:
         return error_return
 
