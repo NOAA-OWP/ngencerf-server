@@ -122,9 +122,6 @@ class CustomTimedRotatingFileHandler(BaseRotatingHandler):
         """
         Emit a log record. Checks for rollover, writes the record, and flushes.
         """
-        # TODO Remove this once things are working
-        print(f"[DEBUG] Logging: {record.getMessage()} at {datetime.now(timezone.utc)}")
-
         try:
             with self._emit_lock:
                 if self.shouldRollover(record):
