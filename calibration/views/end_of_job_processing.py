@@ -44,21 +44,22 @@ def read_validation_output(validation_run: ValidationRun, failed_so_far: bool) -
 
     logger.info(f"Processing output for {job_description}, status: {validation_run.status}")
 
-    with transaction.atomic():
-        # Convert validation_type to an instance of ValidationType
-        validation_type = ValidationType(validation_run.validation_type)
+    # --- Moved this read-only query OUTSIDE the transaction to reduce lock contention ---
+    validation_type = ValidationType(validation_run.validation_type)
+    iteration = validation_run.iteration if validation_type == ValidationType.VALID_ITERATION else None
 
+    with transaction.atomic():
         # Identify the matching worker based on validation type
         matching_worker = find_validation_worker_with_matching_id(
             validation_run,
-            worker_name=validation_run.iteration.worker_name if validation_type == ValidationType.VALID_ITERATION else None,
-            iteration_num=validation_run.iteration.iteration_num if validation_type == ValidationType.VALID_ITERATION else None
+            worker_name=iteration.worker_name if validation_type == ValidationType.VALID_ITERATION else None,
+            iteration_num=iteration.iteration_num if validation_type == ValidationType.VALID_ITERATION else None,
         )
         validation_run.validation_worker_name = matching_worker
         validation_run.save(update_fields=['validation_worker_name'])
 
         performance_metrics_file = (
-            get_validation_performance_file(validation_run.calibration_run, validation_run.worker_name, validation_run.iteration_num)
+            get_validation_performance_file(validation_run.calibration_run, iteration.worker_name, iteration.iteration_num)
             if validation_type == ValidationType.VALID_ITERATION
             else get_validation_special_performance_file(validation_run.calibration_run, validation_type)
         )

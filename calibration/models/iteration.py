@@ -19,8 +19,9 @@ class Iteration(BaseModel):
         ]
 
         indexes = [
-            models.Index(fields=['calibration_run'], name='iteration_calibration_run_idx'),
-            models.Index(fields=['worker_number'], name='iteration_worker_number_idx'),
+            models.Index(fields=['calibration_run'], name='idx_iteration_run'),
+            models.Index(fields=['worker_number'], name='idx_iteration_worker_number'),
+            models.Index(fields=['calibration_run', 'worker_name', '-iteration_num'], name="idx_iter_run_worker_num_desc")
         ]
 
     def __str__(self):
