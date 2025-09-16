@@ -1,9 +1,11 @@
 import json
 import logging
 import os
+import pandas as pd
 import shutil
 import yaml
 
+from datetime import datetime
 from django.conf import settings
 from django.core.cache import cache
 from django.core.files.storage import FileSystemStorage
@@ -21,18 +23,19 @@ from calibration.util.file_util import delete_all_files_in_directory
 from calibration.models import VerificationRun
 from calibration.run_util.run_common import submit_job
 from calibration.util.calibration_validators import ErrorResponseSerializer, EmptySerializer, \
-    VerificationJobsResponseSerializer, VerificationJobSerializer, CreateVerificationJobResponseSerializer, UploadVerificationYamlFileRequestSerializer, \
-    SaveVerificationSetupRequestSerializer, SaveVerificationSetupResponseSerializer, \
+    VerificationJobsResponseSerializer, VerificationJobSerializer, CreateVerificationJobRequestSerializer, \
+    CreateVerificationJobResponseSerializer, UploadVerificationYamlFileRequestSerializer, \
     UploadVerificationYamlFileRequestSerializer, UploadVerificationYamlFileResponseSerializer, \
     RunVerificationJob, SubmitVerificationJobResponseSerializer, \
     GetVerificationStatusRequestSerializer, GetVerificationStatusResponseSerializer, \
     GetVerificationPlotRequestSerializer, GetVerificationPlotResponseSerializer, \
     DeleteVerificationJobResponseSerializer
+from calibration.util.ngen_locations import get_forecast_output_file
 from calibration.views.calibration_run_views import get_performance_metrics, should_include_metrics
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import handle_exceptions, validate_response, validate_request, \
-    get_verification_job, ResponseError, get_user_email, get_elapsed_str, create_verification_job_internal, \
-    png_to_base64_url, truncate_large_fields
+    get_forecast_run, get_verification_job, ResponseError, get_user_email, get_elapsed_str, \
+    create_verification_job_internal, png_to_base64_url, truncate_large_fields
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +62,7 @@ logger = logging.getLogger(__name__)
 @handle_exceptions
 def load_verification_job(request: Request) -> Response:
     """
-    Load data for a verification run.
+    Load data for a verification job.
 
     :param request: HTTP request containing verification_job_id
     :return: JSON response with forecast cycle values.
@@ -76,9 +79,90 @@ def load_verification_job(request: Request) -> Response:
     verification_job, error_return = get_verification_job(verification_job_id, request.user, run_status=list(StatusEnum))
     if error_return:
         return error_return
+    
+    # Check settings to see if this run type is supported
+    if verification_job.forecast_run and 'ngen' not in settings.VERF_MODES_SUPPORTED:
+        return ResponseError('Verification Jobs from Ngen forecasts are not supported.')
+    elif not verification_job.forecast_run and 'nwm' not in settings.VERF_MODES_SUPPORTED:
+        return ResponseError('Verification Jobs requiring NWM forecast data downloads are not supported.')
 
     yaml_config_data = {}
     yaml_config_error_message = None
+
+    forecast_start_date = None
+
+    if verification_job.forecast_run:
+        if get_forecast_output_file(verification_job.forecast_run):
+            try:
+                forecast_data_frame = pd.read_csv(get_forecast_output_file(verification_job.forecast_run))
+                if forecast_data_frame['Time'].min() and forecast_data_frame['Time'].max():
+                  # Hack - get start date from CSV for now - later this will be in the database
+                  forecast_start_date = datetime.strptime(forecast_data_frame['Time'].min(), "%Y-%m-%d %H:%M:%S")
+            except Exception as e:
+                logger.debug(f'Error reading forecast output file: {e}')
+        
+        if not verification_job.verification_yaml_file_path or not os.path.exists(verification_job.verification_yaml_file_path):
+            # Auto-generate YAML file in out run-specific YAML directory
+            verif_output_dir = resolve_job_data_dir(verification_job)
+            fs = FileSystemStorage(location=os.path.join(verif_output_dir, 'Verification_YAML'))
+
+            # Create the directory
+            os.makedirs(fs.location, exist_ok=True)
+
+            # Delete the file if it's already there
+            delete_all_files_in_directory(fs.location)
+            verification_yaml_file_name = 'forecast_' + str(verification_job.forecast_run.id) + '_config.yaml'
+            verification_yaml_file_path = os.path.join(fs.location, verification_yaml_file_name)
+            logger.info(f"Auto-generating verification YAML file at {verification_yaml_file_path}")
+
+            verification_job.verification_yaml_file_path = verification_yaml_file_path
+
+            verification_job.status = StatusEnum.READY.db_instance
+
+            try:
+                with open(settings.VERF_NGENCERF_CONFIG_FILE, 'r') as file:
+                    yaml_config_data = yaml.safe_load(file)
+
+                    # Add hard-coded file paths to YAML
+                    yaml_config_data['file_paths'] = {
+                        'base_dir': verif_output_dir,
+                        'fcst_config_file': settings.VERF_FORECAST_CONFIG_FILE,
+                        'gage_hydrofabric_file': settings.VERF_GAGE_HYDROFABRIC_FILE,
+                        'output_dir': verif_output_dir,
+                    }
+                    
+                    # Override values in YAML with info from our forecast/calibration runs
+                    yaml_config_data['general']['location_set_name'] = 'usgs_' + verification_job.forecast_run.calibration_run.gage.gage_id
+                    yaml_config_data['general']['location_list'] = [verification_job.forecast_run.calibration_run.gage.gage_id]
+                    yaml_config_data['general']['location_type'] = 'usgs_gage'
+                    yaml_config_data['general']['nwm_configuration'] = verification_job.forecast_run.cycle.internal_name
+                    yaml_config_data['general']['dataset_name'] = [verification_job.forecast_run.calibration_run.user_formulation_name]
+                    yaml_config_data['general']['nwm_version'] = ['ngen']
+                    if forecast_start_date:
+                        yaml_config_data['general']['forecast_start_date'] = [forecast_start_date.strftime("%Y-%m-%d")]
+                        yaml_config_data['general']['forecast_end_date'] = [forecast_start_date.strftime("%Y-%m-%d")]
+                    yaml_config_data['nwm_forecast']['data_source'] = 'ngenCERF'
+                    yaml_config_data['file_paths']['crosswalk_file'] = {'ngen': settings.VERF_CROSSWALK_NGEN_FILE}
+                    yaml_config_data['file_paths']['fcst_data_file'] = {}
+                    yaml_config_data['file_paths']['fcst_data_file'][verification_job.forecast_run.calibration_run.user_formulation_name] = get_forecast_output_file(verification_job.forecast_run)
+
+                    from pprint import pprint
+                    print('YAML CONFIG DATA:')
+                    pprint(yaml_config_data)
+
+                    with open(verification_yaml_file_path, 'w') as updated_file:
+                        yaml.dump(yaml_config_data, updated_file, default_flow_style=False)
+                        logger.info(f"Writing new YAML file to {verification_yaml_file_path}")
+                
+                if forecast_start_date:
+                    # Set run status to Ready only if the file can be read (validation to be added later)
+                    verification_job.status = StatusEnum.READY.db_instance
+            except Exception as e:
+                logger.info(f"Error: {e}")
+
+        with transaction.atomic():
+            verification_job.save()
+
     if verification_job.verification_yaml_file_path:
         try:
             with open(verification_job.verification_yaml_file_path, 'r') as file:
@@ -101,6 +185,22 @@ def load_verification_job(request: Request) -> Response:
         'job_data_dir': verification_job.job_data_dir
     }
 
+    if verification_job.forecast_run:
+        forecast_run, error_return = get_forecast_run(verification_job.forecast_run.id, request.user, run_status=list(StatusEnum))
+        if error_return:
+            return error_return
+        response['forecast_run_id'] = forecast_run.id
+        response['forecast_run'] = {
+            'calibration_run_id': forecast_run.calibration_run.id,
+            'forecast_run_id': forecast_run.id,
+            'cycle': forecast_run.cycle.name,
+            'gage_id': forecast_run.calibration_run.gage_id,
+            'forecast_status': forecast_run.status.name,
+            'forcing_download_status': forecast_run.forcing_download_run.status.name,
+            'submit_date': forecast_run.forcing_download_run.submit_date,
+            'forecast_start_date': forecast_start_date
+        }
+
     response_validator, error_response = validate_response(VerificationJobsResponseSerializer, response)
     if error_response:
         return error_response
@@ -110,63 +210,7 @@ def load_verification_job(request: Request) -> Response:
 
 
 @extend_schema(
-    request=VerificationJobSerializer,
-    responses={
-        200: DeleteVerificationJobResponseSerializer,
-        400: OpenApiResponse(
-            response=ErrorResponseSerializer,
-            description="Validation error or parsing error"
-        ),
-        500: OpenApiResponse(
-            response=ErrorResponseSerializer,
-            description="Internal server error"
-        )
-    },
-    description="Delete a verification job"
-)
-@api_view(['POST', 'GET'])
-@handle_exceptions
-def delete_verification_job(request: Request) -> Response:
-    """
-    Delete a verification job. Performs a hard delete on all statuses.
-
-    :param request: The HTTP request object.
-    :return: A Response object with the deletion confirmation.
-    """
-    data = request.data if request.method == 'POST' else request.query_params.dict()
-    logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
-
-    validator, error_return = validate_request(VerificationJobSerializer, data)
-    if error_return:
-        return error_return
-
-    verification_job_id = validator.get('verification_job_id')
-
-    run, error_return = get_verification_job(verification_job_id, request.user, run_status=list(StatusEnum))
-    if error_return:
-        return error_return
-
-    if run.status in [StatusEnum.RUNNING.db_instance, StatusEnum.SUBMITTED.db_instance]:
-        return ResponseError(f'Verification Job {run.id} is running.  Cannot delete a running job')
-
-    run_id = run.id
-
-    with transaction.atomic():
-        # Delete the Verifciation Job
-        run.delete()
-
-    response = {'message': f'Verification Job {run.id} and associated records have been deleted', 'verification_job_id': run_id}
-
-    response_validator, error_response = validate_response(DeleteVerificationJobResponseSerializer, response)
-    if error_response:
-        return error_response
-    logger.debug(f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
-
-    return Response(response_validator.data)
-
-
-@extend_schema(
-    request=EmptySerializer,
+    request=CreateVerificationJobRequestSerializer,
     responses={
         201: CreateVerificationJobResponseSerializer,
         400: OpenApiResponse(
@@ -195,12 +239,19 @@ def create_verification_job(request: Request) -> Response:
     data = request.data if request.method == 'POST' else request.query_params.dict()
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} ')
 
-    validator, error_return = validate_request(EmptySerializer, data)
+    validator, error_return = validate_request(CreateVerificationJobRequestSerializer, data)
     if error_return:
         return error_return
 
+    forecast_run_id = validator.get('forecast_run_id')
+
+    if forecast_run_id and 'ngen' not in settings.VERF_MODES_SUPPORTED:
+        return ResponseError('Verification Jobs from Ngen forecasts are not supported.')
+    elif not forecast_run_id and 'nwm' not in settings.VERF_MODES_SUPPORTED:
+        return ResponseError('Verification Jobs requiring NWM forecast data downloads are not supported.')
+
     with transaction.atomic():
-        run = create_verification_job_internal(request.user)
+        run = create_verification_job_internal(request.user, forecast_run_id)
 
         response = {'message': f'Verification Job {run.id} created', 'verification_job_id': run.id, 'job_data_dir': resolve_job_data_dir(run)}
 
@@ -276,9 +327,9 @@ def upload_verification_yaml_file(request: Request) -> Response:
     if error_return:
         return error_return
 
-    # Save to the run-specific observational directory
-    verif_data_dir_root = resolve_job_data_dir(run)
-    fs = FileSystemStorage(location=os.path.join(verif_data_dir_root, 'Verification_YAML'))
+    # Save to the run-specific YAML directory
+    verif_output_dir = resolve_job_data_dir(run)
+    fs = FileSystemStorage(location=os.path.join(verif_output_dir, 'Verification_YAML'))
 
     # Create the directory
     os.makedirs(fs.location, exist_ok=True)
@@ -303,14 +354,27 @@ def upload_verification_yaml_file(request: Request) -> Response:
 
             # Add hard-coded file paths to YAML
             yaml_config_data['file_paths'] = {
-                'data_dir_root': verif_data_dir_root,
-                'location_list_file': settings.VERF_LOCATION_LIST_FILE,
-                'crosswalk_file': {
-                    'nwm30': settings.VERF_CROSSWALK_FILE
-                },
-                'gage_meta_file': settings.VERF_GAGE_META_FILE,
-                'geometry_file': settings.VERF_GEOMETRY_FILE
+                'base_dir': verif_output_dir,
+                'fcst_config_file': settings.VERF_FORECAST_CONFIG_FILE,
+                'gage_hydrofabric_file': settings.VERF_GAGE_HYDROFABRIC_FILE,
+                'output_dir': verif_output_dir,
             }
+
+            if 'ngen' in settings.VERF_MODES_SUPPORTED and run.forecast_run:
+                # Override values in YAML with info from our forecast/calibration runs
+                yaml_config_data['general']['location_set_name'] = 'usgs_' + run.forecast_run.calibration_run.gage.gage_id
+                yaml_config_data['general']['location_list'] = [run.forecast_run.calibration_run.gage.gage_id]
+                yaml_config_data['general']['location_type'] = 'usgs_gage'
+                yaml_config_data['general']['nwm_configuration'] = run.forecast_run.cycle.internal_name
+                yaml_config_data['general']['dataset_name'] = run.forecast_run.calibration_run.user_formulation_name
+                yaml_config_data['general']['nwm_version'] = 'ngen'
+                yaml_config_data['nwm_forecast']['data_source'] = 'ngenCERF'
+                yaml_config_data['file_paths']['crosswalk_file'] = {'ngen': settings.VERF_CROSSWALK_NGEN_FILE}
+                yaml_config_data['file_paths']['fcst_data_file'] = {}
+                yaml_config_data['file_paths']['fcst_data_file'][run.forecast_run.calibration_run.user_formulation_name] = get_forecast_output_file(run.forecast_run)
+            elif 'nwm' in settings.VERF_MODES_SUPPORTED:
+                yaml_config_data['file_paths']['crosswalk_file'] = {'nwm30': settings.VERF_CROSSWALK_NWM_FILE}
+                yaml_config_data['file_paths']['location_list_file'] = settings.VERF_LOCATION_LIST_FILE
 
             # Rename user-uploaded YAML file and then save the updated YAML in the original location
             temp_list = (verification_yaml_file.name).split('.')
@@ -457,6 +521,12 @@ def run_verification(request: Request) -> Response:
     run, error_return = get_verification_job(verification_job_id, request.user)
     if error_return:
         return error_return
+    
+    # Check settings to see if this run type is supported
+    if run.forecast_run and 'ngen' not in settings.VERF_MODES_SUPPORTED:
+        return ResponseError('Verification Jobs from Ngen forecasts are not supported.')
+    elif not run.forecast_run and 'nwm' not in settings.VERF_MODES_SUPPORTED:
+        return ResponseError('Verification Jobs requiring NWM forecast data downloads are not supported.')
 
     error_response = submit_job(run, logging_config=logging_config)
     if error_response:
@@ -514,6 +584,12 @@ def get_verification_status(request: Request) -> Response:
     verification_job, error_return = get_verification_job(verification_job_id, request.user, run_status=list(StatusEnum))
     if error_return:
         return error_return
+    
+    # Check settings to see if this run type is supported
+    if verification_job.forecast_run and 'ngen' not in settings.VERF_MODES_SUPPORTED:
+        return ResponseError('Verification Jobs from Ngen forecasts are not supported.')
+    elif not verification_job.forecast_run and 'nwm' not in settings.VERF_MODES_SUPPORTED:
+        return ResponseError('Verification Jobs requiring NWM forecast data downloads are not supported.')
     
     # Conditionally retrieve verification performance metrics
     verification_metrics = get_performance_metrics(verification_job.performance_metrics) if should_include_metrics(verification_job.status,include_performance_metrics) else None
@@ -596,6 +672,12 @@ def get_verification_plot(request: Request) -> Response:
     run, error_return = get_verification_job(verification_job_id, request.user, run_status=[StatusEnum.RUNNING, StatusEnum.DONE])
     if error_return:
         return error_return
+    
+    # Check settings to see if this run type is supported
+    if run.forecast_run and 'ngen' not in settings.VERF_MODES_SUPPORTED:
+        return ResponseError('Verification Jobs from Ngen forecasts are not supported.')
+    elif not run.forecast_run and 'nwm' not in settings.VERF_MODES_SUPPORTED:
+        return ResponseError('Verification Jobs requiring NWM forecast data downloads are not supported.')
 
     # Just retrieve the file for now
     plot_file_path = os.path.join(run.job_data_dir, plot_name)

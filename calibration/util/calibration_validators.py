@@ -1066,6 +1066,13 @@ class ForecastJobsResponseSerializer(BaseSerializer):
     forecast_status = serializers.CharField(required=True, validators=[enum_validator(StatusEnum)])
     forcing_download_status = serializers.CharField(required=True, validators=[enum_validator(StatusEnum)])
     submit_date = serializers.DateTimeField(required=True, allow_null=True)
+    forecast_start_date = serializers.DateTimeField(required=False, allow_null=True)
+    forecast_end_date = serializers.DateTimeField(required=False, allow_null=True)
+
+
+
+class GetForecastJobsRequestSerializer(BaseSerializer):
+    done_only = serializers.BooleanField(required=False, default=False)
 
 
 class GetForecastJobsResponseSerializer(BaseSerializer):
@@ -1081,6 +1088,8 @@ class VerificationJobSerializer(BaseSerializer):
 
 class VerificationJobsResponseSerializer(BaseSerializer):
     verification_job_id = serializers.IntegerField(required=True)
+    forecast_run = ForecastJobsResponseSerializer(required=False, allow_null=True)
+    forecast_run_id = serializers.IntegerField(required=False, allow_null=True)
     status = serializers.CharField(required=True, validators=[enum_validator(StatusEnum)])
     created_at = serializers.DateTimeField(required=True, allow_null=True)
     submit_date = serializers.DateTimeField(required=True, allow_null=True)
@@ -1095,6 +1104,10 @@ class VerificationJobsResponseSerializer(BaseSerializer):
 
 class GetVerificationJobsResponseSerializer(BaseSerializer):
     verification_jobs = serializers.ListSerializer(child=VerificationJobsResponseSerializer(), required=True, allow_empty=True)
+
+
+class CreateVerificationJobRequestSerializer(BaseSerializer):
+    forecast_run_id = serializers.IntegerField(required=False)
 
 
 class CreateVerificationJobResponseSerializer(GenericMessageResponseSerializer):

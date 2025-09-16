@@ -2,6 +2,7 @@ import json
 import logging
 from typing import Any
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db.models import Q
 from drf_spectacular.utils import extend_schema, OpenApiResponse
@@ -14,7 +15,7 @@ from calibration.models import CalibrationFormulation, CalibrationRun, Calibrati
     ValidationRun, IterationParameter, ForecastRun, VerificationRun
 from calibration.util.calibration_validators import EmptySerializer, GetCalibrationJobsForEvaluationResponseSerializer, ErrorResponseSerializer, \
     GetCalibrationJobsResponseSerializer, GetCalibrationJobsRequestSerializer, CalibrationRunSerializer, GetValidationJobsResponseSerializer, \
-    GetForecastJobsResponseSerializer, GetVerificationJobsResponseSerializer
+    GetForecastJobsRequestSerializer, GetForecastJobsResponseSerializer, GetVerificationJobsResponseSerializer
 from calibration.views.calibration_evaluation_views import downloadable_statuses
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import handle_exceptions, validate_request, validate_response, truncate_large_fields, get_calibration_run, \
@@ -449,7 +450,7 @@ def get_validation_jobs(request: Request) -> Response:
 
 
 @extend_schema(
-    request=EmptySerializer,
+    request=GetForecastJobsRequestSerializer,
     responses={
         200: GetForecastJobsResponseSerializer,
         400: OpenApiResponse(
@@ -475,14 +476,17 @@ def get_forecast_jobs(request: Request) -> Response:
     data = request.data if request.method == 'POST' else request.query_params.dict()
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
 
-    validator, error_return = validate_request(EmptySerializer, data)
+    validator, error_return = validate_request(GetForecastJobsRequestSerializer, data)
     if error_return:
         return error_return
+    
+    done_only = validator.get('done_only')
 
-    forecast_jobs = list(ForecastRun.objects
-                         .filter(calibration_run__owner=request.user)
-                         .values('id', 'calibration_run_id', 'cycle__name', 'submit_date', 'calibration_run__gage__gage_id', 'status__name',
-                                 'forcing_download_run__status__name'))
+    forecast_queryset = ForecastRun.objects.filter(calibration_run__owner=request.user).values('id', 'calibration_run_id', 'cycle__name', 'submit_date', 'calibration_run__gage__gage_id', 'status__name','forcing_download_run__status__name')
+    if done_only:
+        forecast_queryset = forecast_queryset.filter(status=StatusEnum.DONE.db_instance)
+
+    forecast_jobs = list(forecast_queryset)
     for f in forecast_jobs:
         f['forecast_run_id'] = f.pop('id')
         f['cycle'] = f.pop('cycle__name')
@@ -533,11 +537,17 @@ def get_verification_jobs(request: Request) -> Response:
     validator, error_return = validate_request(EmptySerializer, data)
     if error_return:
         return error_return
+    
+    verification_objects = VerificationRun.objects.filter(owner=request.user)
+    
+    # Filter based on settings
+    if 'ngen' not in settings.VERF_MODES_SUPPORTED:
+        verification_objects = verification_objects.filter(forecast_run_id=0)
+    elif 'nwm' not in settings.VERF_MODES_SUPPORTED:
+        verification_objects = verification_objects.filter(forecast_run_id__gt=0)
 
-    verification_jobs = list(VerificationRun.objects
-                         .filter(owner=request.user)
-                         .values('id', 'created_at', 'submit_date', 'status__name', 
-                                 'verification_yaml_file_path', 'job_data_dir'))
+    verification_jobs = list(verification_objects.values('id', 'created_at', 'submit_date', 'status__name', 'forecast_run_id', 'verification_yaml_file_path', 'job_data_dir'))
+    
     for v in verification_jobs:
         v['verification_job_id'] = v.pop('id')
         v['status'] = v.pop('status__name')

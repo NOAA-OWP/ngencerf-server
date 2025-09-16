@@ -335,7 +335,7 @@ def create_forecast_run_internal(
     return forecast_run
 
 
-def create_verification_job_internal(user: User, genesis: JobGenesis | None = None) -> VerificationRun:
+def create_verification_job_internal(user: User, forecast_run_id: int | None = None, genesis: JobGenesis | None = None) -> VerificationRun:
     """
     Create a new VerificationRun for the given user.
 
@@ -344,6 +344,12 @@ def create_verification_job_internal(user: User, genesis: JobGenesis | None = No
     :return: New VerificationRun instance.
     """
     run = VerificationRun.objects.create(owner=user, status=StatusEnum.SAVED.db_instance)
+
+    if forecast_run_id:
+        forecast_run, error_return = get_forecast_run(forecast_run_id, user, run_status=list(StatusEnum))
+        if error_return:
+            return error_return
+        run.forecast_run = forecast_run
 
     # Just get the user part, before the @ sign
     username = run.owner.username.split('@')[0]
@@ -359,7 +365,7 @@ def create_verification_job_internal(user: User, genesis: JobGenesis | None = No
     os.makedirs(run.job_data_dir, exist_ok=True)
 
     # This is always true
-    run.save(update_fields=['job_data_dir'])
+    run.save()
     return run
 
 TOKEN_SLURM_SCOPE = 'slurm_callback'
