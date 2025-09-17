@@ -561,7 +561,7 @@ def update_mpi_rules(request: Request) -> Response:
     },
     description="Report iteration of a running calibration"
 )
-# Called by ngen_cal
+# Called by cal-mgr
 @api_view(['POST'])
 @handle_exceptions
 def report_iteration(request):
@@ -569,8 +569,18 @@ def report_iteration(request):
     Reports an iteration for a running calibration job. This endpoint updates or creates an
     iteration record for a specific worker in the calibration job.
 
-    Splits heavy reads into a READ ONLY transaction to reduce contention,
-    then performs the write in a short atomic block.
+    Concurrency considerations:
+    - Each CalibrationRun has a `next_worker_number` counter that is incremented atomically
+      under `select_for_update()`. This guarantees that two new workers starting at the same
+      time are serialized and each receives a unique worker number.
+    - Once assigned, a worker number is reused for all iterations of that worker in the run.
+    - The (iteration_num, worker_name, calibration_run) uniqueness constraint ensures that
+      a worker cannot report the same iteration twice.
+
+    Transaction strategy:
+    - For new workers, the row lock on CalibrationRun ensures safe allocation of a worker number.
+    - For existing workers, we only look up their latest iteration to reuse the same worker number.
+    - The actual insert (via get_or_create) is inside the same atomic block to prevent duplicates.
 
     :param request: HTTP request containing iteration details.
     :return: JSON response indicating the success of the operation.

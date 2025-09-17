@@ -241,8 +241,8 @@ def get_log_names(request: Request) -> Response:
 
     # Include forecast logs if applicable
     # Commenting out for now since we have nowhere for the UI to display these
-    #if ForecastRun.objects.filter(calibration_run=calibration_run).exists():
-    #    log_names.append({LogCategory.FORECAST.value: ['ngen stdout', 'forecast stdout']})
+    # if ForecastRun.objects.filter(calibration_run=calibration_run).exists():
+    #     log_names.append({LogCategory.FORECAST.value: ['ngen stdout', 'forecast stdout']})
 
     response = {'log_names': log_names}
 

@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 
 _thread_ctx = threading.local()
 
+
 @receiver(pre_reconnect)
 def pre_reconnect_handler(_sender, _dbwrapper, **kwargs):
     _thread_ctx.start_time = time.perf_counter()
