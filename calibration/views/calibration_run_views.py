@@ -5,9 +5,9 @@ from datetime import datetime, timezone
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Max
 from django.forms import model_to_dict
-from drf_spectacular.utils import extend_schema, OpenApiResponse
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiExample
 from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.request import Request
@@ -15,7 +15,7 @@ from rest_framework.response import Response
 
 from calibration.enums import StatusEnum
 from calibration.enums_vanilla import JobType
-from calibration.models import Iteration, ValidationRun, ForecastRun, ForecastForcingDownloadRun
+from calibration.models import Iteration, ValidationRun, ForecastRun, ForecastForcingDownloadRun, CalibrationRun, Status
 from calibration.run_util.run_common import cancel_job_common, submit_job
 from calibration.run_util.run_ngen_cal_pw import SlurmStatusEnum, run_calibration_job_callback_pw, run_validation_job_callback_pw, \
     run_forecast_job_callback_pw, run_forecast_forcing_download_job_callback_pw
@@ -32,7 +32,7 @@ from calibration.views.calibration_swe_views import generate_swe_ts_data
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import ResponseError, get_calibration_run, handle_exceptions, validate_response, validate_request, \
     generate_custom_token, TOKEN_SLURM_SCOPE, get_validation_run, get_forecast_run, get_forecast_forcing_download_run, join_with_or, get_user_email, \
-    get_job_description, get_elapsed_str, readonly_transaction, truncate_large_fields
+    get_job_description, get_elapsed_str, readonly_transaction, truncate_large_fields, auth_scope_required
 from calibration.views.end_of_job_processing import read_calibration_output
 
 logger = logging.getLogger(__name__)
@@ -190,7 +190,8 @@ def get_status(request: Request) -> Response:
     if calibration_run.performance_metrics:
         response['elapsed_time'] = calibration_run.performance_metrics.elapsed_time
     else:
-        response['elapsed_time'] = calibration_run.run_end - calibration_run.run_start if calibration_run.run_end and calibration_run.run_start else None
+        response[
+            'elapsed_time'] = calibration_run.run_end - calibration_run.run_start if calibration_run.run_end and calibration_run.run_start else None
 
     # Conditionally add calibration run performance metrics to response if requested and status is DONE or FAIL
     if calibration_metrics:
@@ -568,6 +569,9 @@ def report_iteration(request):
     Reports an iteration for a running calibration job. This endpoint updates or creates an
     iteration record for a specific worker in the calibration job.
 
+    Splits heavy reads into a READ ONLY transaction to reduce contention,
+    then performs the write in a short atomic block.
+
     :param request: HTTP request containing iteration details.
     :return: JSON response indicating the success of the operation.
     """
@@ -584,7 +588,9 @@ def report_iteration(request):
     first_iteration_for_worker = validator.get('first_iteration_for_worker')
 
     logger.debug(
-        f'Report Iteration for calibration_run_id {calibration_run_id}, iteration number: {iteration_number}, worker: {worker_name}, first_iteration: {first_iteration_for_worker}')
+        f"Report Iteration for calibration_run_id {calibration_run_id}, iteration number: {iteration_number}, "
+        f"worker: {worker_name}, first_iteration: {first_iteration_for_worker}"
+    )
 
     run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=[StatusEnum.RUNNING])
     if error_return:
@@ -592,10 +598,12 @@ def report_iteration(request):
 
     with transaction.atomic():
         if first_iteration_for_worker:
-            # New worker
-            max_worker_number = Iteration.objects.filter(calibration_run=run).aggregate(Max('worker_number'))['worker_number__max']
-            worker_number = (max_worker_number or 0) + 1
-            logger.debug(f"Creating new worker: '{worker_name}' #{worker_number}")
+            # Atomically grab the next available worker number
+            run = CalibrationRun.objects.select_for_update().get(id=run.id)
+            worker_number = run.next_worker_number
+            run.next_worker_number += 1
+            run.save(update_fields=['next_worker_number'])
+            logger.debug(f"Assigned new worker: '{worker_name}' #{worker_number}")
         else:
             # Use get() to fetch the latest iteration for the given worker_name and run
             existing_iteration = Iteration.objects.filter(calibration_run=run, worker_name=worker_name).order_by('-iteration_num').first()
@@ -604,22 +612,31 @@ def report_iteration(request):
             else:
                 return ResponseError(f"Worker '{worker_name}' not found for calibration run {run.id}.")
 
-        iteration_object, created = Iteration.objects.get_or_create(calibration_run=run, iteration_num=iteration_number, worker_name=worker_name,
-                                                                    defaults={'worker_number': worker_number})
+        iteration_object, created = Iteration.objects.get_or_create(
+            calibration_run=run,
+            iteration_num=iteration_number,
+            worker_name=worker_name,
+            defaults={'worker_number': worker_number}
+        )
         if not created:
-            return ResponseError(f'Iteration object already exists for calibration run {run.id}, worker {worker_name}, iteration {iteration_number}')
+            return ResponseError(
+                f'Iteration object already exists for calibration run {run.id}, worker {worker_name}, iteration {iteration_number}'
+            )
 
-        response = {'message': f"Iteration {iteration_number} for worker_name '{worker_name}' set for Calibration Job {run.id}",
-                    'calibration_run_id': run.id,
-                    'status': run.status.name}
+    response = {
+        'message': f"Iteration {iteration_number} for worker_name '{worker_name}' set for Calibration Job {run.id}",
+        'calibration_run_id': run.id,
+        'status': run.status.name
+    }
 
-        response_validator, error_response = validate_response(GenericResponseSerializer, response)
-        if error_response:
-            return error_response
-        logger.debug(
-            f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
+    response_validator, error_response = validate_response(GenericResponseSerializer, response)
+    if error_response:
+        return error_response
 
-        return Response(response_validator.data)
+    logger.debug(
+        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
+
+    return Response(response_validator.data)
 
 
 @extend_schema(
