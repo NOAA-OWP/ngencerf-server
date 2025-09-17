@@ -1,12 +1,17 @@
 import json
 import ast
 
+from ngencerf.cli_user import refresh_access_token
+
 
 def check_http_error(http_status: int, response: str, content_type: str | None = None) -> tuple[dict | None, bool]:
     """
     Handles HTTP errors, returning the parsed response for 200 status codes,
     and printing appropriate error messages for other status codes.
 
+    If a 401 Unauthorized is received, attempt to refresh the access token.
+
+    :param http_status: The HTTP status code returned by the server.
     :param http_status: The HTTP status code returned by the server.
     :param response: The raw response text from the server.
     :param content_type: Optional content type string for handling non-JSON responses.
@@ -24,6 +29,15 @@ def check_http_error(http_status: int, response: str, content_type: str | None =
             except json.JSONDecodeError:
                 print("Warning: Response is not valid JSON.")
                 return None, False
+
+        # Handle expired/invalid token
+        if http_status == 401:
+            print("Unauthorized (401): Access token may have expired. Attempting refresh...")
+            if refresh_access_token():
+                # Caller can retry their request with the new token
+                return {"detail": "Access token refreshed. Please retry request."}, False
+            else:
+                return {"detail": "Access token refresh failed. Please log in again."}, False
 
         # Handle 400 Bad Request with specific error handling
         if http_status == 400:

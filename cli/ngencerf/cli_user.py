@@ -6,6 +6,7 @@ import requests
 from ngencerf.cli_util import check_http_error
 
 LOGIN_ENDPOINT = "http://localhost:8000/auth/jwt/create"
+REFRESH_ENDPOINT = "http://localhost:8000/auth/jwt/refresh"
 REGISTER_ENDPOINT = "http://localhost:8000/auth/users/"
 ENV_FILE = os.path.join(os.path.expanduser("~"), ".ngencerf_env")
 
@@ -62,7 +63,7 @@ def save_credentials_to_env_file(email: str, password: str):
 
 def ngen_login() -> bool:
     """
-    Logs in to the NGEN API, storing ACCESS_TOKEN in the environment file.
+    Logs in to the NGEN API, storing ACCESS_TOKEN and REFRESH_TOKEN in the environment file.
 
     If NGEN_EMAIL and NGEN_PASSWORD are not set, the user is prompted.
     Credentials are saved to ~/.ngencerf_env for reuse.
@@ -84,17 +85,57 @@ def ngen_login() -> bool:
         response_json, success = check_http_error(response.status_code, response.text)
         return success
 
-    access_token = response.json().get("access")
+    response_json = response.json()
+    access_token = response_json.get("access")
+    refresh_token = response_json.get("refresh")
+
     if access_token:
         os.environ["ACCESS_TOKEN"] = access_token
         os.environ["NGEN_EMAIL"] = email
         os.environ["NGEN_PASSWORD"] = password
         save_credentials_to_env_file(email, password)
         save_to_env_file("ACCESS_TOKEN", access_token)
+        if refresh_token:
+            os.environ["REFRESH_TOKEN"] = refresh_token
+            save_to_env_file("REFRESH_TOKEN", refresh_token)
         print(f"{email} login successful.\n")
     else:
         print("Login succeeded, but access token missing.")
 
+    return True
+
+
+def refresh_access_token() -> bool:
+    """
+    Attempts to refresh the access token using REFRESH_TOKEN.
+    Updates ~/.ngencerf_env if successful.
+
+    Returns:
+        True if refresh succeeded, False otherwise.
+    """
+    load_ngencerf_env()
+    refresh_token = os.environ.get("REFRESH_TOKEN")
+    if not refresh_token:
+        print("No refresh token available. Please log in again.")
+        return False
+
+    payload = {"refresh": refresh_token}
+    response = requests.post(REFRESH_ENDPOINT, json=payload)
+
+    if response.status_code != 200:
+        # Could be expired/invalid refresh token
+        response_json, success = check_http_error(response.status_code, response.text)
+        return False
+
+    response_json = response.json()
+    access_token = response_json.get("access")
+    if not access_token:
+        print("Refresh response missing access token. Please log in again.")
+        return False
+
+    os.environ["ACCESS_TOKEN"] = access_token
+    save_to_env_file("ACCESS_TOKEN", access_token)
+    print("Access token refreshed.\n")
     return True
 
 
