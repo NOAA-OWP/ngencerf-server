@@ -362,7 +362,7 @@ def export_job(request: Request) -> Response:
         if error_return:
             return error_return
 
-        calibration_run_data = load_calibration_run_data(run, export=True)
+        calibration_run_data, _ = load_calibration_run_data(run, export=True)
 
     error_object, _ = ngen_cal_input.ready_to_run(run)
     if error_object:

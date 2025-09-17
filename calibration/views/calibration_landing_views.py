@@ -350,7 +350,7 @@ def clone_job(request: Request) -> Response:
     if error_return:
         return error_return
 
-    calibration_run_data = load_calibration_run_data(run, export=True)
+    calibration_run_data, _ = load_calibration_run_data(run, export=True)
     new_run, _, fatal_error = import_calibration_run_data(request, calibration_run_data, JobGenesis.CLONE)
     if fatal_error:
         return fatal_error
