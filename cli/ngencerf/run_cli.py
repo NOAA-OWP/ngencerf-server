@@ -417,7 +417,7 @@ def main():
     args = parser.parse_args()
 
     # Authenticate if needed
-    if args.command not in COMMANDS_AUTH_EXEMPT and "ACCESS_TOKEN" not in os.environ:
+    if args.command not in COMMANDS_AUTH_EXEMPT:
         try:
             if not ngen_login():
                 print("Error logging in.  Use 'ngencerf register' to register a new userid")

@@ -1,7 +1,5 @@
-import json
 import ast
-
-from ngencerf.cli_user import refresh_access_token
+import json
 
 
 def check_http_error(http_status: int, response: str, content_type: str | None = None) -> tuple[dict | None, bool]:
@@ -9,7 +7,7 @@ def check_http_error(http_status: int, response: str, content_type: str | None =
     Handles HTTP errors, returning the parsed response for 200 status codes,
     and printing appropriate error messages for other status codes.
 
-    If a 401 Unauthorized is received, attempt to refresh the access token.
+    If a 401 Unauthorized is received, attempt to refresh or fall back to full login.
 
     :param http_status: The HTTP status code returned by the server.
     :param http_status: The HTTP status code returned by the server.
@@ -33,11 +31,17 @@ def check_http_error(http_status: int, response: str, content_type: str | None =
         # Handle expired/invalid token
         if http_status == 401:
             print("Unauthorized (401): Access token may have expired. Attempting refresh...")
+            from ngencerf.cli_user import refresh_access_token, _perform_full_login
+
             if refresh_access_token():
-                # Caller can retry their request with the new token
+                print("[DEBUG] Refresh succeeded. Please retry request.")
                 return {"detail": "Access token refreshed. Please retry request."}, False
             else:
-                return {"detail": "Access token refresh failed. Please log in again."}, False
+                print("[DEBUG] Refresh failed. Prompting for full login...")
+                if _perform_full_login():
+                    return {"detail": "Full login performed. Please retry request."}, False
+                else:
+                    return {"detail": "Full login failed."}, False
 
         # Handle 400 Bad Request with specific error handling
         if http_status == 400:

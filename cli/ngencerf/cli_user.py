@@ -63,13 +63,46 @@ def save_credentials_to_env_file(email: str, password: str):
 
 def ngen_login() -> bool:
     """
-    Logs in to the NGEN API, storing ACCESS_TOKEN and REFRESH_TOKEN in the environment file.
+    Ensures there is some ACCESS_TOKEN available.
 
-    If NGEN_EMAIL and NGEN_PASSWORD are not set, the user is prompted.
-    Credentials are saved to ~/.ngencerf_env for reuse.
+    Logic:
+      1. If ACCESS_TOKEN exists AND REFRESH_TOKEN exists → use access token (refresh will be attempted on 401).
+      2. If ACCESS_TOKEN exists BUT no REFRESH_TOKEN → treat as expired, do full login.
+      3. If no ACCESS_TOKEN but REFRESH_TOKEN exists → try refresh.
+      4. If neither exist → full login.
     """
     load_ngencerf_env()
 
+    access_token = os.environ.get("ACCESS_TOKEN")
+    refresh_token = os.environ.get("REFRESH_TOKEN")
+
+    # Case 1: Both tokens exist → trust access token, let 401 trigger refresh
+    if access_token and refresh_token:
+        print("[DEBUG] Using existing ACCESS_TOKEN (with REFRESH_TOKEN available).")
+        return True
+
+    # Case 2: Access token exists but no refresh token → treat as expired
+    if access_token and not refresh_token:
+        print("[DEBUG] ACCESS_TOKEN found but no REFRESH_TOKEN. Treating as expired → full login required.")
+        return _perform_full_login()
+
+    # Case 3: No access token, but refresh token exists → try refresh
+    if refresh_token:
+        print("[DEBUG] No ACCESS_TOKEN found. Attempting refresh...")
+        if refresh_access_token():
+            print("[DEBUG] Refresh succeeded. Using new ACCESS_TOKEN.")
+            return True
+        else:
+            print("[DEBUG] Refresh failed. Falling back to full login...")
+            return _perform_full_login()
+
+    # Case 4: Neither token exists → full login
+    print("[DEBUG] No tokens found. Performing full login.")
+    return _perform_full_login()
+
+
+def _perform_full_login() -> bool:
+    print("[DEBUG] Performing full login with email/password.")
     email = os.environ.get("NGEN_EMAIL") or os.environ.get("NGEN_USERNAME")
     if not email:
         email = input("ngenCerf email: ")
@@ -82,8 +115,9 @@ def ngen_login() -> bool:
     response = requests.post(LOGIN_ENDPOINT, json=payload)
 
     if response.status_code != 200:
-        response_json, success = check_http_error(response.status_code, response.text)
-        return success
+        # Log detailed error output
+        check_http_error(response.status_code, response.text)
+        return False
 
     response_json = response.json()
     access_token = response_json.get("access")
@@ -99,10 +133,10 @@ def ngen_login() -> bool:
             os.environ["REFRESH_TOKEN"] = refresh_token
             save_to_env_file("REFRESH_TOKEN", refresh_token)
         print(f"{email} login successful.\n")
+        return True
     else:
         print("Login succeeded, but access token missing.")
-
-    return True
+        return False
 
 
 def refresh_access_token() -> bool:
@@ -116,21 +150,20 @@ def refresh_access_token() -> bool:
     load_ngencerf_env()
     refresh_token = os.environ.get("REFRESH_TOKEN")
     if not refresh_token:
-        print("No refresh token available. Please log in again.")
+        print("[DEBUG] No refresh token available.")
         return False
 
     payload = {"refresh": refresh_token}
     response = requests.post(REFRESH_ENDPOINT, json=payload)
 
     if response.status_code != 200:
-        # Could be expired/invalid refresh token
-        response_json, success = check_http_error(response.status_code, response.text)
+        print(f"[DEBUG] Refresh failed with status {response.status_code}: {response.text}")
         return False
 
     response_json = response.json()
     access_token = response_json.get("access")
     if not access_token:
-        print("Refresh response missing access token. Please log in again.")
+        print("[DEBUG] Refresh response missing access token.")
         return False
 
     os.environ["ACCESS_TOKEN"] = access_token
