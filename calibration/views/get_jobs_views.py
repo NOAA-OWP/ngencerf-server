@@ -190,8 +190,7 @@ def get_jobs(
 ) -> list[dict[str, Any]]:
     """
     Retrieves calibration jobs for the given user with optional status filtering and validation data inclusion.
-    Runs in READ ONLY mode to reduce contention. Uses `savepoint=False` to avoid unnecessary overhead since
-    there are no writes, only reads.
+    Runs in READ ONLY mode to reduce contention.
 
     :param user: The user for whom the jobs are being fetched.
     :param run_status: List of statuses to filter jobs (e.g., DONE, FAILED).

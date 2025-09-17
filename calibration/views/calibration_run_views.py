@@ -7,8 +7,7 @@ from django.conf import settings
 from django.db import transaction
 from django.db.models import Max
 from django.forms import model_to_dict
-from drf_spectacular.types import OpenApiTypes
-from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiExample
+from drf_spectacular.utils import extend_schema, OpenApiResponse
 from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.request import Request
@@ -16,7 +15,7 @@ from rest_framework.response import Response
 
 from calibration.enums import StatusEnum
 from calibration.enums_vanilla import JobType
-from calibration.models import Iteration, ValidationRun, ForecastRun, Status, ForecastForcingDownloadRun, CalibrationRun
+from calibration.models import Iteration, ValidationRun, ForecastRun, ForecastForcingDownloadRun
 from calibration.run_util.run_common import cancel_job_common, submit_job
 from calibration.run_util.run_ngen_cal_pw import SlurmStatusEnum, run_calibration_job_callback_pw, run_validation_job_callback_pw, \
     run_forecast_job_callback_pw, run_forecast_forcing_download_job_callback_pw
@@ -32,8 +31,8 @@ from calibration.views import ngen_cal_input
 from calibration.views.calibration_swe_views import generate_swe_ts_data
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import ResponseError, get_calibration_run, handle_exceptions, validate_response, validate_request, \
-    generate_custom_token, TOKEN_SLURM_SCOPE, auth_scope_required, get_validation_run, get_forecast_run, truncate_large_fields, \
-    get_forecast_forcing_download_run, join_with_or, get_user_email, get_job_description, get_elapsed_str
+    generate_custom_token, TOKEN_SLURM_SCOPE, get_validation_run, get_forecast_run, get_forecast_forcing_download_run, join_with_or, get_user_email, \
+    get_job_description, get_elapsed_str, readonly_transaction, truncate_large_fields
 from calibration.views.end_of_job_processing import read_calibration_output
 
 logger = logging.getLogger(__name__)
@@ -60,6 +59,7 @@ def get_status(request: Request) -> Response:
     """
     Retrieves the status of a calibration job, including associated validation and forecast jobs.
     Optionally includes performance metrics based on the request parameters.
+    Runs in READ ONLY mode to avoid locking contention.
 
     :param request: HTTP request containing calibration run details.
     :return: JSON response with the status and associated job details.
@@ -74,43 +74,49 @@ def get_status(request: Request) -> Response:
     calibration_run_id = validator.get('calibration_run_id')
     include_performance_metrics = validator.get('include_performance_metrics')
 
-    calibration_run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=list(StatusEnum))
-    if error_return:
-        return error_return
+    # All DB access below is read-only
+    with readonly_transaction():
+        calibration_run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=list(StatusEnum))
+        if error_return:
+            return error_return
 
-    # Conditionally retrieve calibration performance metrics
-    calibration_metrics = get_performance_metrics(calibration_run.performance_metrics) if should_include_metrics(calibration_run.status,
-                                                                                                                 include_performance_metrics) else None
+        # Conditionally retrieve calibration performance metrics
+        calibration_metrics = (
+            get_performance_metrics(calibration_run.performance_metrics)
+            if should_include_metrics(calibration_run.status, include_performance_metrics)
+            else None
+        )
 
-    # Retrieve validation runs with related PerformanceMetrics data
-    validation_runs = ValidationRun.objects.filter(calibration_run=calibration_run).select_related(
-        "performance_metrics"
-    ).only(
-        "id", "status__name", "validation_type", "submit_date",
-        "performance_metrics__elapsed_time", "performance_metrics__num_cpus",
-        "performance_metrics__cpu_time", "performance_metrics__max_rss",
-        "performance_metrics__max_disk_read", "performance_metrics__max_disk_write",
-        "performance_metrics__reserved_time"
-    )
+        # Retrieve validation runs with related PerformanceMetrics data
+        validation_runs = ValidationRun.objects.filter(calibration_run=calibration_run).select_related(
+            "performance_metrics"
+        ).only(
+            "id", "status__name", "validation_type", "submit_date",
+            "performance_metrics__elapsed_time", "performance_metrics__num_cpus",
+            "performance_metrics__cpu_time", "performance_metrics__max_rss",
+            "performance_metrics__max_disk_read", "performance_metrics__max_disk_write",
+            "performance_metrics__reserved_time"
 
-    # Retrieve forecast runs with related PerformanceMetrics data
-    forecast_runs = ForecastRun.objects.filter(calibration_run=calibration_run).select_related(
-        "performance_metrics", "forcing_download_run"
-    ).only(
-        "id", "status__name", "submit_date",
-        "performance_metrics__elapsed_time", "performance_metrics__num_cpus",
-        "performance_metrics__cpu_time", "performance_metrics__max_rss",
-        "performance_metrics__max_disk_read", "performance_metrics__max_disk_write",
-        "performance_metrics__reserved_time",
-        "forcing_download_run__status__name",
-        "forcing_download_run__performance_metrics__elapsed_time",
-        "forcing_download_run__performance_metrics__num_cpus",
-        "forcing_download_run__performance_metrics__cpu_time",
-        "forcing_download_run__performance_metrics__max_rss",
-        "forcing_download_run__performance_metrics__max_disk_read",
-        "forcing_download_run__performance_metrics__max_disk_write",
-        "forcing_download_run__performance_metrics__reserved_time"
-    )
+        )
+
+        # Retrieve forecast runs with related PerformanceMetrics data
+        forecast_runs = ForecastRun.objects.filter(calibration_run=calibration_run).select_related(
+            "performance_metrics", "forcing_download_run"
+        ).only(
+            "id", "status__name", "submit_date",
+            "performance_metrics__elapsed_time", "performance_metrics__num_cpus",
+            "performance_metrics__cpu_time", "performance_metrics__max_rss",
+            "performance_metrics__max_disk_read", "performance_metrics__max_disk_write",
+            "performance_metrics__reserved_time",
+            "forcing_download_run__status__name",
+            "forcing_download_run__performance_metrics__elapsed_time",
+            "forcing_download_run__performance_metrics__num_cpus",
+            "forcing_download_run__performance_metrics__cpu_time",
+            "forcing_download_run__performance_metrics__max_rss",
+            "forcing_download_run__performance_metrics__max_disk_read",
+            "forcing_download_run__performance_metrics__max_disk_write",
+            "forcing_download_run__performance_metrics__reserved_time"
+        )
 
     # Construct validation response with performance metrics as needed
     validation_response = []
@@ -132,6 +138,7 @@ def get_status(request: Request) -> Response:
 
         if should_include_metrics(run.status, include_performance_metrics):
             validation_data['performance_metrics'] = get_performance_metrics(run.performance_metrics)
+
         validation_response.append(validation_data)
 
     # Construct validation response with performance metrics as needed
@@ -146,13 +153,13 @@ def get_status(request: Request) -> Response:
             'run_start': run.run_start,
             'run_end': run.run_end
         }
-        
+
         if run.performance_metrics:
             forecast_data['elapsed_time'] = run.performance_metrics.elapsed_time
         else:
             forecast_data['elapsed_time'] = run.run_end - run.run_start if run.run_end and run.run_start else None
-        
-        if should_include_metrics(run.status):
+
+        if should_include_metrics(run.status, include_performance_metrics):
             forecast_data['performance_metrics'] = get_performance_metrics(run.performance_metrics)
 
         if forcing_download:
@@ -161,7 +168,7 @@ def get_status(request: Request) -> Response:
                 'status': forcing_download.status.name,
                 'elapsed_time': forcing_download.performance_metrics.elapsed_time if forcing_download.performance_metrics else None
             }
-            if should_include_metrics(forcing_download.status):
+            if should_include_metrics(forcing_download.status, include_performance_metrics):
                 forcing_download_data['performance_metrics'] = get_performance_metrics(forcing_download.performance_metrics)
             forecast_data['forcing_download'] = forcing_download_data
 
@@ -203,6 +210,7 @@ def get_status(request: Request) -> Response:
                                                            max_length=10)
     if error_response:
         return error_response
+
     logger.debug(
         f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - '
         f'{json.dumps(truncate_large_fields(response_validator.data, fields_to_truncate=["validations", "forecasts"], max_length=10))}'
@@ -234,8 +242,8 @@ def get_status(request: Request) -> Response:
 def get_status_for_comparison(request: Request) -> Response:
     """
     Retrieves the status of multiple calibration jobs, including performance metrics.
-
     calibration_run_ids should be given as an array.
+    Runs in READ ONLY mode to avoid locking contention.
 
     :param request: HTTP request containing calibration run details.
     :return: JSON response with the status and associated job details.
@@ -255,44 +263,51 @@ def get_status_for_comparison(request: Request) -> Response:
         'errors': []
     }
 
-    for calibration_run_id in calibration_run_ids:
-        calibration_error = None
+    with readonly_transaction():
+        for calibration_run_id in calibration_run_ids:
+            calibration_error = None
 
-        calibration_run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=list(StatusEnum))
-        if error_return:
-            calibration_error = {'calibration_run_id': calibration_run.id, 'message': error_return}
+            calibration_run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=list(StatusEnum))
+            if error_return:
+                calibration_error = {'calibration_run_id': calibration_run_id, 'message': error_return}
 
-        if not calibration_error:
-            # Conditionally retrieve calibration performance metrics
-            calibration_metrics = get_performance_metrics(calibration_run.performance_metrics) if calibration_run.status in [
-                StatusEnum.DONE.db_instance, StatusEnum.FAILED.db_instance] else None
+            if not calibration_error:
+                calibration_metrics = (
+                    get_performance_metrics(calibration_run.performance_metrics)
+                    if calibration_run.status in [StatusEnum.DONE.db_instance, StatusEnum.FAILED.db_instance]
+                    else None
+                )
+                # Prepare the response for this job
+                status_response = {
+                    'calibration_run_id': calibration_run.id,
+                    'formulation_name': calibration_run.user_formulation_name,
+                    'status': calibration_run.status.name,
+                    'submit_date': calibration_run.submit_date,
+                    'run_start': calibration_run.run_start,
+                    'run_end': calibration_run.run_end,
+                    'elapsed_time': (
+                        calibration_run.performance_metrics.elapsed_time
+                        if calibration_run.performance_metrics
+                        else (
+                            calibration_run.run_end - calibration_run.run_start
+                            if calibration_run.run_end and calibration_run.run_start
+                            else None
+                        )
+                    ),
+                }
 
-            # Prepare the response for this job
-            status_response = {
-                'calibration_run_id': calibration_run.id,
-                'formulation_name': calibration_run.user_formulation_name,
-                'status': calibration_run.status.name,
-                'submit_date': calibration_run.submit_date,
-                'run_start': calibration_run.run_start,
-                'run_end': calibration_run.run_end
-            }
+                if calibration_metrics:
+                    status_response['performance_metrics'] = calibration_metrics
 
-            if calibration_run.performance_metrics:
-                status_response['elapsed_time'] = calibration_run.performance_metrics.elapsed_time
+                response['statuses'].append(status_response)
+
             else:
-                status_response['elapsed_time'] = calibration_run.run_end - calibration_run.run_start if calibration_run.run_end and calibration_run.run_start else None
-
-            if calibration_metrics:
-                status_response['performance_metrics'] = calibration_metrics
-
-            response['statuses'].append(status_response)
-
-        else:
-            response['errors'].append(calibration_error)
+                response['errors'].append(calibration_error)
 
     response_validator, error_response = validate_response(GetStatusForComparisonResponseSerializer, response)
     if error_response:
         return error_response
+
     logger.debug(
         f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - '
         f'{json.dumps(response_validator.data)}'
@@ -352,7 +367,8 @@ def run_calibration(request: Request) -> Response:
     if error_return:
         return error_return
 
-    logger.debug(f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
+    logger.debug(
+        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
 
     return Response(response_validator.data)
 
@@ -440,7 +456,8 @@ def process_calibration_output(request):
     response_validator, error_response = validate_response(GenericResponseSerializer, response)
     if error_response:
         return error_response
-    logger.debug(f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
+    logger.debug(
+        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
 
     return Response(response_validator.data)
 
@@ -490,7 +507,8 @@ def process_swe_timeseries(request: Request) -> Response:
     response_validator, error_response = validate_response(GenericResponseSerializerWithValidator, response)
     if error_response:
         return error_response
-    logger.debug(f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
+    logger.debug(
+        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
 
     return Response(response_validator.data)
 
@@ -521,7 +539,8 @@ def update_mpi_rules(request: Request) -> Response:
     response_validator, error_response = validate_response(MPINodesRulesResponseSerializer, response)
     if error_response:
         return error_response
-    logger.debug(f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
+    logger.debug(
+        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
 
     return Response(response_validator.data)
 
@@ -597,7 +616,8 @@ def report_iteration(request):
         response_validator, error_response = validate_response(GenericResponseSerializer, response)
         if error_response:
             return error_response
-        logger.debug(f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
+        logger.debug(
+            f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
 
         return Response(response_validator.data)
 
@@ -622,6 +642,7 @@ def report_iteration(request):
 def get_iteration(request: Request) -> Response:
     """
     Retrieves the current iteration of a running calibration job.
+    Runs in READ ONLY mode to avoid locking contention.
 
     :param request: HTTP request containing calibration run details.
     :return: JSON response with the current iteration details.
@@ -635,25 +656,30 @@ def get_iteration(request: Request) -> Response:
 
     calibration_run_id = validator.get('calibration_run_id')
 
-    # Allow status Ready for UI polling immediately after submission.
-    run, error_return = get_calibration_run(calibration_run_id, request.user,
-                                            run_status=[StatusEnum.READY, StatusEnum.RUNNING, StatusEnum.DONE,
-                                                        StatusEnum.FAILED, StatusEnum.CANCELLED, StatusEnum.SERVER_ERROR])
-    if error_return:
-        return error_return
+    with readonly_transaction():
+        # Allow status Ready for UI polling immediately after submission.
+        run, error_return = get_calibration_run(
+            calibration_run_id,
+            request.user,
+            run_status=[StatusEnum.READY, StatusEnum.RUNNING, StatusEnum.DONE,
+                        StatusEnum.FAILED, StatusEnum.CANCELLED, StatusEnum.SERVER_ERROR]
+        )
+        if error_return:
+            return error_return
 
-    high_iteration = Iteration.objects.filter(calibration_run=run, worker_number=1).order_by('-iteration_num').first()
-    high_iteration_number = high_iteration.iteration_num if high_iteration else None
+        high_iteration = Iteration.objects.filter(calibration_run=run, worker_number=1).order_by('-iteration_num').first()
+        high_iteration_number = high_iteration.iteration_num if high_iteration else None
 
-    response = {'message': f'Calibration Job {run.id} has completed {high_iteration_number} iterations',
-                'calibration_run_id': run.id,
-                'status': run.status.name,
-                'iteration': high_iteration_number}
+        response = {'message': f'Calibration Job {run.id} has completed {high_iteration_number} iterations',
+                    'calibration_run_id': run.id,
+                    'status': run.status.name,
+                    'iteration': high_iteration_number}
 
-    response_validator, error_response = validate_response(GetIterationsResponseSerializer, response)
-    if error_response:
-        return error_response
-    logger.debug(f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
+        response_validator, error_response = validate_response(GetIterationsResponseSerializer, response)
+        if error_response:
+            return error_response
+        logger.debug(
+            f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
 
     return Response(response_validator.data)
 
@@ -755,7 +781,8 @@ def cancel_job(request: Request) -> Response:
     response_validator, error_response = validate_response(CancelJobResponseSerializer, response)
     if error_response:
         return error_response
-    logger.debug(f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
+    logger.debug(
+        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
 
     return Response(response_validator.data)
 
@@ -1003,5 +1030,3 @@ def get_slurm_token(request: Request) -> Response:
         return error_return
 
     return Response({'access': generate_custom_token(request.user, TOKEN_SLURM_SCOPE)})
-
-
