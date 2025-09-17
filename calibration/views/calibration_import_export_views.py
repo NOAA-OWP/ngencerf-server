@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import time
+from datetime import datetime
 
 from django.db import transaction
 from drf_spectacular.utils import extend_schema, OpenApiResponse
@@ -27,7 +28,7 @@ from calibration.views.calibration_optimization_views import get_user_optimizati
     write_optimization_inputs
 from calibration.views.calibration_run_views import resolve_job_data_dir
 from calibration.views.calibration_tuning_views import get_times, get_parameters_for_export, validate_and_save_times, validate_parameters, \
-    save_parameters, get_time_range, has_user_selected_tuning_parameters
+    save_parameters, has_user_selected_tuning_parameters, compute_time_range, persist_time_range
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import get_calibration_run, ResponseError, handle_exceptions, validate_response, create_calibration_run_internal, \
     validate_request, get_valid_path, truncate_large_fields, get_user_email, generate_ngen_logging_config, get_elapsed_str, readonly_transaction
@@ -381,41 +382,43 @@ def export_job(request: Request) -> Response:
     return Response(response_validator.data)
 
 
-def load_calibration_run_data(run: CalibrationRun, export: bool = False, include_gpkg_map: bool = False) -> dict:
+def load_calibration_run_data(run: CalibrationRun, export: bool = False, include_gpkg_map: bool = False) -> tuple[dict, dict[str, datetime | None]]:
     """
-    Loads calibration run data for export, cloning or UI display.
+    Load calibration run data for export, cloning, or UI display.
 
-    NOTE: This function does not itself open a transaction.
-    It should always be called from a surrounding read-only transaction
-    (see export_job and load_calibration_run) to ensure reduced lock contention.
+    NOTE:
+      - This function does not itself open a transaction or persist to the DB.
+      - It should be called inside a read-only transaction for read-heavy cases
+        (see export_job and load_calibration_run).
+      - Persistence of the computed time range, if needed, is handled separately.
 
     :param run: CalibrationRun instance for which data is being loaded.
     :param export: If True, formats the data for export, including all necessary paths for job re-import.
                    If False, formats the data for UI display with only essential details.
     :param include_gpkg_map: If True and export is False, generates a base64-encoded Geopackage map for display.
                              Ignored when export is True.
-    :return: Dictionary containing the calibration run data.
+    :return: A tuple of:
+             - calibration_run_data: dict with job metadata and configuration,
+             - time_range: dict with 'start_time' and 'end_time', or None if unavailable.
     """
     start_time = time.time()
     logger.info(f"Starting load_calibration_run_data for Calibration Job {run.id} - {run.status.name}")
 
-    calibration_run_data = {}
+    calibration_run_data: dict = {}
 
     #############################
-    # Time Range
+    # Time Range (computed only)
     #############################
-    logger.info("Retrieving time range")
+    logger.info("Retrieving time range (compute only)")
     time_range_start = time.time()
-    time_range = get_time_range(run)
+    time_range = compute_time_range(run)
 
     # Manually serialize datetime objects since we're not using a serializer for metadata
-    serialized_time_range = {}
+    serialized_time_range: dict[str, str] = {}
     if time_range:
-        if time_range.get('start_time'):
-            serialized_time_range['start_time'] = time_range['start_time'].isoformat()
-        if time_range.get('end_time'):
-            serialized_time_range['end_time'] = time_range['end_time'].isoformat()
-    logger.info(f"Time range retrieval completed in {time.time() - time_range_start:.2f}s")
+        serialized_time_range['start_time'] = time_range['start_time'].isoformat()
+        serialized_time_range['end_time'] = time_range['end_time'].isoformat()
+    logger.info(f"Time range computation completed in {time.time() - time_range_start:.2f}s")
 
     module_objects = CalibrationFormulation.objects.filter(calibration_run=run)
 
@@ -594,7 +597,7 @@ def load_calibration_run_data(run: CalibrationRun, export: bool = False, include
     calibration_run_data['logging_config'] = generate_ngen_logging_config(run)
 
     logger.info(f"load_calibration_run_data completed for Calibration Job {run.id} in {time.time() - start_time:.2f}s")
-    return calibration_run_data
+    return calibration_run_data, time_range
 
 
 @extend_schema(
@@ -617,7 +620,12 @@ def load_calibration_run_data(run: CalibrationRun, export: bool = False, include
 def load_calibration_run(request: Request) -> Response:
     """
     Load all data for a previously saved calibration run.
-    Runs in READ ONLY mode to reduce contention.
+
+    Workflow:
+      - Reads calibration run data inside a read-only transaction to reduce contention.
+      - Returns both the run data and the computed time range.
+      - If the time range was newly computed and not yet persisted on the run,
+        it is saved in a short write transaction after the read-only block.
 
     :param request: The HTTP request object.
     :return: A Response object containing the serialized calibration run data.
@@ -637,7 +645,13 @@ def load_calibration_run(request: Request) -> Response:
         if error_return:
             return error_return
 
-        calibration_run_data = load_calibration_run_data(run, export=False, include_gpkg_map=include_gpkg_map)
+        # Do all the heavy lifting in read-only mode
+        calibration_run_data, time_range = load_calibration_run_data(run, export=False, include_gpkg_map=include_gpkg_map)
+
+    # Persist only if we computed a valid time range
+    if time_range and (not run.time_range_start or not run.time_range_end):
+        with transaction.atomic():
+            persist_time_range(run, time_range)
 
     response_validator, error_response = validate_response(
         LoadCalibrationRunResponseSerializer,
