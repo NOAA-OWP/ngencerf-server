@@ -3,7 +3,6 @@ import logging
 from typing import Any
 
 from django.contrib.auth import get_user_model
-from django.db import transaction, connection
 from django.db.models import Q
 from drf_spectacular.utils import extend_schema, OpenApiResponse
 from rest_framework.decorators import api_view
@@ -18,7 +17,7 @@ from calibration.util.calibration_validators import EmptySerializer, GetCalibrat
 from calibration.views.calibration_evaluation_views import downloadable_statuses
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import handle_exceptions, validate_request, validate_response, truncate_large_fields, get_calibration_run, \
-    get_user_email, get_elapsed_str
+    get_user_email, get_elapsed_str, readonly_transaction
 
 logger = logging.getLogger(__name__)
 
@@ -203,11 +202,7 @@ def get_jobs(
     :param include_stop_criteria: Whether to include stop_criteria in the queryset.
     :return: List of calibration jobs with selected fields.
     """
-    with transaction.atomic(savepoint=False):
-        # Force Postgres to enforce read-only semantics for this transaction
-        with connection.cursor() as cursor:
-            cursor.execute("SET TRANSACTION READ ONLY")
-
+    with readonly_transaction():
         # Base query: filter jobs for the user
         query = Q(owner=user)
 
@@ -344,9 +339,7 @@ def get_validation_jobs_internal(
     if detail_level != GetValidationJobsScope.DETAILS:
         return []
 
-    with transaction.atomic(savepoint=False):
-        with connection.cursor() as cursor:
-            cursor.execute("SET TRANSACTION READ ONLY")
+    with readonly_transaction():
 
         # 1) Fetch all validation runs for this calibration run
         validation_runs = list(
@@ -493,9 +486,7 @@ def get_forecast_jobs(request: Request) -> Response:
     if error_return:
         return error_return
 
-    with transaction.atomic(savepoint=False):
-        with connection.cursor() as cursor:
-            cursor.execute("SET TRANSACTION READ ONLY")
+    with readonly_transaction():
 
         forecast_jobs = list(
             ForecastRun.objects

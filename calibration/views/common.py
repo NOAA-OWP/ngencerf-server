@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import time
+from contextlib import contextmanager
 from datetime import timedelta, datetime
 from functools import wraps
 from typing import Type, Any, Callable, cast
@@ -12,6 +13,7 @@ from typing import Type, Any, Callable, cast
 import numpy as np
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.db import transaction, connection
 from django.db.models import QuerySet
 from django.http import JsonResponse
 from rest_framework import status
@@ -928,3 +930,16 @@ def get_elapsed_str(request: Request) -> str:
 
     elapsed = time.perf_counter() - start_time
     return f" in {elapsed:.3f}s"
+
+
+@contextmanager
+def readonly_transaction():
+    """
+    Context manager to enforce a read-only transaction.
+    Use this for functions that only query the database.
+    Prevents write locks and reduces contention.
+    """
+    with transaction.atomic(savepoint=False):
+        with connection.cursor() as cursor:
+            cursor.execute("SET TRANSACTION READ ONLY")
+        yield

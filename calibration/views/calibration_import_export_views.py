@@ -209,7 +209,8 @@ def import_calibration_run_data(request: Request, calibration_run_data: dict, ge
                 if gage_id:
                     get_observational_data_from_data_services(run)
                     if run.forcing_source_requested != run.forcing_source_actual:
-                        warnings.append(f'{run.forcing_source_requested.name} forcing data not found.  Using {run.forcing_source_actual.name if run.forcing_source_actual else None}')
+                        warnings.append(
+                            f'{run.forcing_source_requested.name} forcing data not found.  Using {run.forcing_source_actual.name if run.forcing_source_actual else None}')
             except DataServicesException as e:
                 errors.append(f"Error retrieving observational data from Data Services - status code: {e.status_code} - {str(e)}")
                 eds_errors.append({
@@ -317,7 +318,7 @@ def import_calibration_run_data(request: Request, calibration_run_data: dict, ge
         messages.setdefault('warnings', []).extend(warnings)
     if eds_errors:
         messages['eds_errors'] = eds_errors
-        
+
     return run, messages, None
 
 
@@ -341,6 +342,7 @@ def import_calibration_run_data(request: Request, calibration_run_data: dict, ge
 def export_job(request: Request) -> Response:
     """
     API endpoint to export calibration job data.
+    Runs in READ ONLY mode to reduce contention.
 
     :param request: Django HTTP request, with parameters in the body for POST or query params for GET.
     :return: Response containing the exported calibration run data or an error.
@@ -354,11 +356,12 @@ def export_job(request: Request) -> Response:
 
     calibration_run_id = validator.get('calibration_run_id')
 
-    run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=list(StatusEnum))
-    if error_return:
-        return error_return
+    with readonly_transaction():
+        run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=list(StatusEnum))
+        if error_return:
+            return error_return
 
-    calibration_run_data = load_calibration_run_data(run, export=True)
+        calibration_run_data = load_calibration_run_data(run, export=True)
 
     error_object, _ = ngen_cal_input.ready_to_run(run)
     if error_object:
@@ -370,7 +373,10 @@ def export_job(request: Request) -> Response:
     response_validator, error_response = validate_response(ExportResponseSerializer, calibration_run_data)
     if error_response:
         return error_response
-    logger.debug(f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
+
+    logger.debug(
+        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - '
+        f'{json.dumps(response_validator.data)}')
 
     return Response(response_validator.data)
 
@@ -378,6 +384,10 @@ def export_job(request: Request) -> Response:
 def load_calibration_run_data(run: CalibrationRun, export: bool = False, include_gpkg_map: bool = False) -> dict:
     """
     Loads calibration run data for export, cloning or UI display.
+
+    NOTE: This function does not itself open a transaction.
+    It should always be called from a surrounding read-only transaction
+    (see export_job and load_calibration_run) to ensure reduced lock contention.
 
     :param run: CalibrationRun instance for which data is being loaded.
     :param export: If True, formats the data for export, including all necessary paths for job re-import.
@@ -607,6 +617,7 @@ def load_calibration_run_data(run: CalibrationRun, export: bool = False, include
 def load_calibration_run(request: Request) -> Response:
     """
     Load all data for a previously saved calibration run.
+    Runs in READ ONLY mode to reduce contention.
 
     :param request: The HTTP request object.
     :return: A Response object containing the serialized calibration run data.
@@ -621,18 +632,21 @@ def load_calibration_run(request: Request) -> Response:
     calibration_run_id = validator.get('calibration_run_id')
     include_gpkg_map = validator.get('include_gpkg_map')
 
-    run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=list(StatusEnum))
+    with readonly_transaction():
+        run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=list(StatusEnum))
+        if error_return:
+            return error_return
 
-    if error_return:
-        return error_return
+        calibration_run_data = load_calibration_run_data(run, export=False, include_gpkg_map=include_gpkg_map)
 
-    calibration_run_data = load_calibration_run_data(run, export=False, include_gpkg_map=include_gpkg_map)
-
-    response_validator, error_response = validate_response(LoadCalibrationRunResponseSerializer, calibration_run_data,
-                                                           fields_to_truncate=['geopackage_image_url'])
-
+    response_validator, error_response = validate_response(
+        LoadCalibrationRunResponseSerializer,
+        calibration_run_data,
+        fields_to_truncate=['geopackage_image_url']
+    )
     if error_response:
         return error_response
+
     logger.debug(
         f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - '
         f'{json.dumps(truncate_large_fields(response_validator.data, fields_to_truncate=["geopackage_image_url"]))}'
