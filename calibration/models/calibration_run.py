@@ -43,11 +43,13 @@ class CalibrationRun(BaseRun):  # Inherit from BaseRun
     is_archived = models.BooleanField(default=False)
     is_locked = models.BooleanField(default=False)
     mpi_nprocs = models.IntegerField(null=True)
+    next_worker_number = models.PositiveIntegerField(default=1)
 
     class Meta:
         db_table = 'calibration_run'
         indexes = [
             models.Index(fields=['owner', 'status', 'is_archived'], name='idx_run_owner_status_archived'),
+            models.Index(fields=['owner', 'is_archived'], name='idx_run_owner_archived')
         ]
 
     def __str__(self):

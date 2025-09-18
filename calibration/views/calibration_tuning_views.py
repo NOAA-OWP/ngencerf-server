@@ -26,7 +26,7 @@ from calibration.util.ngen_locations import get_observational_file_for_job, get_
 from calibration.views import ngen_cal_input
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import get_calibration_run, ResponseError, handle_exceptions, validate_response, CerfException, validate_request, \
-    get_valid_path, format_datetime, get_user_email, get_elapsed_str
+    get_valid_path, format_datetime, get_user_email, get_elapsed_str, readonly_transaction
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +58,11 @@ def load_tuning_tab(request: Request) -> Response:
     """
     API endpoint to load tuning tab data for a calibration run.
 
+    Splits read-heavy operations into a read-only transaction,
+    then persists time_range if it was newly computed. Calls
+    ready_to_run() outside the read-only block so that updates
+    to run.status are persisted and reflected in the response.
+
     :param request: Django HTTP request, containing parameters in the body for POST or query params for GET.
     :return: Response containing the tuning tab data, including time ranges, modules, and formulations.
     """
@@ -69,48 +74,62 @@ def load_tuning_tab(request: Request) -> Response:
         return error_return
 
     calibration_run_id = validator.get('calibration_run_id')
-    run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=list(StatusEnum))
-    if error_return:
-        return error_return
 
-    # Retrieve the time ranges
-    time_range = get_time_range(run)
-    calibration_times, validation_times = get_times(run)
+    # Phase 1: Read-only section (heavy reads)
+    with readonly_transaction():
+        run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=list(StatusEnum))
+        if error_return:
+            return error_return
 
-    formulations = (
-        CalibrationFormulation.objects
-        .filter(calibration_run=run)
-        .select_related('module')
-        .prefetch_related(
-            Prefetch(
-                'calibrationparameter_set',
-                queryset=CalibrationParameter.objects.only(
-                    'calibration_formulation_id',
-                    'name', 'minimum', 'maximum', 'initial_value',
-                    'units', 'data_type', 'description', 'user_selected_for_tuning'
-                ),
-                to_attr='prefetched_params',
+        # Compute time range without persisting
+        time_range = compute_time_range(run)
+        calibration_times, validation_times = get_times(run)
+
+        formulations = (
+            CalibrationFormulation.objects
+            .filter(calibration_run=run)
+            .select_related('module')
+            .prefetch_related(
+                Prefetch(
+                    'calibrationparameter_set',
+                    queryset=CalibrationParameter.objects.only(
+                        'calibration_formulation_id',
+                        'name', 'minimum', 'maximum', 'initial_value',
+                        'units', 'data_type', 'description', 'user_selected_for_tuning'
+                    ),
+                    to_attr='prefetched_params',
+                )
             )
         )
-    )
 
-    # For each module, get the Parameters and Output Variables
-    module_list = get_parameters(formulations)
+        # For each module, get the Parameters and Output Variables
+        module_list = get_parameters(formulations)
 
+    # Phase 2: Write section (ready_to_run + optional persist_time_range)
     ngen_cal_input.ready_to_run(run)
 
-    response = {'calibration_run_id': run.id, 'status': run.status.name,
-                'modules': module_list,
-                'time_range': time_range,
-                'calibration_times': calibration_times,
-                'validation_times': validation_times
-                }
+    if time_range and (not run.time_range_start or not run.time_range_end):
+        with transaction.atomic():
+            persist_time_range(run, time_range)
+
+    # Phase 3: Build response with updated run.status
+    response = {
+        'calibration_run_id': run.id,
+        'status': run.status.name,   # reflects updated status
+        'modules': module_list,
+        'time_range': time_range,
+        'calibration_times': calibration_times,
+        'validation_times': validation_times
+    }
 
     response_validator, error_response = validate_response(LoadTuningResponseSerializer, response)
     if error_response:
         return error_response
+
     logger.debug(
-        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
+        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - '
+        f'{json.dumps(response_validator.data)}'
+    )
 
     return Response(response_validator.data)
 
@@ -200,23 +219,38 @@ def get_parameters_for_export(modules: QuerySet[CalibrationFormulation]) -> list
     return parameter_list
 
 
-def get_time_range(run: CalibrationRun) -> dict[str, datetime | None]:
+def compute_time_range(run: CalibrationRun) -> dict[str, datetime] | None:
     """
-    Determines the date range intersection between observational and forcing data and updates the run if necessary.
+    Compute the intersection of observational and forcing data ranges for the given run,
+    without persisting anything to the database.
+
+    Behavior:
+      - If the run already has a persisted time range (both start and end), that exact range is returned.
+      - If observational or forcing data is missing, returns None.
+      - If both sources are available, computes the intersection and returns a dictionary with:
+          * 'start_time': datetime (UTC, timezone-aware),
+          * 'end_time': datetime (UTC, timezone-aware).
+      - If there is no valid overlap between observational and forcing ranges, returns None.
 
     :param run: CalibrationRun instance.
-    :return: Dictionary containing the start and end times of the intersection.
+    :return: A dictionary containing 'start_time' and 'end_time' if available,
+             otherwise None.
     """
     if run.time_range_start and run.time_range_end:
         logger.info("Time range is already set")
         return {'start_time': run.time_range_start, 'end_time': run.time_range_end}
 
-    observation_path = get_valid_path(run.observational_eds_file_path, lambda: get_observational_file_for_job(run))
-
-    forcing_path = get_valid_path(run.forcing_eds_dir_path, lambda: get_forcing_dir_for_job(run))
+    observation_path = get_valid_path(
+        run.observational_eds_file_path,
+        lambda: get_observational_file_for_job(run)
+    )
+    forcing_path = get_valid_path(
+        run.forcing_eds_dir_path,
+        lambda: get_forcing_dir_for_job(run)
+    )
 
     if not observation_path or not forcing_path:
-        return {}
+        return None
 
     # If both paths are available, calculate intersection and update run
     daterange_intersection_start = time.time()
@@ -224,11 +258,22 @@ def get_time_range(run: CalibrationRun) -> dict[str, datetime | None]:
     logger.info(f"Date range intersection completed in {time.time() - daterange_intersection_start:.2f}s")
 
     if daterange:
-        run.time_range_start = daterange.start_datetime
-        run.time_range_end = daterange.end_datetime
-        run.save(update_fields=['time_range_start', 'time_range_end'])
+        return {'start_time': daterange.start_datetime, 'end_time': daterange.end_datetime}
 
-    return {'start_time': run.time_range_start, 'end_time': run.time_range_end}
+    return None
+
+
+def persist_time_range(run: CalibrationRun, time_range: dict[str, datetime]) -> None:
+    """
+    Persist the computed time range to the database if values are provided.
+
+    :param run: CalibrationRun instance to update.
+    :param time_range: Dictionary containing both 'start_time' and 'end_time'.
+                       Assumes these keys are present and valid datetimes.
+    """
+    run.time_range_start = time_range['start_time']
+    run.time_range_end = time_range['end_time']
+    run.save(update_fields=['time_range_start', 'time_range_end'])
 
 
 def get_times(run: CalibrationRun) -> tuple[dict[str, datetime], dict[str, datetime]]:

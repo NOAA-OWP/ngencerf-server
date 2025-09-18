@@ -7,7 +7,7 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
 from calibration.models import CalibrationFormulation, CalibrationSlothParam, CalibrationParameter, CalibrationRun, \
-  Module, OutputVariable, CalibrationStopCriteria, CalibrationOptimizationInput, OptimizationInput
+    Module, OutputVariable, CalibrationStopCriteria
 from calibration.util.caching import get_cached_module_by_name, get_cached_modules_with_groups, get_cached_module_groups
 from calibration.util.calibration_validators import ValidateFormulationRequestSerializer, \
     SaveFormulationRequestSerializer, ErrorResponseSerializer, ValidateFormulationResponseSerializer, \
