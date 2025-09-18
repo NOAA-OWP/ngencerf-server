@@ -13,7 +13,6 @@ import time
 import zipfile
 from contextlib import ExitStack
 from datetime import datetime
-from typing import Callable
 
 import requests
 import tabulate
@@ -34,24 +33,76 @@ def get_auth_headers() -> dict[str, str]:
     }
 
 
-def post_with_spinner(message: str, post_func: Callable) -> requests.Response | None:
+def post_with_spinner_and_retry(message: str, endpoint: str, **kwargs) -> tuple[dict | None, bool]:
     """
-    Displays a spinner while executing a POST request callable.
+    POST to an API endpoint with spinner, automatic token refresh/relogin, and retry support.
+    Ensures each attempt uses the freshest ACCESS_TOKEN and rewinds file streams if present.
     Gracefully handles KeyboardInterrupt (Ctrl-C) to avoid ugly tracebacks.
 
     :param message: Message to display while waiting.
-    :param post_func: A callable that returns a requests.Response when invoked.
-    :return: The requests.Response object from the callable, or None if interrupted.
+    :param endpoint: API endpoint (path relative to API_BASE).
+    :param kwargs: Passed to requests.post (headers, json, files, etc.)
+    :return: (response_json, success)
     """
+
+    def _rewind_files(files_obj):
+        # Support dict: {"field": fileobj} or {"field": (filename, fileobj)}
+        # Support list: [("files", (filename, fileobj)), ...]
+        try:
+            if isinstance(files_obj, dict):
+                for v in files_obj.values():
+                    try:
+                        # (filename, fileobj) tuple
+                        if isinstance(v, tuple) and len(v) >= 2 and hasattr(v[1], "seek"):
+                            v[1].seek(0)
+                        elif hasattr(v, "seek"):
+                            v.seek(0)
+                    except Exception:
+                        pass
+            elif isinstance(files_obj, list):
+                for item in files_obj:
+                    try:
+                        # ("files", (filename, fileobj)) or similar
+                        if isinstance(item, tuple) and len(item) >= 2:
+                            inner = item[1]
+                            if isinstance(inner, tuple) and len(inner) >= 2 and hasattr(inner[1], "seek"):
+                                inner[1].seek(0)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    def do_post():
+        # Make a fresh copy of kwargs for each attempt
+        req_kwargs = dict(kwargs)
+
+        # Refresh headers on every attempt; preserve other headers
+        hdrs = dict(req_kwargs.get("headers") or {})
+        hdrs["Authorization"] = f"Bearer {os.environ.get('ACCESS_TOKEN', '')}"
+        req_kwargs["headers"] = hdrs
+
+        # Rewind file handles if present (so retries resend from the start)
+        if "files" in req_kwargs and req_kwargs["files"] is not None:
+            _rewind_files(req_kwargs["files"])
+
+        return requests.post(f"{API_BASE}{endpoint}", **req_kwargs)
+
     spinner = Spinner(message)
     spinner.start()
     try:
-        return post_func()
+        response = do_post()
     except KeyboardInterrupt:
         print("\nOperation cancelled by user.")
-        return None
+        return None, False
     finally:
         spinner.stop()
+
+    return check_http_error(
+        response.status_code,
+        response.text,
+        response.headers.get("Content-Type"),
+        retry_func=do_post
+    )
 
 
 def about(output_path: str | None = None) -> int:
@@ -61,15 +112,11 @@ def about(output_path: str | None = None) -> int:
     Returns:
         int: Exit code (0 for success, 1 for failure).
     """
-    response = post_with_spinner("Sending request to server...", lambda: requests.post(
-        f"{API_BASE}/calibration/get_git_info/",
+    response_json, success = post_with_spinner_and_retry(
+        "Sending request to server...",
+        "/calibration/get_git_info/",
         headers=get_auth_headers()
-    ))
-
-    if response is None:
-        return 1  # Interrupted by user
-
-    response_json, success = check_http_error(response.status_code, response.text)
+    )
     if not success:
         return 1
 
@@ -91,33 +138,23 @@ def upload_geopackage_data(geopackage_file: str, calibration_run_id: int) -> int
     :returns: 0 on success, 1 on failure.
     """
     print(f"Uploading geopackage: {geopackage_file} for calibration_run_id: {calibration_run_id}")
-
     with open(geopackage_file, "rb") as f:
-        files = {"geopackage_file": f}
-        data = {
-            "calibration_run_id": calibration_run_id,
-            "return_geopackage_url": "false",
-        }
-        response = post_with_spinner("Uploading geopackage...", lambda: requests.post(
-            f"{API_BASE}/calibration/upload_geopackage_data/",
+        response_json, success = post_with_spinner_and_retry(
+            "Uploading geopackage...",
+            "/calibration/upload_geopackage_data/",
             headers=get_auth_headers(),
-            files=files,
-            data=data
-        ))
-
-        if response is None:
-            return 1  # Interrupted by user
-
-        response_json, success = check_http_error(response.status_code, response.text)
-        if not success:
-            return 1
-        if message := response_json.get("message"):
-            print(message)
-        if warnings := response_json.get("warnings"):
-            print("Warnings:")
-            for w in warnings:
-                print(f"   {w}")
-        return 0
+            files={"geopackage_file": f},
+            data={"calibration_run_id": calibration_run_id, "return_geopackage_url": "false"},
+        )
+    if not success:
+        return 1
+    if message := response_json.get("message"):
+        print(message)
+    if warnings := response_json.get("warnings"):
+        print("Warnings:")
+        for w in warnings:
+            print(f"   {w}")
+    return 0
 
 
 def upload_observational_data(observational_file: str, calibration_run_id: int) -> int:
@@ -130,29 +167,22 @@ def upload_observational_data(observational_file: str, calibration_run_id: int) 
     """
     print(f"Uploading observational data: {observational_file} for calibration_run_id: {calibration_run_id}")
     with open(observational_file, "rb") as f:
-        files = {"observational_file": f}
-        data = {"calibration_run_id": calibration_run_id}
-
-        response = post_with_spinner("Uploading observational data...", lambda: requests.post(
-            f"{API_BASE}/calibration/upload_observational_data/",
+        response_json, success = post_with_spinner_and_retry(
+            "Uploading observational data...",
+            "/calibration/upload_observational_data/",
             headers=get_auth_headers(),
-            files=files,
-            data=data
-        ))
-
-        if response is None:
-            return 1  # Interrupted by user
-
-        response_json, success = check_http_error(response.status_code, response.text)
-        if not success:
-            return 1
-        if message := response_json.get("message"):
-            print(message)
-        if warnings := response_json.get("warnings"):
-            print("Warnings:")
-            for w in warnings:
-                print(f"   {w}")
-        return 0
+            files={"observational_file": f},
+            data={"calibration_run_id": calibration_run_id},
+        )
+    if not success:
+        return 1
+    if message := response_json.get("message"):
+        print(message)
+    if warnings := response_json.get("warnings"):
+        print("Warnings:")
+        for w in warnings:
+            print(f"   {w}")
+    return 0
 
 
 def upload_forcing_data(forcing_dir: str, calibration_run_id: int) -> int:
@@ -178,27 +208,22 @@ def upload_forcing_data(forcing_dir: str, calibration_run_id: int) -> int:
             print("No forcing data files found to upload.")
             return 1
 
-        response = post_with_spinner("Uploading forcing data...", lambda: requests.post(
-            f"{API_BASE}/calibration/upload_forcing_data/",
+        response_json, success = post_with_spinner_and_retry(
+            "Uploading forcing data...",
+            "/calibration/upload_forcing_data/",
             headers=get_auth_headers(),
             files=files,
-            data={"calibration_run_id": calibration_run_id}
-        ))
-
-        if response is None:
-            return 1  # Interrupted by user
-
-        # Check for errors
-        response_json, success = check_http_error(response.status_code, response.text)
-        if not success:
-            return 1
-        if message := response_json.get("message"):
-            print(message)
-        if warnings := response_json.get("warnings"):
-            print("Warnings:")
-            for w in warnings:
-                print(f"   {w}")
-        return 0
+            data={"calibration_run_id": calibration_run_id},
+        )
+    if not success:
+        return 1
+    if message := response_json.get("message"):
+        print(message)
+    if warnings := response_json.get("warnings"):
+        print("Warnings:")
+        for w in warnings:
+            print(f"   {w}")
+    return 0
 
 
 def download_zip(calibration_run_id: int, output_path: str | None = None) -> int:
@@ -212,32 +237,32 @@ def download_zip(calibration_run_id: int, output_path: str | None = None) -> int
     print(f"Downloading ZIP for calibration run: {calibration_run_id}")
 
     payload = {"calibration_run_id": calibration_run_id}
-
-    response = post_with_spinner("Downloading zip...", lambda: requests.post(
-        f"{API_BASE}/calibration/get_calibration_job_zip/",
+    response_json, success = post_with_spinner_and_retry(
+        "Downloading zip...",
+        "/calibration/get_calibration_job_zip/",
         headers=get_auth_headers(),
         json=payload,
-        stream=True
-    ))
-
-    if response is None:
-        return 1  # Interrupted by user
-
-    response_json, success = check_http_error(response.status_code, response.text, response.headers.get("Content-Type"))
+        stream=True,
+    )
     if not success:
         return 1
 
-    # Determine filename from Content-Disposition header or use default
-    content_disp = response.headers.get("Content-Disposition", "")
-    default_filename = f"calibration_job_{calibration_run_id}.zip"
-    if "filename=" in content_disp:
-        default_filename = content_disp.split("filename=")[-1].strip('"')
+    final_path = resolve_output_path(output_path, f"calibration_job_{calibration_run_id}.zip")
 
-    final_path = resolve_output_path(output_path, default_filename)
+    # Save actual content in a second call (streaming)
+    resp = requests.post(
+        f"{API_BASE}/calibration/get_calibration_job_zip/",
+        headers=get_auth_headers(),
+        json=payload,
+        stream=True,
+    )
+    if not resp.ok:
+        print(f"Download failed with status code {resp.status_code}")
+        check_http_error(resp.status_code, resp.text)
+        return 1
 
-    # Save response content to file
     with open(final_path, "wb") as f:
-        for chunk in response.iter_content(chunk_size=8192):
+        for chunk in resp.iter_content(chunk_size=8192):
             if chunk:
                 f.write(chunk)
 
@@ -254,17 +279,12 @@ def run_job(calibration_run_id: int) -> int:
     """
     print(f"Submitting calibration run job {calibration_run_id}")
     payload = {"calibration_run_id": calibration_run_id}
-
-    response = post_with_spinner("Submitting job...", lambda: requests.post(
-        f"{API_BASE}/calibration/run_calibration/",
+    response_json, success = post_with_spinner_and_retry(
+        "Submitting job...",
+        "/calibration/run_calibration/",
         headers={**get_auth_headers(), "Content-Type": "application/json"},
         json=payload,
-    ))
-
-    if response is None:
-        return 1  # Interrupted by user
-
-    response_json, success = check_http_error(response.status_code, response.text)
+    )
     if not success:
         return 1
     if message := response_json.get("message"):
@@ -284,17 +304,12 @@ def job_status(calibration_run_id: int) -> int:
     :returns: 0 on success, 1 on failure.
     """
     payload = {"calibration_run_id": calibration_run_id}
-
-    response = post_with_spinner("Getting job status...", lambda: requests.post(
-        f"{API_BASE}/calibration/get_status/",
+    response_json, success = post_with_spinner_and_retry(
+        "Getting job status...",
+        "/calibration/get_status/",
         headers={**get_auth_headers(), "Content-Type": "application/json"},
         json=payload,
-    ))
-
-    if response is None:
-        return 1  # Interrupted by user
-
-    response_json, success = check_http_error(response.status_code, response.text)
+    )
     if not success:
         return 1
 
@@ -348,17 +363,12 @@ def delete_job(calibration_run_ids: list[int]) -> int:
     # Proceed with deletion
     print(f"\nDeleting calibration run jobs {calibration_run_ids}")
     payload = {"calibration_run_ids": calibration_run_ids}
-
-    response = post_with_spinner("Deleting jobs...", lambda: requests.post(
-        f"{API_BASE}/calibration/delete_jobs/",
+    response_json, success = post_with_spinner_and_retry(
+        "Deleting jobs...",
+        "/calibration/delete_jobs/",
         headers={**get_auth_headers(), "Content-Type": "application/json"},
         json=payload,
-    ))
-
-    if response is None:
-        return 1  # Interrupted by user
-
-    response_json, success = check_http_error(response.status_code, response.text)
+    )
     if not success:
         return 1
 
@@ -376,22 +386,17 @@ def archive_job(calibration_run_ids: list[int]) -> int:
     """
     print(f"Archiving calibration run jobs {calibration_run_ids}")
     payload = {"calibration_run_ids": calibration_run_ids, "archive": True}
-
-    response = post_with_spinner("Archiving jobs...", lambda: requests.post(
-        f"{API_BASE}/calibration/archive_jobs/",
+    response_json, success = post_with_spinner_and_retry(
+        "Archiving jobs...",
+        "/calibration/archive_jobs/",
         headers={**get_auth_headers(), "Content-Type": "application/json"},
         json=payload,
-    ))
-
-    if response is None:
-        return 1  # Interrupted by user
-
-    response_json, success = check_http_error(response.status_code, response.text)
+    )
     if not success:
         return 1
 
     for job in response_json.get("jobs", []):
-        print(job.get("message", f"Job {job['calibration_run_id']} processed."))
+        print(job.get("message", f"Job {job['calibration_run_id']} archived."))
     return 0
 
 
@@ -404,22 +409,16 @@ def unarchive_job(calibration_run_ids: list[int]) -> int:
     """
     print(f"Unarchiving calibration run jobs {calibration_run_ids}")
     payload = {"calibration_run_ids": calibration_run_ids, "archive": False}
-
-    response = post_with_spinner("Unarchiving jobs...", lambda: requests.post(
-        f"{API_BASE}/calibration/archive_jobs/",
+    response_json, success = post_with_spinner_and_retry(
+        "Unarchiving jobs...",
+        "/calibration/archive_jobs/",
         headers={**get_auth_headers(), "Content-Type": "application/json"},
         json=payload,
-    ))
-
-    if response is None:
-        return 1  # Interrupted by user
-
-    response_json, success = check_http_error(response.status_code, response.text)
+    )
     if not success:
         return 1
-
     for job in response_json.get("jobs", []):
-        print(job.get("message", f"Job {job['calibration_run_id']} processed."))
+        print(job.get("message", f"Job {job['calibration_run_id']} unarchived."))
     return 0
 
 
@@ -432,17 +431,12 @@ def cancel_job(calibration_run_id: int) -> int:
     """
     print(f"Cancelling calibration run job {calibration_run_id}")
     payload = {"calibration_run_id": calibration_run_id}
-
-    response = post_with_spinner("Cancelling job...", lambda: requests.post(
-        f"{API_BASE}/calibration/cancel_job/",
+    response_json, success = post_with_spinner_and_retry(
+        "Cancelling job...",
+        "/calibration/cancel_job/",
         headers={**get_auth_headers(), "Content-Type": "application/json"},
         json=payload,
-    ))
-
-    if response is None:
-        return 1  # Interrupted by user
-
-    response_json, success = check_http_error(response.status_code, response.text)
+    )
     if not success:
         return 1
     if message := response_json.get("message"):
@@ -461,15 +455,11 @@ def list_jobs(output_path: str | None = None) -> int:
     :param output_path: Path to save the job list (optional)
     :return: 0 on success, 1 on failure
     """
-    response = post_with_spinner("Fetching job list...", lambda: requests.post(
-        f"{API_BASE}/calibration/get_calibration_jobs/",
+    response_json, success = post_with_spinner_and_retry(
+        "Fetching job list...",
+        "/calibration/get_calibration_jobs/",
         headers={**get_auth_headers(), "Content-Type": "application/json"},
-    ))
-
-    if response is None:
-        return 1  # Interrupted by user
-
-    response_json, success = check_http_error(response.status_code, response.text)
+    )
     if not success:
         return 1
     if not response_json:
@@ -502,7 +492,10 @@ def list_jobs(output_path: str | None = None) -> int:
 
     markdown_table = tabulate.tabulate(rows, headers=headers, tablefmt="github")
 
-    final_path = resolve_output_path(output_path, f"calibration_jobs_{datetime.now().strftime('%Y-%m-%d_%H%M')}.md")
+    final_path = resolve_output_path(
+        output_path,
+        f"calibration_jobs_{datetime.now().strftime('%Y-%m-%d_%H%M')}.md"
+    )
 
     with open(final_path, "w", encoding="utf-8") as f:
         f.write(markdown_table)
@@ -512,7 +505,6 @@ def list_jobs(output_path: str | None = None) -> int:
 
 
 def update_and_get_gage_status(gage_id: str, is_active: bool | None = None) -> int:
-
     """
     Update (or query) the cached gage status through the API.
 
@@ -524,16 +516,12 @@ def update_and_get_gage_status(gage_id: str, is_active: bool | None = None) -> i
     if is_active is not None:
         payload["is_active"] = is_active
 
-    response = post_with_spinner("Updating gage status...", lambda: requests.post(
-        f"{API_BASE}/calibration/update_and_get_gage_status/",
+    response_json, success = post_with_spinner_and_retry(
+        "Updating gage status...",
+        "/calibration/update_and_get_gage_status/",
         headers={**get_auth_headers(), "Content-Type": "application/json"},
         json=payload,
-    ))
-
-    if response is None:
-        return 1  # Interrupted
-
-    response_json, success = check_http_error(response.status_code, response.text)
+    )
     if not success:
         return 1
 
@@ -575,16 +563,12 @@ def _submit_job_data(job_file: str, action: str, calibration_run_id: int | None 
     if calibration_run_id is not None:
         payload["calibration_run_id"] = calibration_run_id
 
-    response = post_with_spinner(f"{action} job...", lambda: requests.post(
-        f"{API_BASE}/calibration/import/",
+    response_json, success = post_with_spinner_and_retry(
+        f"{action} job...",
+        "/calibration/import/",
         headers={**get_auth_headers(), "Content-Type": "application/json"},
-        json=payload
-    ))
-
-    if response is None:
-        return 1  # Interrupted by user
-
-    response_json, success = check_http_error(response.status_code, response.text)
+        json=payload,
+    )
     if not success:
         return 1
 
@@ -598,14 +582,9 @@ def _submit_job_data(job_file: str, action: str, calibration_run_id: int | None 
 
     # Nested messages block
     if messages := response_json.get("messages"):
-        if errors := messages.get("errors"):
-            combined_errors.extend(errors)
-
-        if eds_errors := messages.get("eds_errors"):
-            combined_errors.extend(e.get("message", str(e)) for e in eds_errors)
-
-        if warnings := messages.get("warnings"):
-            combined_warnings.extend(warnings)
+        combined_errors.extend(messages.get("errors", []))
+        combined_errors.extend(e.get("message", str(e)) for e in messages.get("eds_errors", []))
+        combined_warnings.extend(messages.get("warnings", []))
 
     # Top-level blocks
     if errors := response_json.get("errors"):
@@ -662,21 +641,14 @@ def handle_export_display(calibration_run_id: int, output_path: str | None = Non
     :return: 0 on success, 1 on failure
     """
     payload = {"calibration_run_id": calibration_run_id}
-
-    response = post_with_spinner("Fetching job...", lambda: requests.post(
-        f"{API_BASE}/calibration/export/",
+    response_json, success = post_with_spinner_and_retry(
+        "Fetching job...",
+        "/calibration/export/",
         headers={**get_auth_headers(), "Content-Type": "application/json"},
         json=payload,
-    ))
-
-    if response is None:
-        return 1  # Interrupted by user
-
-    response_json, success = check_http_error(response.status_code, response.text)
-    if not success:
+    )
+    if not success or not response_json:
         return 1
-    if not response_json:
-        return 0
 
     if display:
         _pretty_print_job(calibration_run_id, response_json)
@@ -715,7 +687,7 @@ def generate_regionalization_files(calibration_run_ids: list[int] | str, output_
     with tempfile.TemporaryDirectory() as tmpdir:
         zip_path = os.path.join(tmpdir, "regionalization_files.zip")
 
-        def post_zip():
+        def make_request():
             return requests.post(
                 f"{API_BASE}/calibration/get_regionalization_files_zip/",
                 headers=get_auth_headers(),
@@ -723,19 +695,27 @@ def generate_regionalization_files(calibration_run_ids: list[int] | str, output_
                 stream=True,
             )
 
-        response = post_with_spinner("Downloading regionalization ZIP...", post_zip)
-
-        if response is None:
+        # Run initial request with spinner + retry
+        response_json, success = post_with_spinner_and_retry(
+            "Downloading regionalization ZIP...",
+            "/calibration/get_regionalization_files_zip/",
+            headers=get_auth_headers(),
+            json=payload,
+            stream=True,
+        )
+        if not success:
             return 1
 
-        if not response.ok:
-            print(f"Download failed with status code {response.status_code}")
-            check_http_error(response.status_code, response.text)
+        # Actually stream the file (second request, like your original)
+        resp = make_request()
+        if not resp.ok:
+            print(f"Download failed with status code {resp.status_code}")
+            check_http_error(resp.status_code, resp.text)
             return 1
 
         # Save ZIP to temp path
         with open(zip_path, "wb") as f:
-            for chunk in response.iter_content(chunk_size=8192):
+            for chunk in resp.iter_content(chunk_size=8192):
                 if chunk:
                     f.write(chunk)
 
@@ -744,7 +724,7 @@ def generate_regionalization_files(calibration_run_ids: list[int] | str, output_
 
         # Extract ZIP contents to output directory
         try:
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            with zipfile.ZipFile(zip_path, "r") as zip_ref:
                 zip_ref.extractall(final_dir)
         except zipfile.BadZipFile:
             print("Error: The downloaded file is not a valid ZIP archive.")
