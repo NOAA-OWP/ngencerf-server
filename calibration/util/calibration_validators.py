@@ -639,6 +639,16 @@ class LoadGageResponseSerializer(BaseSerializer):
     domain_values = DomainResponseSerializer(many=True)
 
 
+class UpdateGageStatusRequestSerializer(BaseSerializer):
+    gage_id = serializers.CharField(required=True)
+    is_active = serializers.BooleanField(required=False)
+
+
+class UpdateGageStatusResponseSerializer(GenericMessageResponseSerializer):
+    gage_id = serializers.CharField(required=True)
+    is_active = serializers.BooleanField(required=True)
+
+
 class CreateCalibrationRunResponseSerializer(GenericMessageResponseSerializer):
     calibration_run_id = serializers.IntegerField(required=True)
     job_data_dir = serializers.CharField(required=True)
