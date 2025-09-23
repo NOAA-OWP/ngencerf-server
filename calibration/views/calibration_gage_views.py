@@ -20,6 +20,7 @@ from calibration.util.calibration_validators import SaveGageRequestSerializer, G
     SaveGageResponseSerializer, LoadGageResponseSerializer, GageSerializer, GenericResponseSerializer, ErrorResponseSerializer, \
     UploadObservationalSerializer, UploadGeopackageSerializer, UploadGeopackageResponseSerializer, UpdateGageStatusRequestSerializer, \
     UpdateGageStatusResponseSerializer
+from calibration.util.cloud_util import path_exists
 from calibration.util.file_util import delete_all_files_in_directory, get_single_file
 from calibration.util.geopkg import gpkg_to_png_selected_layers, get_geometry_from_gpkg
 from calibration.util.ngen_locations import get_forcing_dir_for_job, get_observational_file_for_job, \
@@ -27,7 +28,7 @@ from calibration.util.ngen_locations import get_forcing_dir_for_job, get_observa
 from calibration.views import ngen_cal_input
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import get_calibration_run, ResponseError, handle_exceptions, validate_response, validate_request, \
-    png_str_to_base64_url, truncate_large_fields, get_valid_path, get_user_email, get_elapsed_str
+    png_str_to_base64_url, truncate_large_fields, get_valid_path, get_user_email, get_elapsed_str, readonly_transaction
 from calibration.views.data_services import get_geopackage_from_data_services, get_observational_data_from_data_services, \
     get_forcing_data_from_s3, DataServicesException, get_module_metadata_from_data_services, clear_times
 
@@ -75,7 +76,6 @@ def load_gage_tab(request: Request) -> Response:
 
     calibration_run_id = validator.get('calibration_run_id')
 
-    # This ensures we don’t fetch unnecessary fields
     run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=list(StatusEnum))
     if error_return:
         return error_return
@@ -229,6 +229,7 @@ def save_gage_tab(request: Request):
 
     geopackage_image_url = None
     num_catchments = None
+
     if gage_id:
         try:
             eds_errors_entry = save_gage(run, gage_id)
@@ -305,18 +306,24 @@ def save_gage_tab(request: Request):
 
         run.forcing_source_requested = ForcingSourceEnum.get_instance(forcing_source_requested_name) if forcing_source_requested_name else None
 
-    with transaction.atomic():
-        run.save()
+    # -------------------------
+    # Write phase
+    # -------------------------
+    run.save()
 
     ngen_cal_input.ready_to_run(run)
 
-    response = {'message': f'Calibration Job {run.id} updated', 'calibration_run_id': run.id, 'status': run.status.name,
-                'geopackage_image_url': geopackage_image_url, 'num_catchments': num_catchments,
+    response = {'message': f'Calibration Job {run.id} updated',
+                'calibration_run_id': run.id,
+                'status': run.status.name,
+                'geopackage_image_url': geopackage_image_url,
+                'num_catchments': num_catchments,
                 'forcing_source_requested': run.forcing_source_requested.name if run.forcing_source_requested else None,
                 'forcing_source_actual': run.forcing_source_actual.name if run.forcing_source_actual else None}
     if run.forcing_source_requested != run.forcing_source_actual:
         response['warnings'] = [
-            f'{run.forcing_source_requested.name} forcing data not found.  Using {run.forcing_source_actual.name if run.forcing_source_actual else None}']
+            f'{run.forcing_source_requested.name} forcing data not found.  Using {run.forcing_source_actual.name if run.forcing_source_actual else None}'
+        ]
     if eds_errors:
         response['eds_errors'] = eds_errors
 
@@ -395,7 +402,7 @@ def get_geopackage_image_url(geopackage_path: str) -> str | None:
     :param geopackage_path: The file path of the GeoPackage.
     :return: A base64-encoded URL string of the PNG image if conversion is successful; otherwise, None.
     """
-    if geopackage_path and os.path.exists(geopackage_path):
+    if geopackage_path and path_exists(geopackage_path):
         try:
             # Attempt to convert the GeoPackage to PNG for selected layers
             geopackage_png = gpkg_to_png_selected_layers(geopackage_path)

@@ -259,7 +259,8 @@ CAL_MGR_DOCKER_CMD = f'docker run --network host -v {NGEN_CAL_MOUNT_POINT}:{NGEN
 NGEN_FORCING_DOCKER_CMD = f'docker run --entrypoint /ngen-app/bin/run-ngen-forcing.sh -v {NGEN_CAL_MOUNT_POINT}:{NGEN_CAL_MOUNT_POINT} ngen-bmi-forcing'
 NGEN_FORECAST_DOCKER_CMD = f'docker run -v {NGEN_CAL_MOUNT_POINT}:{NGEN_CAL_MOUNT_POINT} nwm-fcst-mgr'
 
-NGEN_CONTAINERS = ['ngen', 'nwm-cal-mgr', 'ngen-bmi-forcing', 'nwm-fcst-mgr']
+# TODO Is this used?
+# NGEN_CONTAINERS = ['ngen', 'nwm-cal-mgr', 'ngen-bmi-forcing', 'nwm-fcst-mgr']
 
 # Used when running in NGEN_ENVIRONMENT=LOCAL
 CAL_MGR_SCRIPT = os.path.join(CAL_MGR_REPO_ROOT, 'docker', 'run-ngen-cal.sh')

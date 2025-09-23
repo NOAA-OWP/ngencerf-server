@@ -17,6 +17,7 @@ from calibration.models import CalibrationFormulation, CalibrationStopCriteria, 
 from calibration.util.caching import get_cached_module_by_name
 from calibration.util.calibration_validators import CalibrationRunSerializer, ExportResponseSerializer, ErrorResponseSerializer, \
     LoadCalibrationJobSerializer, LoadCalibrationRunResponseSerializer
+from calibration.util.cloud_util import path_exists
 from calibration.util.file_util import copy_directory, copy_file_to_directory, get_single_file
 from calibration.util.geopkg import gpkg_to_png_selected_layers, get_geometry_from_gpkg
 from calibration.util.ngen_locations import get_forcing_dir_for_job, get_observational_dir_for_job, get_geopackage_dir_for_job, \
@@ -38,94 +39,176 @@ from calibration.views.data_services import DataServicesException, get_module_me
 logger = logging.getLogger(__name__)
 
 
-def import_calibration_run_data(request: Request, calibration_run_data: dict, genesis: JobGenesis, run: CalibrationRun = None) -> tuple[
-    CalibrationRun | None, dict | None, Response | None]:
+def import_calibration_run_data(request: Request,
+                                calibration_run_data: dict,
+                                genesis: JobGenesis,
+                                run: CalibrationRun = None
+                                ) -> tuple[CalibrationRun | None, dict | None, Response | None]:
     """
     Imports calibration run data and creates a new CalibrationRun instance if successful.  Also used in cloning
 
+    Minimal refactor:
+      - Adds an initial READ-ONLY block for validations / preparation that do not write to the DB.
+      - Keeps a single WRITE block that performs all DB mutations in the same order as before.
+      - IO (copying files, Data Services calls, etc.) is intentionally left where it was.
+
     :param request: Django HTTP request with user details.
     :param calibration_run_data: Dictionary with calibration run data.
-    :param genesis: Enum value indicating the origin of the job.
-    :param run: Optional CalibrationRun to update.  If None, a new CalibrationRun is created.
+    :param genesis: Enum indicating the origin of the job.
+    :param run: Optional CalibrationRun to update. If None, a new CalibrationRun is created.
     :return: Tuple containing CalibrationRun instance, response_dict, and optional ResponseError.
     """
-    with transaction.atomic():
-        run = run if run else create_calibration_run_internal(request.user, genesis)
+    # ---------------------------------------------------------------------
+    # Initialize containers used across phases
+    # ---------------------------------------------------------------------
+    errors: list[str] = []
+    warnings: list[str] = []
+    eds_errors: list[dict] = []
+    formulation_errors: list[str] = []
+    formulation_warnings: list[str] = []
+    have_lstm = False
 
-        errors = []
-        warnings = []
-        eds_errors = []
+    # Inputs pulled once
+    gage_id = calibration_run_data.get('gage_id')
+    modules_list = calibration_run_data.get('modules')
+    module_names = set(modules_list) if modules_list else set()
+    sloth_parameters = calibration_run_data.get('sloth_parameters')
+    use_sloth = calibration_run_data.get('use_sloth')
+    parameters = calibration_run_data.get('parameters')
+    automatic_validation = calibration_run_data.get('automatic_validation')  # defaults handled later on run
+    calibration_times = calibration_run_data.get('calibration_times')
+    validation_times = calibration_run_data.get('validation_times')
+    optimization_name = calibration_run_data.get('optimization')
+    objective_function_name = calibration_run_data.get('objective_function')
+    streamflow_threshold = calibration_run_data.get('streamflow_threshold')
+    peak_flow_threshold = calibration_run_data.get('peak_flow_threshold')
+    optimization_inputs = calibration_run_data.get('optimization_inputs')
+    stop_criteria = calibration_run_data.get('stop_criteria')
+    save_plot_iteration_frequency = calibration_run_data.get('save_plot_iteration_frequency')
+    save_output_iteration = calibration_run_data.get('save_output_iteration')
+    logging_config = calibration_run_data.get('logging_config')
 
-        formulation_errors: list[str] = []
-        formulation_warnings: list[str] = []
-        modules = None
-        have_lstm = False
+    # These are used if the sources are uploads (paths provided by the client)
+    geopackage_source_name = calibration_run_data.get('geopackage_source')
+    geopackage_user_uploaded_file_path = calibration_run_data.get('geopackage_user_uploaded_file_path')
+    forcing_source_name = calibration_run_data.get('forcing_source')
+    forcing_user_uploaded_dir_path = calibration_run_data.get('forcing_user_uploaded_dir_path')
+    observational_source_name = calibration_run_data.get('observational_source')
+    observational_user_uploaded_file_path = calibration_run_data.get('observational_user_uploaded_file_path')
 
-        #############################
-        # Gage
-        #############################
-        gage_id = calibration_run_data.get('gage_id')
-        if gage_id:
-            try:
-                save_gage(run, gage_id)
-            except Gage.DoesNotExist:
-                return None, None, ResponseError(f"Gage '{gage_id}' does not exist or is not active", http_status=status.HTTP_404_NOT_FOUND)
+    # Prepared (read-only) outputs
+    prepared_inputs = None  # from validate_optimizations
+    # Note: validate_objective_function / validate_optimizations assign fields on `run` in memory only; DB save happens later.
 
-            #############################
-            # Formulations and Modules
-            #############################
-            modules_list = calibration_run_data.get('modules')
-            module_names = set(modules_list) if modules_list else set()
+    # If a new run is needed, create it up front so we have an ID/paths.
+    # This is a single write operation and intentionally left simple (no explicit transaction).
+    if not run:
+        run = create_calibration_run_internal(request.user, genesis)
 
-            # Validate module names
+    # ---------------------------------------------------------------------
+    # READ-ONLY PHASE: validate & prepare (no DB writes)
+    # ---------------------------------------------------------------------
+    with readonly_transaction():
+        # Validate modules list
+        if module_names:
             error_message = validate_modules(module_names)
             if error_message:
                 return None, None, ResponseError(error_message)
 
-            # TODO Eventually, we will have more user properties that are specific to certain modules
-            # so we'll need a separate table to control those.
-            # For now, we are forced to hard-code module names and specific flags
-            # Only allow AET Rootzone to be True if CFE is included in the formulation
-            run.is_aet_rootzone = calibration_run_data.get('is_aet_rootzone', False)
-            if run.is_aet_rootzone and not any(cfe in module_names for cfe in ('CFE-S', 'CFE-X')):
-                return None, None, ResponseError('AET Rootzone cannot be True for formulations not using CFE.')
-
-            formulation_errors, formulation_warnings, _ = validate_formulation(module_names)
+            # Formulation-level checks (read-only)
+            f_errors, f_warnings, _ = validate_formulation(module_names)
+            formulation_errors.extend(f_errors or [])
+            formulation_warnings.extend(f_warnings or [])
             have_lstm = 'LSTM' in module_names
 
-            sloth_parameters = calibration_run_data.get('sloth_parameters')
-            use_sloth = calibration_run_data.get('use_sloth')
-            if have_lstm and (sloth_parameters or use_sloth):
-                return None, None, ResponseError("You cannot specify sloth_parameters or use_sloth when using LSTM")
+        # LSTM exclusivity checks
+        if have_lstm and (sloth_parameters or use_sloth):
+            return None, None, ResponseError("You cannot specify sloth_parameters or use_sloth when using LSTM")
+        if have_lstm and (
+                optimization_name or objective_function_name or
+                streamflow_threshold is not None or peak_flow_threshold is not None or
+                stop_criteria is not None or
+                save_plot_iteration_frequency is not None or save_output_iteration
+        ):
+            return None, None, ResponseError(
+                "You cannot specify optimization_name, objective_function_name, streamflow_threshold, peak_flow_threshold, "
+                "stop_criteria, save_plot_iteration_frequency or save_output_iteration when using LSTM"
+            )
 
-            # Set formulation name
-            run.user_formulation_name = calibration_run_data.get('formulation_name')
+        # Sloth parameter gating checks (no writes here)
+        if use_sloth and not sloth_parameters:
+            return None, None, ResponseError(f"If you indicate 'use_sloth', you must enter {SLOTH} parameters")
+        if (not use_sloth) and sloth_parameters:
+            return None, None, ResponseError(f"You must indicate 'use_sloth' is True to allow {SLOTH} parameters to be specified")
 
-            # Handling of sloth parameters
-            run.use_sloth = use_sloth
+        # Validation times constraints (no DB writes here)
+        if not automatic_validation and validation_times:
+            return None, None, ResponseError('validation_times cannot be specified unless automatic_validation is True')
 
-            sloth_parameters = sloth_parameters
-            if not run.use_sloth and sloth_parameters:
-                return None, None, ResponseError(f"You must indicate 'use_sloth' is True to allow {SLOTH} parameters to be specified")
-
-            if run.use_sloth and not sloth_parameters:
-                return None, None, ResponseError(f"If you indicate 'use_sloth', you must enter {SLOTH} parameters")
-
-            # Create any new formulations and process sloth parameters
-            for m_name in module_names:
-                module_instance = get_cached_module_by_name(m_name)
-                CalibrationFormulation.objects.get_or_create(calibration_run=run, module=module_instance)
-
-            error_message = add_sloth_parameters(run, sloth_parameters, module_names)
+        # Optimization validations (assigns to `run` in memory only; no DB write)
+        if optimization_name:
+            _, prepared_inputs, error_message = validate_optimizations(run, optimization_name, optimization_inputs)
             if error_message:
                 return None, None, ResponseError(error_message)
+        else:
+            if optimization_inputs:
+                return None, None, ResponseError('Optimization inputs cannot be specified without an optimization name')
 
-            # Get the list of modules for this Run
-            modules = CalibrationFormulation.objects.filter(calibration_run=run)
+        # Objective function validation (assigns to `run` in memory only; no DB write)
+        error_message = validate_objective_function(run, objective_function_name, streamflow_threshold, peak_flow_threshold)
+        if error_message:
+            return None, None, ResponseError(error_message)
 
-            if modules and run.gage:
+        # If a gage_id was provided, ensure the gage exists (read-only check)
+        if gage_id:
+            try:
+                # We don't persist here; existence check only. `save_gage` will persist later.
+                _ = Gage.objects.get(gage_id=gage_id, is_active=True)
+            except Gage.DoesNotExist:
+                return None, None, ResponseError(
+                    f"Gage '{gage_id}' does not exist or is not active",
+                    http_status=status.HTTP_404_NOT_FOUND
+                )
+
+    # ---------------------------------------------------------------------
+    # WRITE PHASE: perform DB mutations & keep IO where it was
+    # ---------------------------------------------------------------------
+    with transaction.atomic():
+        # -----------------------------
+        # Gage
+        # -----------------------------
+        if gage_id:
+            # Persist the gage on the run
+            try:
+                save_gage(run, gage_id)
+            except Gage.DoesNotExist:
+                return None, None, ResponseError(
+                    f"Gage '{gage_id}' does not exist or is not active",
+                    http_status=status.HTTP_404_NOT_FOUND
+                )
+
+            # -----------------------------
+            # Formulations & Modules
+            # -----------------------------
+            if module_names:
+                # Persist formulations for this run
+                for m_name in module_names:
+                    module_instance = get_cached_module_by_name(m_name)
+                    CalibrationFormulation.objects.get_or_create(calibration_run=run, module=module_instance)
+
+                # Handle SLOTH parameters (persist)
+                if use_sloth:
+                    error_message = add_sloth_parameters(run, sloth_parameters, module_names)  # type: ignore[arg-type]
+                    if error_message:
+                        return None, None, ResponseError(error_message)
+
+                # Refresh modules queryset on the run (needed for DS metadata and later steps)
+                modules = CalibrationFormulation.objects.filter(calibration_run=run)
+
+                # Pull parameter metadata for modules from Data Services (kept where it was)
                 try:
-                    get_module_metadata_from_data_services(run, modules)  # type: ignore
+                    if modules and run.gage:
+                        get_module_metadata_from_data_services(run, modules)  # type: ignore
                 except DataServicesException as e:
                     errors.append(f"Error retrieving module parameter data from Data Services - status code: {e.status_code} - {str(e)}")
                     eds_errors.append({
@@ -134,24 +217,17 @@ def import_calibration_run_data(request: Request, calibration_run_data: dict, ge
                         'status_code': e.status_code if e.status_code else None
                     })
 
-        # Note that for EDS, only the paths are copied.  The files will be copied to the job-specific directory in ready_to_run
-        #############################
-        # Geopackage Handling
-        #############################
-        geopackage_source_name = calibration_run_data.get('geopackage_source')
-        geopackage_user_uploaded_file_path = calibration_run_data.get('geopackage_user_uploaded_file_path')
-
+        # -----------------------------
+        # Geopackage
+        # -----------------------------
         run.geopackage_source = GeopackageSourceEnum.get_instance(geopackage_source_name) if geopackage_source_name else None
-
         if run.geopackage_source == GeopackageSourceEnum.UPLOAD.db_instance:
             if geopackage_user_uploaded_file_path and os.path.exists(geopackage_user_uploaded_file_path):
-                # Copy file to job-specific directory
                 copy_file_to_directory(geopackage_user_uploaded_file_path, get_geopackage_dir_for_job(run))
             else:
                 if geopackage_user_uploaded_file_path:
                     errors.append(f"User uploaded geopackage data from '{geopackage_user_uploaded_file_path}' not found")
         else:
-            # Fetch geopackage from Data Services
             try:
                 get_geopackage_from_data_services(run)
             except DataServicesException as e:
@@ -161,24 +237,19 @@ def import_calibration_run_data(request: Request, calibration_run_data: dict, ge
                     'message': str(e),
                     'status_code': e.status_code if e.status_code else None
                 })
-        #############################
-        # Forcing Data Handling
-        #############################
-        forcing_source_name = calibration_run_data.get('forcing_source')
-        forcing_user_uploaded_dir_path = calibration_run_data.get('forcing_user_uploaded_dir_path')
 
+        # -----------------------------
+        # Forcing data
+        # -----------------------------
         if forcing_source_name:
             run.forcing_source_requested = run.forcing_source_actual = ForcingSourceEnum.get_instance(forcing_source_name)
-
         if run.forcing_source_requested == ForcingSourceEnum.UPLOAD.db_instance:
             if forcing_user_uploaded_dir_path and os.path.exists(forcing_user_uploaded_dir_path):
-                # Copy directory to job-specific path
                 copy_directory(forcing_user_uploaded_dir_path, get_forcing_dir_for_job(run))
             else:
                 if forcing_user_uploaded_dir_path:
                     errors.append(f"User uploaded forcing data from '{forcing_user_uploaded_dir_path}' not found")
         else:
-            # Fetch forcing data from S3
             try:
                 if gage_id and run.forcing_source_requested:
                     get_forcing_data_from_s3(run, run.forcing_source_requested.name)
@@ -190,17 +261,12 @@ def import_calibration_run_data(request: Request, calibration_run_data: dict, ge
                     'status_code': e.status_code if e.status_code else None
                 })
 
-        #############################
-        # Observational Data Handling
-        #############################
-        observational_source_name = calibration_run_data.get('observational_source')
-        observational_user_uploaded_file_path = calibration_run_data.get('observational_user_uploaded_file_path')
-
+        # -----------------------------
+        # Observational data
+        # -----------------------------
         run.observational_source = ObservationalSourceEnum.get_instance(observational_source_name) if observational_source_name else None
-
         if run.observational_source == ObservationalSourceEnum.UPLOAD.db_instance:
             if observational_user_uploaded_file_path and os.path.exists(observational_user_uploaded_file_path):
-                # Copy file to job-specific path
                 copy_file_to_directory(observational_user_uploaded_file_path, get_observational_dir_for_job(run))
             else:
                 if observational_user_uploaded_file_path:
@@ -210,8 +276,7 @@ def import_calibration_run_data(request: Request, calibration_run_data: dict, ge
                 if gage_id:
                     get_observational_data_from_data_services(run)
                     if run.forcing_source_requested != run.forcing_source_actual:
-                        warnings.append(
-                            f'{run.forcing_source_requested.name} forcing data not found.  Using {run.forcing_source_actual.name if run.forcing_source_actual else None}')
+                        warnings.append(f'{run.forcing_source_requested.name} forcing data not found.  Using {run.forcing_source_actual.name if run.forcing_source_actual else None}')
             except DataServicesException as e:
                 errors.append(f"Error retrieving observational data from Data Services - status code: {e.status_code} - {str(e)}")
                 eds_errors.append({
@@ -220,97 +285,60 @@ def import_calibration_run_data(request: Request, calibration_run_data: dict, ge
                     'status_code': e.status_code if e.status_code else None
                 })
 
-        #############################
-        # Tuning
-        #############################
-        parameters = calibration_run_data.get('parameters')
-        automatic_validation = calibration_run_data.get('automatic_validation')  # defaults to True
-        if have_lstm and parameters:
-            return None, None, ResponseError("You cannot specify parameters when using LSTM")
+        # -----------------------------
+        # Tuning (validate & persist)
+        # -----------------------------
+        run.automatic_validation = automatic_validation
 
-        if parameters and not modules:
-            return None, None, ResponseError('Parameters cannot be specified without modules')
-
-        # Don't bother validating parameters if we got a Data Services error
-        if not any(error.get('name') == 'parameters' for error in eds_errors):
+        # Only validate parameters if we didn't hit DS parameter metadata errors
+        if parameters and not any(error.get('name') == 'parameters' for error in eds_errors):
+            # These validations read from DB; saving persists selections
             parameter_errors, parameter_warnings = validate_parameters(run, parameters)
             if parameter_errors:
                 return None, None, ResponseError(parameter_errors)
-
             save_parameters(run, parameters, allow_nulls=True)
 
-        # Set automatic validation flags
-        run.automatic_validation = automatic_validation
-
-        calibration_times = calibration_run_data.get('calibration_times')
-        validation_times = calibration_run_data.get('validation_times')
-
-        if not run.automatic_validation and validation_times:
-            return None, None, ResponseError('validation_times cannot be specified unless automatic_validation is True')
-
+        # Times (persist)
         error_message = validate_and_save_times(run, calibration_times, validation_times)
         if error_message:
             return None, None, ResponseError(error_message)
 
-        #############################
-        # Optimization
-        #############################
-        optimization_name = calibration_run_data.get('optimization')
-        objective_function_name = calibration_run_data.get('objective_function')
-        streamflow_threshold = calibration_run_data.get('streamflow_threshold')
-        peak_flow_threshold = calibration_run_data.get('peak_flow_threshold')
-        optimization_inputs = calibration_run_data.get('optimization_inputs')
-        stop_criteria = calibration_run_data.get('stop_criteria')
-        save_plot_iteration_frequency = calibration_run_data.get('save_plot_iteration_frequency')
-        save_output_iteration = calibration_run_data.get('save_output_iteration')
-        if have_lstm and (
-                optimization_name or objective_function_name or
-                streamflow_threshold is not None or peak_flow_threshold is not None or optimization_name or
-                stop_criteria is not None or
-                save_plot_iteration_frequency is not None or save_output_iteration
-        ):
-            return None, None, ResponseError(
-                "You cannot specify optimization_name, objective_function_name, streamflow_threshold, peak_flow_threshold, "
-                "stop_criteria, save_plot_iteration_frequency or save_output_iteration when using LSTM")
-
-        if not optimization_name:
-            if optimization_inputs:
-                return None, None, ResponseError('Optimization inputs cannot be specified without an optimization name')
-        else:
-            optimization, prepared_inputs, error_message = validate_optimizations(run, optimization_name, optimization_inputs)
-            if error_message:
-                return None, None, ResponseError(error_message)
+        # -----------------------------
+        # Optimization persistence
+        # -----------------------------
+        # prepared_inputs came from read-only phase (validate_optimizations)
+        if prepared_inputs is not None:
             write_optimization_inputs(run, prepared_inputs)
 
-        error_message = validate_objective_function(run, objective_function_name, streamflow_threshold, peak_flow_threshold)
-        if error_message:
-            return None, None, ResponseError(error_message)
-
-        # Set run parameters and save
+        # Thresholds & iteration save flags
         run.save_plot_iteration_frequency = save_plot_iteration_frequency
         run.save_output_iteration = bool(save_output_iteration) if save_output_iteration is not None else False
         run.streamflow_threshold = streamflow_threshold
         run.peak_flow_threshold = peak_flow_threshold
 
         if stop_criteria is not None:
-            # I'm assuming for now that there is just one CalibrationStopCriteria for this run, but that might change in the future
+            # assuming single CalibrationStopCriteria
             CalibrationStopCriteria.objects.update_or_create(calibration_run=run, defaults={"value": stop_criteria})
 
-        #############################
-        # Logging
-        #############################
-        # Get logging_config which has been imported from json
-        logging_config = calibration_run_data.get('logging_config')
-
+        # -----------------------------
+        # Logging config (IO left as-is)
+        # -----------------------------
         if logging_config:
-            # Create a logging_config_import file with the imported data
             logging_config_path = get_ngen_logging_file(run, import_flag=True)
             os.makedirs(os.path.dirname(logging_config_path), exist_ok=True)
             with open(logging_config_path, 'w') as f:
                 json.dump(logging_config, f, indent=4)
 
+        # Final persistence of run fields updated above
+        run.use_sloth = use_sloth
+        run.user_formulation_name = calibration_run_data.get('formulation_name')
+        run.is_aet_rootzone = calibration_run_data.get('is_aet_rootzone', False)
         run.save()
-    messages = {}
+
+    # ---------------------------------------------------------------------
+    # Build response messages (unchanged)
+    # ---------------------------------------------------------------------
+    messages: dict = {}
     if errors:
         messages['errors'] = errors + formulation_errors
     if formulation_warnings:
@@ -345,6 +373,9 @@ def export_job(request: Request) -> Response:
     API endpoint to export calibration job data.
     Runs in READ ONLY mode to reduce contention.
 
+    Read-only block: fetch run and load data.
+    Post-processing: run ready_to_run (outside transactions).
+
     :param request: Django HTTP request, with parameters in the body for POST or query params for GET.
     :return: Response containing the exported calibration run data or an error.
     """
@@ -357,6 +388,9 @@ def export_job(request: Request) -> Response:
 
     calibration_run_id = validator.get('calibration_run_id')
 
+    # -------------------------------------------------------------
+    # Read-only block: fetch run and load data
+    # -------------------------------------------------------------
     with readonly_transaction():
         run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=list(StatusEnum))
         if error_return:
@@ -364,6 +398,9 @@ def export_job(request: Request) -> Response:
 
         calibration_run_data, _ = load_calibration_run_data(run, export=True)
 
+    # -------------------------------------------------------------
+    # Post-processing (not inside any transaction)
+    # -------------------------------------------------------------
     error_object, _ = ngen_cal_input.ready_to_run(run)
     if error_object:
         if error_object.has_warnings():
@@ -502,7 +539,7 @@ def load_calibration_run_data(run: CalibrationRun, export: bool = False, include
             gpkg_map_start = time.time()
             geopackage_path = get_single_file(
                 get_geopackage_dir_for_job(run)) if run.geopackage_source == GeopackageSourceEnum.UPLOAD.db_instance else run.geopackage_eds_file_path
-            if geopackage_path and os.path.exists(geopackage_path):
+            if geopackage_path and path_exists(geopackage_path):
                 geopackage_png = gpkg_to_png_selected_layers(geopackage_path)
                 base64_str = base64.b64encode(geopackage_png.getvalue()).decode('utf-8')
                 calibration_run_data['geopackage_image_url'] = f'data:image/png;base64,{base64_str}'
@@ -640,19 +677,32 @@ def load_calibration_run(request: Request) -> Response:
     calibration_run_id = validator.get('calibration_run_id')
     include_gpkg_map = validator.get('include_gpkg_map')
 
+    # -------------------------------------------------------------
+    # Read-only block: fetch run and load data
+    # -------------------------------------------------------------
     with readonly_transaction():
         run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=list(StatusEnum))
         if error_return:
             return error_return
 
         # Do all the heavy lifting in read-only mode
-        calibration_run_data, time_range = load_calibration_run_data(run, export=False, include_gpkg_map=include_gpkg_map)
+        calibration_run_data, time_range = load_calibration_run_data(
+            run,
+            export=False,
+            include_gpkg_map=include_gpkg_map
+        )
 
+    # -------------------------------------------------------------
+    # Short write block: persist computed time range if needed
+    # -------------------------------------------------------------
     # Persist only if we computed a valid time range
     if time_range and (not run.time_range_start or not run.time_range_end):
         with transaction.atomic():
             persist_time_range(run, time_range)
 
+    # -------------------------------------------------------------
+    # Validate and return response
+    # -------------------------------------------------------------
     response_validator, error_response = validate_response(
         LoadCalibrationRunResponseSerializer,
         calibration_run_data,

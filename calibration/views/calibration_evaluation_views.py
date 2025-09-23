@@ -216,7 +216,8 @@ def get_log_names(request: Request) -> Response:
         )
         if error_return:
             return error_return
-        calibration_run = validation_run.calibration_run
+        # TODO calibration_run variable not used right now, but we might need later for forecast
+        # calibration_run = validation_run.calibration_run
 
         # Define available log categories and names
         log_names = [

@@ -28,6 +28,7 @@ ngencerf_services.override.env
 postgres_db.override.env
 
 .load_static
+.load_gages
 .gages_fingerprint
 *git_info.json
 /git_info

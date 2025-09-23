@@ -1,4 +1,5 @@
 import logging
+import os
 import sys
 
 from django.apps import AppConfig
@@ -16,6 +17,12 @@ def print_db_info():
     logger.info(f"Database Name: {db_info['NAME']}")
     logger.info(f"Database URL: {db_info['HOST']}:{db_info['PORT']}")
     logger.info(f"Database User: {db_info['USER']}")
+
+
+def log_worker_info():
+    pid = os.getpid()
+    argv = " ".join(sys.argv)
+    logger.info(f"Worker PID: {pid} | argv: {argv}")
 
 
 def print_banner():
@@ -52,13 +59,19 @@ class CalibrationConfig(AppConfig):
 
     def ready(self):
         # Check if we're running the server or a management command
-        running_server = 'runserver' in sys.argv or 'runsslserver' in sys.argv
+        running_server = (
+                'runserver' in sys.argv
+                or 'runsslserver' in sys.argv
+                or any('gunicorn' in arg for arg in sys.argv)
+        )
+
         if running_server:
             print_banner()
         else:
             logger.info(f'*** Running {sys.argv[1]}')
 
         logger.info(f'Environment: {settings.NGEN_ENVIRONMENT_STR}')
+        log_worker_info()
         if running_server:
             logger.info('')
             print_git_info_all()

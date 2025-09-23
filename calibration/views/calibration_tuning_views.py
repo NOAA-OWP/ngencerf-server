@@ -19,6 +19,7 @@ from rest_framework.response import Response
 from calibration.enums import StatusEnum
 from calibration.enums_vanilla import JobType
 from calibration.models import CalibrationFormulation, CalibrationParameter, CalibrationRun
+from calibration.util import cloud_util
 from calibration.util.caching import get_cached_module_by_name, have_LSTM
 from calibration.util.calibration_validators import CalibrationRunSerializer, SaveTuningRequestSerializer, LoadTuningResponseSerializer, \
     GenericResponseSerializer, ErrorResponseSerializer, UploadUserParameterFile, UserParameterFileUploadResponse
@@ -50,7 +51,7 @@ MAX_TIME = datetime(MINYEAR, 1, 1, 0, 0, 0).replace(tzinfo=timezone.utc)
     parameters=[
         OpenApiParameter(name='calibration_run_id', description='ID of the calibration run', required=True, type=int)
     ],
-    description="Load tuning tab data"
+    description="Load tuning tab data for a calibration run"
 )
 @api_view(['GET', 'POST'])
 @handle_exceptions
@@ -148,6 +149,8 @@ def get_parameters(modules: QuerySet[CalibrationFormulation]) -> list[dict[str, 
     """
     Retrieves the calibration parameters for each module in the specified calibration formulation.
 
+    Uses the prefetched `CalibrationParameter` objects to avoid repeated DB hits.
+
     :param modules: QuerySet of CalibrationFormulation objects.
     :return: List of dicts with the module name and its parameters.
     """
@@ -219,7 +222,7 @@ def get_parameters_for_export(modules: QuerySet[CalibrationFormulation]) -> list
     return parameter_list
 
 
-def compute_time_range(run: CalibrationRun) -> dict[str, datetime] | None:
+def compute_time_range(run: CalibrationRun) -> dict[str, datetime]:
     """
     Compute the intersection of observational and forcing data ranges for the given run,
     without persisting anything to the database.
@@ -249,8 +252,14 @@ def compute_time_range(run: CalibrationRun) -> dict[str, datetime] | None:
         lambda: get_forcing_dir_for_job(run)
     )
 
+    # Explicitly log the resolved paths
+    logger.info(
+        f"get_time_range: observation_path={observation_path}, "
+        f"forcing_path={forcing_path}"
+    )
+
     if not observation_path or not forcing_path:
-        return None
+        return {}
 
     # If both paths are available, calculate intersection and update run
     daterange_intersection_start = time.time()
@@ -260,7 +269,7 @@ def compute_time_range(run: CalibrationRun) -> dict[str, datetime] | None:
     if daterange:
         return {'start_time': daterange.start_datetime, 'end_time': daterange.end_datetime}
 
-    return None
+    return {}
 
 
 def persist_time_range(run: CalibrationRun, time_range: dict[str, datetime]) -> None:
@@ -984,97 +993,91 @@ def save_parameters(run: CalibrationRun, parameters: list[dict[str, str | float]
         CalibrationParameter.objects.bulk_update(parameters_to_unselect, ['user_selected_for_tuning'])
 
 
-def get_csv_daterange(file: str) -> DateTimeRange:
+def get_csv_daterange(path: str) -> DateTimeRange:
     """
-    Reads a CSV file that is assumed to be sorted by date/time and efficiently determines
-    the min and max date values from the first column.
+    Reads a CSV file (local or cloud) that is assumed to be sorted by date/time and efficiently determines
+    the min and max date values from the first column. Uses caching for remote files so that later operations
+    (e.g., copying/subsetting) can reuse the same local file without re-downloading.
 
-    :param file: The file path to the CSV file.
+    :param path: The file path or cloud URL to the CSV file.
     :return: DateTimeRange representing the min and max datetime values from the file.
     :raises CerfException: If the file does not exist, contains invalid datetime values, or encounters a read error.
     """
     try:
-        if not os.path.exists(file):
-            raise CerfException(f"File {file} does not exist")
+        # Always cache remote files, so subsequent uses don't re-download
+        with cloud_util.localize_to_path(path, enable_cache=True, suffix=".csv") as (orig, local_path):
+            if not os.path.exists(local_path):
+                raise CerfException(f"File {path} does not exist")
 
-        # Read first data row (skip header)
-        with open(file, 'r', encoding='utf-8') as f:
-            _ = f.readline()  # skip header
-            first_line = f.readline()
-        if not first_line:
-            raise CerfException(f"File {file} does not contain data rows")
-        first_line = first_line.strip()
-        first_time = pd.to_datetime(first_line.split(',', 1)[0], errors='coerce')
+            # Read first data row (skip header)
+            with open(local_path, "r", encoding="utf-8") as f:
+                _ = f.readline()  # skip header
+                first_line = f.readline()
+            if not first_line:
+                raise CerfException(f"File {path} does not contain data rows")
+            first_time = pd.to_datetime(first_line.strip().split(',', 1)[0], errors="coerce")
 
-        # Read only the last line efficiently using seek()
-        try:
-            with open(file, 'rb') as f:
-                f.seek(-2, os.SEEK_END)  # Move to the end of the file
-                while f.read(1) != b'\n':  # Step backwards until a newline is found
-                    f.seek(-2, os.SEEK_CUR)
-                last_line = f.readline().decode('utf-8').strip()
-        except OSError:
-            # This happens if the file is too small for the backwards seek (e.g., only a few bytes).
-            # In that case, fall back to reading all lines in text mode. This is safe because such files
-            # are tiny, and ensures we still get the last line without seek errors.
-            with open(file, 'r', encoding='utf-8') as f:
-                lines = f.read().splitlines()
-                if len(lines) < 2:
-                    raise CerfException(f"File {file} does not contain data rows")
-                last_line = lines[-1].strip()
+            # Read last line efficiently
+            try:
+                with open(local_path, "rb") as f:
+                    f.seek(-2, os.SEEK_END)
+                    while f.read(1) != b"\n":
+                        f.seek(-2, os.SEEK_CUR)
+                    last_line = f.readline().decode("utf-8").strip()
+            except OSError:
+                # For very small files, fall back to reading all lines
+                with open(local_path, "r", encoding="utf-8") as f:
+                    lines = f.read().splitlines()
+                    if len(lines) < 2:
+                        raise CerfException(f"File {path} does not contain data rows")
+                    last_line = lines[-1].strip()
 
-        # Extract the last timestamp from the last line (assuming CSV format)
-        last_time = pd.to_datetime(last_line.split(',', 1)[0], errors='coerce')
+            last_time = pd.to_datetime(last_line.split(",", 1)[0], errors="coerce")
 
-        if pd.isna(first_time) or pd.isna(last_time):
-            raise CerfException(f"Invalid datetime values found in {file}")
+            if pd.isna(first_time) or pd.isna(last_time):
+                raise CerfException(f"Invalid datetime values found in {path}")
 
-        # Ensure timestamps are UTC
-        return DateTimeRange(first_time.replace(tzinfo=timezone.utc), last_time.replace(tzinfo=timezone.utc))
+            # Ensure timestamps are UTC
+            return DateTimeRange(
+                first_time.replace(tzinfo=timezone.utc),
+                last_time.replace(tzinfo=timezone.utc),
+            )
 
     except Exception as e:
-        logger.error(f"Error while processing file {file}: {e}")
-        raise CerfException(f"Error reading file {file}: {e}")
+        logger.error(f"Error while processing file {path}: {e}")
+        raise CerfException(f"Error reading file {path}: {e}")
 
 
 def get_forcing_date_range(forcing_dir_path: str) -> DateTimeRange | None:
     """
     Computes the encompassing date range for all valid CSV files in a given directory.
+    Supports both local paths and cloud URLs.
 
-    :param forcing_dir_path: The directory path containing forcing data files.
-    :return: DateTimeRange representing the combined date range from all files in the directory, or None if no files are found.
+    :param forcing_dir_path: Directory path or cloud URL containing forcing data files.
+    :return: DateTimeRange covering all CSV files, or None if no files found.
     """
-    # Use pathlib only for globbing
-    from pathlib import Path
-
-    csv_files = [file for file in Path(forcing_dir_path).glob("*.csv") if file.is_file()]
+    csv_files = cloud_util.list_files(forcing_dir_path, pattern="*.csv")
     if not csv_files:
         return None
 
-    # Define a function to process individual files and calculate their date range
-    def process_file(file: str) -> DateTimeRange:
-        return get_csv_daterange(str(file))  # Convert Path to string
-
     # Use ThreadPoolExecutor for parallel processing
     with ThreadPoolExecutor(max_workers=min(32, (os.cpu_count() or 1) + 4)) as executor:
-        ranges = list(executor.map(process_file, csv_files))
+        ranges = list(executor.map(get_csv_daterange, csv_files))
 
     # Combine all individual ranges into a single encompassing range
     timerange = None
-    for new_range in ranges:
-        if timerange:
-            timerange = timerange.encompass(new_range)
-        else:
-            timerange = new_range
+    for r in ranges:
+        timerange = timerange.encompass(r) if timerange else r
     return timerange
 
 
 def get_observation_date_range(observational_filepath: str) -> DateTimeRange:
     """
     Calculates the date range for a single observational data file.
+    Supports both local paths and cloud URLs.
 
-    :param observational_filepath: The file path to the observational data file.
-    :return: DateTimeRange representing the date range based on the observational data file.
+    :param observational_filepath: File path or cloud URL to the observational data.
+    :return: DateTimeRange based on the file's min and max timestamps.
     """
     return get_csv_daterange(observational_filepath)
 
@@ -1082,18 +1085,19 @@ def get_observation_date_range(observational_filepath: str) -> DateTimeRange:
 def get_date_range_intersection(observational_file_path: str, forcing_dir_path: str) -> DateTimeRange | None:
     """
     Calculates the intersection of date ranges between observational and forcing data.
+    Supports both local paths and cloud URLs.
 
-    :param observational_file_path: Path to the observational data file.
-    :param forcing_dir_path: Directory path containing forcing data files.
-    :return: DateTimeRange representing the intersection of date ranges if both ranges exist, or None if there is no overlap.
+    :param observational_file_path: File path or cloud URL to the observational data.
+    :param forcing_dir_path: Directory path or cloud URL containing forcing data.
+    :return: DateTimeRange representing the overlapping period, or None if no overlap.
     """
     # Calculate the date range for the observational data
     obs_range = get_observation_date_range(observational_file_path)
-    logger.debug(f'obs_range: {obs_range}')
+    logger.debug(f"obs_range: {obs_range}")
 
     # Calculate the date range for the forcing data
     forcing_range = get_forcing_date_range(forcing_dir_path)
-    logger.debug(f'forcing_range: {forcing_range}')
+    logger.debug(f"forcing_range: {forcing_range}")
 
     # Compute the intersection of the two ranges
     if obs_range and forcing_range:

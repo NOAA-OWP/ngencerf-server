@@ -31,7 +31,7 @@ from calibration.views.calibration_import_export_views import load_calibration_r
 from calibration.views.calibration_run_views import resolve_job_data_dir
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import handle_exceptions, validate_response, get_calibration_run, create_calibration_run_internal, ResponseError, \
-    validate_request, create_validation_run_internal, create_forecast_run_internal, get_user_email, get_elapsed_str
+    validate_request, create_validation_run_internal, create_forecast_run_internal, get_user_email, get_elapsed_str, readonly_transaction
 
 logger = logging.getLogger(__name__)
 
@@ -334,6 +334,9 @@ def clone_job(request: Request) -> Response:
     """
     Clone an existing calibration job, creating a new calibration run with identical parameters.
 
+    Read-heavy parts (load_calibration_run_data) are executed in a read-only block,
+    followed by the write-heavy import step in a separate transaction.
+
     :param request: The HTTP request object.
     :return: A Response object with the cloned calibration run data.
     """
@@ -346,11 +349,19 @@ def clone_job(request: Request) -> Response:
 
     calibration_run_id = validator.get('calibration_run_id')
 
-    run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=list(StatusEnum))
-    if error_return:
-        return error_return
+    # -------------------------------------------------------------
+    # Read-only block: get the source run and prepare export data
+    # -------------------------------------------------------------
+    with readonly_transaction():
+        run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=list(StatusEnum))
+        if error_return:
+            return error_return
 
-    calibration_run_data, _ = load_calibration_run_data(run, export=True)
+        calibration_run_data, _ = load_calibration_run_data(run, export=True)
+
+    # -------------------------------------------------------------
+    # Write block: import a new run from the exported data
+    # -------------------------------------------------------------
     new_run, _, fatal_error = import_calibration_run_data(request, calibration_run_data, JobGenesis.CLONE)
     if fatal_error:
         return fatal_error

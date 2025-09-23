@@ -3,10 +3,12 @@ import logging
 import os
 import subprocess
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, Future
 from datetime import datetime, timezone
 from typing import Callable
+from urllib.parse import urlparse
 
+import fsspec
 import pandas as pd
 from datetimerange import DateTimeRange
 from django.conf import settings
@@ -658,6 +660,57 @@ def final_preprocessing_for_calibration(run: CalibrationRun) -> list[str]:
     return errors
 
 
+def _get_fs_and_scheme(path_or_url: str):
+    """Return (fs, scheme) for local or remote directory."""
+    parsed = urlparse(path_or_url)
+    scheme = parsed.scheme or "file"
+    fs = fsspec.filesystem(scheme)
+    return fs, scheme
+
+
+def _list_dir_files(path_or_url: str) -> list[str]:
+    """
+    Return a list of full paths (local or remote URLs) for regular files in a directory/prefix.
+    - Local: uses os.listdir / os.path.isfile
+    - Remote: uses fsspec.ls(detail=True) and filters for files.
+      Ensures each returned item is a fully-qualified URL (e.g., s3://bucket/key),
+      because some backends (notably s3fs) return names like 'bucket/key' without a scheme.
+    """
+    parsed = urlparse(path_or_url)
+    scheme = parsed.scheme or "file"
+
+    if scheme == "file":
+        base = parsed.path or path_or_url
+        return [
+            os.path.join(base, name)
+            for name in os.listdir(base)
+            if os.path.isfile(os.path.join(base, name))
+        ]
+
+    fs = fsspec.filesystem(scheme)
+    entries = fs.ls(path_or_url, detail=True)
+    out: list[str] = []
+    for e in entries:
+        if e.get("type") != "file":
+            continue
+        name = e.get("name") or ""
+        # If the backend returned a scheme-less "bucket/key", add the scheme.
+        if not urlparse(name).scheme:
+            name = f"{scheme}://{name}"
+        out.append(name)
+    return out
+
+
+def _detect_first_column_name(fs: fsspec.AbstractFileSystem, url_or_path: str) -> str:
+    """Open the CSV and read only the header to discover the first column name."""
+    # text mode is fine; pandas reads just the header with nrows=0
+    with fs.open(url_or_path, "rt") as fh:
+        header_df = pd.read_csv(fh, delimiter=",", nrows=0)
+    if header_df.columns.empty:
+        raise ValueError(f"No columns found in {url_or_path}")
+    return str(header_df.columns[0])
+
+
 def subset_directory_by_time_range(
         run: CalibrationRun,
         input_directory: str,
@@ -666,8 +719,11 @@ def subset_directory_by_time_range(
         max_workers: int = 4
 ) -> None:
     """
-    Subsets the files in a directory based on a provided time range and saves the filtered
-    files into an output directory. Uses parallel processing to handle multiple files at once.
+    Subsets the files in a directory/prefix based on a provided time range and saves
+    the filtered files into an output directory, processing files in parallel.
+
+    - Works with local dirs and S3 prefixes (s3://bucket/prefix).
+    - Streams each input file directly from S3; does not download all upfront.
 
     :param run: The CalibrationRun instance (used for consistent logging context).
     :param input_directory: Path to the input directory.
@@ -680,37 +736,27 @@ def subset_directory_by_time_range(
     - If running on a slow or metered connection, keeping this at 4 prevents potential slowdowns.
     """
     start_time = time.time()
-    logger.info(f'Starting subsetting for directory {input_directory} with max_workers={max_workers} for Calibration Job {run.id}')
-
-    if not input_directory or not os.path.isdir(input_directory):
-        raise ValueError(f"Input path '{input_directory}' is not a directory for Calibration Job {run.id}")
-
     os.makedirs(output_directory, exist_ok=True)
 
-    files_to_process = [
-        (os.path.join(input_directory, filename), os.path.join(output_directory, filename))
-        for filename in os.listdir(input_directory)
-        if os.path.isfile(os.path.join(input_directory, filename))
+    files_in = _list_dir_files(input_directory)
+    file_pairs = [
+        (src, os.path.join(output_directory, os.path.basename(urlparse(src).path)))
+        for src in files_in
     ]
 
-    logger.info(f"Found {len(files_to_process)} files to process in {input_directory} for Calibration Job {run.id}")
+    logger.info(f"Starting subsetting for {len(file_pairs)} files in {input_directory} "
+                f"with max_workers={max_workers} for Calibration Job {run.id}")
 
-    def process_file(input_output_tuple: tuple[str, str]) -> None:
-        """
-        Processes a single file by applying time-based subsetting.
+    def _process(one: tuple[str, str]) -> None:
+        src, dst = one
+        subset_by_time_range(run, src, dst, date_time_range)
 
-        :param input_output_tuple: Tuple containing the full path to the input and output files.
-        """
-        input_file, output_file = input_output_tuple
-        # Delegate to the time range subsetting logic
-        subset_by_time_range(run, input_file, output_file, date_time_range)
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        list(ex.map(_process, file_pairs))
 
-    # Use ThreadPoolExecutor for I/O-bound tasks (like S3FS-based file reads/writes)
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        executor.map(process_file, files_to_process)
-
-    elapsed_time = time.time() - start_time
-    logger.info(f"Finished subsetting directory {input_directory} in {elapsed_time:.2f} seconds for Calibration Job {run.id}")
+    elapsed = time.time() - start_time
+    logger.info(f"Finished subsetting directory {input_directory} in {elapsed:.2f}s "
+                f"for Calibration Job {run.id}")
 
 
 def subset_by_time_range(
@@ -725,13 +771,22 @@ def subset_by_time_range(
     Optimized to take advantage of sorted data for faster processing.
     Chunksize is optimized for **performance**, reducing disk I/O overhead.
 
+    - Supports local files and S3 URLs.
+    - Opens remote files directly via fsspec (streams line-by-line, no staging to disk).
+    - Assumes the first column is the datetime column.
+    - Converts all datetimes to UTC for filtering, then writes them back as naive timestamps
+      to match the original format.
+    - Stops reading early once the file is past the requested time range (since input is sorted).
+
     :param run: The CalibrationRun instance (used for logging context only).
-    :param input_file: Path to the input CSV file.
+    :param input_file: Path or URL to the input CSV file.
     :param output_file: Path to the output CSV file.
     :param date_time_range: DateTimeRange object specifying the time range for filtering.
     """
-    logger.info(f'Subsetting file {input_file} to {output_file} with date range {date_time_range} for Calibration Job {run.id}')
-    file_basename = os.path.basename(input_file)  # Extract just the filename
+    file_basename = os.path.basename(urlparse(input_file).path)
+
+    logger.info(f"Subsetting file {input_file} -> {output_file} with range "
+                f"{date_time_range} for Calibration Job {run.id}")
 
     # Dynamically determine the best chunksize for performance
     chunk_size = get_performance_chunksize(input_file)
@@ -739,107 +794,132 @@ def subset_by_time_range(
 
     # Ensure the output directory exists
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
-    start_line = 1  # Track the first row of each chunk (excluding header)
 
-    # DateTimeRange arguments are already in UTC, so use them as-is
-    start_datetime = pd.Timestamp(date_time_range.start_datetime)
-    end_datetime = pd.Timestamp(date_time_range.end_datetime)
+    # Convert DateTimeRange boundaries to UTC Timestamps
+    start_dt = pd.to_datetime(date_time_range.start_datetime, utc=True)
+    end_dt = pd.to_datetime(date_time_range.end_datetime, utc=True)
 
-    with open(output_file, 'w') as out_file:
-        write_header = True  # Ensure the header is written only once
+    fs_in, _scheme = _get_fs_and_scheme(input_file)
 
-        # Read the first chunk to detect the datetime column name
-        first_chunk = pd.read_csv(input_file, delimiter=',', parse_dates=[0], chunksize=chunk_size)
-        for chunk in first_chunk:
-            original_time_column = chunk.columns[0]  # Get the first column name dynamically
-            break  # Exit after getting the column name
+    # Discover the first column name by reading just the header
+    first_col = _detect_first_column_name(fs_in, input_file)
 
-        # Read the CSV in chunks, parsing dates in the detected first column
-        for chunk in pd.read_csv(input_file, delimiter=',', parse_dates=[0], chunksize=chunk_size):
-            end_line = start_line + len(chunk) - 1  # Compute last row index for this chunk
+    # Now stream the file in chunks and filter
+    with fs_in.open(input_file, "rt") as in_fh, open(output_file, "w") as out_fh:
+        write_header = True
+        # Iterator over chunks; parse the first column as dates
+        reader = pd.read_csv(
+            in_fh,
+            delimiter=",",
+            parse_dates=[0],
+            chunksize=chunk_size
+        )
 
-            # Rename the first column to a consistent name
-            if original_time_column in chunk.columns:
-                chunk.rename(columns={original_time_column: 'dateTime'}, inplace=True)
+        current_line_start = 1
+        for chunk in reader:
+            current_line_end = current_line_start + len(chunk) - 1
+
+            # Normalize datetime column name
+            if first_col not in chunk.columns:
+                logger.error(f"Expected datetime column '{first_col}' not found in "
+                             f"{file_basename} for Calibration Job {run.id}")
+                raise KeyError(f"Expected datetime column '{first_col}' not found")
+
+            chunk.rename(columns={first_col: "dateTime"}, inplace=True)
+
+            # Ensure proper datetime dtype
+            chunk["dateTime"] = pd.to_datetime(chunk["dateTime"], errors="coerce")
+            if chunk["dateTime"].isna().any():
+                logger.error(f"Invalid datetime values in lines {current_line_start}-{current_line_end} "
+                             f"for {input_file} (Calibration Job {run.id})")
+                raise ValueError("Invalid datetime values encountered")
+
+            # Standardize to UTC
+            if chunk["dateTime"].dt.tz is None:
+                chunk["dateTime"] = chunk["dateTime"].dt.tz_localize("UTC")
             else:
-                logger.error(f"Expected datetime column '{original_time_column}' not found in {file_basename} for Calibration Job {run.id}")
-                raise KeyError(f"Expected datetime column '{original_time_column}' not found in {file_basename} for Calibration Job {run.id}")
+                chunk["dateTime"] = chunk["dateTime"].dt.tz_convert("UTC")
 
-            # Convert to datetime and explicitly assume timestamps are in UTC
-            chunk['dateTime'] = pd.to_datetime(chunk['dateTime'], errors='coerce')
+            # Chunk-level range for fast skip/early stop
+            cmin, cmax = chunk["dateTime"].min(), chunk["dateTime"].max()
+            logger.debug(f"Chunk range {cmin}..{cmax} "
+                         f"(lines {current_line_start}-{current_line_end}) for {input_file}")
 
-            # Validate datetime values before localizing
-            if chunk['dateTime'].isna().any():
-                logger.error(f"Invalid datetime values found in {file_basename} (lines {start_line}-{end_line}) for Calibration Job {run.id}")
-                raise ValueError(f"Invalid datetime values found in {file_basename} (lines {start_line}-{end_line}) for Calibration Job {run.id}")
+            if cmax < start_dt:
+                # Entire chunk is before the window → skip
+                current_line_start += len(chunk)
+                continue
+            if cmin > end_dt:
+                # Entire chunk is after the window → stop early
+                break
 
-            # Now localize to UTC
-            chunk['dateTime'] = chunk['dateTime'].dt.tz_localize('UTC')
+            # Filter rows inside the requested time window
+            keep = chunk[(chunk["dateTime"] >= start_dt) & (chunk["dateTime"] <= end_dt)].copy()
+            if keep.empty:
+                current_line_start += len(chunk)
+                continue
 
-            # Log the original start and end ranges in this chunk, including line numbers
-            chunk_start = chunk['dateTime'].min()
-            chunk_end = chunk['dateTime'].max()
-            logger.debug(
-                f'Chunk {file_basename} (lines {start_line}-{end_line}) date range: {chunk_start} - {chunk_end} for Calibration Job {run.id}')
+            # Convert back to naive timestamps to match original format
+            keep["dateTime"] = keep["dateTime"].dt.tz_convert(None)
+            keep.rename(columns={"dateTime": first_col}, inplace=True)
 
-            # Skip chunks that are entirely before the time range
-            if chunk_end < start_datetime:
-                start_line += chunk_size  # Update row counter
-                continue  # No relevant data in this chunk
+            # Append to output file
+            keep.to_csv(out_fh, index=False, header=write_header, mode="a")
+            write_header = False
 
-            # Stop processing early if chunks exceed the time range
-            if chunk_start > end_datetime:
-                break  # Since files are sorted, no need to read further
+            current_line_start = current_line_end + 1
 
-            # Filter the data within the time range
-            subset_df = chunk.loc[
-                (chunk['dateTime'] >= start_datetime) &
-                (chunk['dateTime'] <= end_datetime)
-                ].copy()  # Explicitly create a copy
-
-            # Convert back to naive timestamps for output (to match original format)
-            subset_df['dateTime'] = subset_df['dateTime'].dt.tz_convert(None)
-
-            # Rename datetime column back to its original name
-            subset_df.rename(columns={'dateTime': original_time_column}, inplace=True)
-
-            # Write filtered data to output CSV
-            subset_df.to_csv(out_file, mode='a', index=False, header=write_header)
-            write_header = False  # Ensure subsequent writes do not include headers
-
-            # Update the starting line number for the next chunk
-            start_line = end_line + 1
-
-    logger.info(f'Finished subsetting file {input_file} to {output_file} for Calibration Job {run.id}')
+    logger.info(f"Finished subsetting file {input_file} -> {output_file} for Calibration Job {run.id}")
 
 
 def get_performance_chunksize(file_path: str) -> int:
     """
     Dynamically determines an optimal chunksize for high-performance processing
-    using a **single row** to estimate memory size since all rows are substantially the same size
+    using a **single data row** to estimate row size (rows are uniform).
+
+    Works for local files and remote URLs (e.g., s3://bucket/key) via fsspec.
 
     :param file_path: Path to the input CSV file.
     :return: Optimal chunksize for pandas.read_csv()
     """
-    file_size = os.path.getsize(file_path)  # Get file size in bytes
+    parsed = urlparse(file_path)
+    scheme = parsed.scheme or "file"
+    fs = fsspec.filesystem(scheme)
 
-    # Read one row (excluding header) to estimate row size
-    sample_df = pd.read_csv(file_path, nrows=2)  # Read first two rows (header + 1 row)
-    row_size = sample_df.iloc[1:].memory_usage(deep=True).sum()  # Size of first data row (ignore header)
-
-    # Estimate total rows in the file
-    estimated_rows = file_size / row_size
-
-    # Adjust chunk fraction based on file size
-    if file_size < 50_000_000:  # <50MB
-        target_fraction = 0.05  # 5%
-    elif file_size < 200_000_000:  # 50MB-200MB
-        target_fraction = 0.03  # 3%
+    # File size in bytes
+    if scheme == "file":
+        total_size = os.path.getsize(parsed.path or file_path)
     else:
-        target_fraction = 0.01  # 1% (limit memory impact for huge files)
+        info = fs.info(file_path)
+        total_size = int(info.get("size", 0))
 
-    # Set chunksize as 5-10% of total estimated rows
-    optimal_chunksize = int(estimated_rows * target_fraction)
+    # Read a tiny sample (exactly 1 data row) to approximate row size
+    if scheme == "file":
+        with open(parsed.path or file_path, "rt") as fh:
+            sample_df = pd.read_csv(fh, nrows=1)
+    else:
+        with fs.open(file_path, "rt") as fh:
+            sample_df = pd.read_csv(fh, nrows=1)
 
-    # Ensure reasonable limits (between 10k - 100k)
-    return max(10_000, min(optimal_chunksize, 100_000))
+    # Size of one data row (ignore header)
+    if sample_df.empty:
+        # Fallback if file is empty or malformed; keep it conservative
+        return 10_000
+
+    # Size of one data row (header excluded already)
+    row_size_bytes = sample_df.memory_usage(deep=True).sum()
+    if row_size_bytes <= 0:
+        return 10_000
+
+    # Estimate total rows and pick a fraction based on file size
+    est_rows = max(1, int(total_size / row_size_bytes))
+
+    if total_size < 50_000_000:  # < 50MB
+        target_fraction = 0.05  # ~5%
+    elif total_size < 200_000_000:  # 50–200MB
+        target_fraction = 0.03  # ~3%
+    else:
+        target_fraction = 0.01  # ~1%
+
+    optimal = int(est_rows * target_fraction)
+    return max(10_000, min(optimal, 100_000))

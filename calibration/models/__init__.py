@@ -31,3 +31,4 @@ from .rfc import Rfc
 from .status import Status
 from .validation_metrics import ValidationMetrics
 from .validation_run import ValidationRun
+from .verification_run import VerificationRun

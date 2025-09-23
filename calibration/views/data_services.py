@@ -1,5 +1,4 @@
 import logging
-import os
 import time
 from urllib.parse import urljoin
 
@@ -10,10 +9,9 @@ from django.db.models import QuerySet
 
 from calibration.enums import ForcingSourceEnum
 from calibration.models import CalibrationParameter, CalibrationFormulation, CalibrationRun
-from calibration.util.aws_util import convert_s3_uri_to_fs
 from calibration.util.caching import get_cached_module_by_name
 from calibration.util.calibration_validators import ModuleDataListSerializer, S3FileValidator
-from calibration.util.file_util import copy_directory
+from calibration.util.cloud_util import copy_tree, path_exists, _join_url, is_dir
 from calibration.util.ngen_locations import get_bmi_config_dir_for_module
 from calibration.views.common import validate_response_data
 from data_services_test_data import data_services_test_data
@@ -145,9 +143,8 @@ def get_geopackage_from_data_services(run: CalibrationRun):
 
         eds_data = validate_response_data(S3FileValidator, geopackage_json, 'Geopackage data from Data Services is not in the expected format')
 
-        s3_uri = eds_data.get('uri')
-        run.geopackage_eds_file_path = convert_s3_uri_to_fs(s3_uri)
-        if run.geopackage_eds_file_path and not os.path.exists(run.geopackage_eds_file_path):
+        run.geopackage_eds_file_path = eds_data.get('uri')
+        if run.geopackage_eds_file_path and not path_exists(run.geopackage_eds_file_path):
             raise DataServicesException(f"Geopackage from Data Services, {run.geopackage_eds_file_path} does not exist")
         logger.info(f'Setting run.geopackage_eds_file_path to {run.geopackage_eds_file_path}')
 
@@ -173,10 +170,8 @@ def get_observational_data_from_data_services(run: CalibrationRun):
     observational_data = validate_response_data(S3FileValidator, observational_json,
                                                 'Observational data from Data Services is not in the expected format')
 
-    s3_uri = observational_data.get('uri')
-
-    run.observational_eds_file_path = convert_s3_uri_to_fs(s3_uri)
-    if run.observational_eds_file_path and not os.path.exists(run.observational_eds_file_path):
+    run.observational_eds_file_path = observational_data.get('uri')
+    if run.observational_eds_file_path and not path_exists(run.observational_eds_file_path):
         logger.error(f"Observational file from Data Services, {run.observational_eds_file_path} does not exist")
     clear_times(run)
     logger.info(f'Setting run.observational_eds_file_path to {run.observational_eds_file_path}')
@@ -209,7 +204,9 @@ def clear_times(run: CalibrationRun, cli: bool = False):
 
 def get_forcing_data_from_s3(run: CalibrationRun, forcing_source_name: str):
     """
-    Attempts to retrieve forcing data from local S3 directories.
+    Attempts to retrieve forcing data from configured S3 directories.
+
+    settings.FORCING_DATA_DIRS_xxx is a dict of S3 URLs (prefixes).
 
     :param run: A CalibrationRun object with associated gage information.
     :param forcing_source_name: The name of the forcing source to retrieve data for.
@@ -222,17 +219,24 @@ def get_forcing_data_from_s3(run: CalibrationRun, forcing_source_name: str):
     )
 
     for src_key, s3_uri in forcing_containers.items():
-        dir_path = convert_s3_uri_to_fs(s3_uri)
-        forcing_dir = os.path.join(dir_path, run.gage.domain.name, f"Gage_{run.gage.gage_id}")
-        if os.path.isdir(forcing_dir):
+        # <prefix>/<domain>/Gage_<gage_id>
+        forcing_dir = _join_url(s3_uri, run.gage.domain.name, f"Gage_{run.gage.gage_id}")
+
+        if is_dir(forcing_dir):
             logger.info(f"Found forcing directory {forcing_dir}")
             run.forcing_eds_dir_path = forcing_dir
-            run.forcing_source_actual = ForcingSourceEnum.get_instance(src_key)  # save the enum key that succeeded
+            run.forcing_source_actual = ForcingSourceEnum.get_instance(src_key)
             clear_times(run)
-            logger.info(f"Setting run.forcing_eds_dir_path to {run.forcing_eds_dir_path}; forcing_source_actual={run.forcing_source_actual}")
+            logger.info(
+                "Setting run.forcing_eds_dir_path to %s; forcing_source_actual=%s",
+                run.forcing_eds_dir_path, run.forcing_source_actual
+            )
             return
         else:
-            logger.info(f"Forcing directory for gage {run.gage.gage_id} doesn't exist in {forcing_dir} (key: {src_key})")
+            logger.info(
+                "Forcing directory for gage %s doesn't exist at %s (key: %s)",
+                run.gage.gage_id, forcing_dir, src_key
+            )
 
     raise DataServicesException(f"Could not find forcing data for gage {run.gage.gage_id}")
 
@@ -323,9 +327,12 @@ def get_module_metadata_from_data_services(run: CalibrationRun,
             if not calibration_formulation:
                 raise DataServicesException(f"No formulation found for module {module_name}")
 
-            # Copy the BMI configuration file to the appropriate directory
-            bmi_config = convert_s3_uri_to_fs(module['parameter_file']['uri'])
-            copy_directory(bmi_config, get_bmi_config_dir_for_module(run, module_name))
+            # New (cloud-agnostic, no FUSE mount needed):
+            src_prefix = module['parameter_file']['uri']  # e.g. "s3://bucket/path/to/dir/"
+            dst_dir = get_bmi_config_dir_for_module(run, module_name)  # local directory path
+
+            # copy the BMI parameters
+            _ = copy_tree(src_prefix, dst_dir)
 
             # Save or update parameters for the module
             parameters = module.get('calibrate_parameters', [])

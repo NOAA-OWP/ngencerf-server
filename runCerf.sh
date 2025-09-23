@@ -17,6 +17,18 @@ SCRIPT_DIR="$(dirname "$(realpath "${BASH_SOURCE[0]}")")"
 # Source environment variables
 source "$SCRIPT_DIR/cerfserver.env"
 
+#=======================================================================
+# Validate RUN_CERF_FLAG_DIRECTORY
+#=======================================================================
+if [ -z "${RUN_CERF_FLAG_DIRECTORY}" ]; then
+    echo "WARNING: RUN_CERF_FLAG_DIRECTORY is not set in cerfserver.env; defaulting to ./"
+    RUN_CERF_FLAG_DIRECTORY="./"
+fi
+
+# Normalize: remove any trailing slash so we don't end up with // in paths
+RUN_CERF_FLAG_DIRECTORY="${RUN_CERF_FLAG_DIRECTORY%/}"
+
+
 # Use the same directory variable for cerfServer
 cerfServer="$SCRIPT_DIR"
 
@@ -90,13 +102,13 @@ if [ "$1" == "activate" ]; then
 fi
 
 #=======================================================================
-# Parse “--load-static” flag (if present), then shift it away
+# Parse “--load-gages” flag (if present), then shift it away
 #=======================================================================
-LOAD_STATIC_DATA=false
+LOAD_GAGE_DATA=false
 for arg in "$@"; do
   case $arg in
-    --load-static)
-      LOAD_STATIC_DATA=true
+    --load-gages)
+      LOAD_GAGE_DATA=true
       shift
       ;;
   esac
@@ -131,9 +143,9 @@ generate_git_info() {
 #   - Computes a stable SHA256 for init_gages.py + files in gage_data/
 #   - Stores/compares to decide whether to re-run init_gages
 #=======================================================================
-CERF_GAGES_FPRINT="${CERF_GAGES_FPRINT:-$SCRIPT_DIR/.gages_fingerprint}"
-echo Gages fingerprint $CERF_GAGES_FPRINT
-ls -al $CERF_GAGES_FPRINT
+CERF_GAGES_FPRINT="${RUN_CERF_FLAG_DIRECTORY}/.gages_fingerprint"
+echo "Gages fingerprint $CERF_GAGES_FPRINT"
+ls -al "$CERF_GAGES_FPRINT"
 
 # Compute a stable combined SHA256 of init_gages.py + all files in gage_data
 compute_gages_fingerprint() {
@@ -364,12 +376,14 @@ fi
 
 #=======================================================================
 # Init data handling
-#   - '--load-static' or missing marker => unconditional init_gages
+#   - '--load-gages' or missing marker => unconditional init_gages
 #   - Else compare fingerprint and conditionally run init_gages
 #=======================================================================
-# Only load static data if the flag is provided or the CERF_LOAD_STATIC_DATA file doesn't exist
-# load_static is a misnomer.  All we are doing is unconditionally loading the gage data
-if [ "$LOAD_STATIC_DATA" = true ] || [ ! -f "${CERF_LOAD_STATIC_DATA}" ]; then
+GAGE_DATA_FLAG_FILE="${RUN_CERF_FLAG_DIRECTORY}/.load_gages"
+
+# Only load gage data if the flag is provided or the flag file doesn't exist
+# But we will also load gage data if the hash code detects that it has changed
+if [ "$LOAD_GAGE_DATA" = true ] || [ ! -f "$GAGE_DATA_FLAG_FILE" ]; then
     echo
     echo "Loading ngenCERF gage data"
 
@@ -378,7 +392,7 @@ if [ "$LOAD_STATIC_DATA" = true ] || [ ! -f "${CERF_LOAD_STATIC_DATA}" ]; then
     # Unconditional run in this branch
     run_init_gages_and_store ""
 
-    touch "${CERF_LOAD_STATIC_DATA}"
+    touch "$GAGE_DATA_FLAG_FILE"
 else
     echo
     echo --------------------------------------------------------

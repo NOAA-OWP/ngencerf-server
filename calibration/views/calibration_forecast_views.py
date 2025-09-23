@@ -15,7 +15,7 @@ from calibration.util.calibration_validators import ErrorResponseSerializer, Emp
 from calibration.util.ngen_locations import get_forecast_dir
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import handle_exceptions, validate_response, validate_request, get_forecast_run, create_forecast_run_internal, \
-    ResponseError, get_user_email, get_elapsed_str
+    ResponseError, get_user_email, get_elapsed_str, readonly_transaction
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,8 @@ def load_forecast_tab(request: Request) -> Response:
     """
     Load data for the forecast tab, including forecast cycles with associated data sources and time ranges.
 
+    Runs inside a read-only transaction since no writes are performed.
+
     :param request: HTTP request containing calibration_run_id
     :return: JSON response with forecast cycle values.
     """
@@ -54,7 +56,10 @@ def load_forecast_tab(request: Request) -> Response:
     if error_return:
         return error_return
 
-    cycle_values = ForecastCycleEnum.get_choices_with_fields(fields=['name', 'data_sources', 'time_range', 'is_active'])
+    with readonly_transaction():
+        cycle_values = ForecastCycleEnum.get_choices_with_fields(
+            fields=['name', 'data_sources', 'time_range', 'is_active']
+        )
 
     response = {'forecast_cycle_values': cycle_values}
 

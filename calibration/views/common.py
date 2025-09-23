@@ -31,6 +31,7 @@ from calibration.models.base_run import BaseRun
 from calibration.models.forecast_forcing_download_run import ForecastForcingDownloadRun
 from calibration.util.caching import get_cached_modules_with_groups
 from calibration.util.calibration_validators import ErrorResponseSerializer, BaseSerializer
+from calibration.util.cloud_util import path_exists
 from calibration.util.ngen_locations import get_forecast_dir, get_output_calibration_run_dir, \
     get_output_validation_run_dir, get_ngen_logging_file, get_ngen_logging_basename
 
@@ -448,19 +449,19 @@ def get_valid_path(eds_path, get_path_func):
     Determine the valid file path by checking the job-specific path first,
     then falling back to the provided EDS path if the job-specific file does not exist.
 
-    :param eds_path: The EDS path.
+    :param eds_path: The EDS path (can be local or cloud URL).
     :param get_path_func: A function to retrieve the job-specific path.
-    return: The path to the existing file, either job-specific or EDS; otherwise, None if neither exists.
+    :return: The path to the existing file, either job-specific or EDS; otherwise, None if neither exists.
     """
     job_specific_file = get_path_func()
 
     # job_specific_file is there, then always use it
     # If it's not there, then use the EDS file
-    if job_specific_file and os.path.exists(job_specific_file):
+    if job_specific_file and path_exists(job_specific_file):
         return job_specific_file
 
     # Fall back to the EDS path if the job-specific file is not found
-    if eds_path and os.path.exists(eds_path):
+    if eds_path and path_exists(eds_path):
         return eds_path
 
     return None

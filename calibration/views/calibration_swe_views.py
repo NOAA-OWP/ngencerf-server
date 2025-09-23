@@ -140,6 +140,7 @@ def generate_swe_ts_data(validation_run: ValidationRun) -> None:
                 get_swe_timeseries_png_filename(validation_run),
                 '--csv_output',
                 get_swe_timeseries_data_filename(validation_run),
+                '--direct_s3'
             ]
             logger.info(f"Calling swe_timeseries.swe_ts with arguments: {swe_args}")
             start_time = time.time()
