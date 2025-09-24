@@ -83,7 +83,8 @@ def get_plot_names(request: Request) -> Response:
         run_func = get_forecast_run
         run_id = forecast_run_id
         run_type = JobType.FORECAST.value.capitalize()
-    run, error_return = run_func(run_id, request.user, run_status=[StatusEnum.RUNNING, StatusEnum.DONE, StatusEnum.CANCELLED, StatusEnum.FAILED, StatusEnum.SERVER_ERROR])
+    run, error_return = run_func(run_id, request.user,
+                                 run_status=[StatusEnum.RUNNING, StatusEnum.DONE, StatusEnum.CANCELLED, StatusEnum.FAILED, StatusEnum.SERVER_ERROR])
     if error_return:
         return error_return
 
@@ -109,13 +110,18 @@ def get_plot_names(request: Request) -> Response:
         'status': run.status.name
     }
 
-    response_validator, error_response = validate_response(GetPlotNamesResponseSerializer, response)
+    response_validator, error_response = validate_response(
+        GetPlotNamesResponseSerializer,
+        response,
+        fields_to_truncate=['plot_names'], max_length=3
+
+    )
     if error_response:
         return error_response
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {json.dumps(response_validator.data)}')
     logger.debug(
         f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - '
-        f'{json.dumps(response_validator.data)}'
+        f'{json.dumps(truncate_large_fields(response_validator.data, fields_to_truncate=["plot_names"], max_length=3))}'
     )
 
     return Response(response_validator.data)
@@ -249,7 +255,8 @@ def get_plot(request: Request) -> Response:
         run_id = forecast_run_id
         run_type = JobType.FORECAST.value.capitalize()
 
-    run, error_return = run_func(run_id, request.user, run_status=[StatusEnum.RUNNING, StatusEnum.DONE, StatusEnum.CANCELLED, StatusEnum.FAILED, StatusEnum.SERVER_ERROR])
+    run, error_return = run_func(run_id, request.user,
+                                 run_status=[StatusEnum.RUNNING, StatusEnum.DONE, StatusEnum.CANCELLED, StatusEnum.FAILED, StatusEnum.SERVER_ERROR])
     if error_return:
         return error_return
 
