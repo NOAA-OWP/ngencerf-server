@@ -41,7 +41,7 @@ CONFIG_TEMPLATE = {
         "basin": "",
         "models": "",
         "formulation": "",
-        "is_qet_rootzone": False,
+        "is_aet_rootzone": False,
         "run_type": "calibration",
         "main_dir": "",
         # Snow Water equivalent output - Only True for snow models
