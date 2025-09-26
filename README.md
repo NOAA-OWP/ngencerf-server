@@ -112,7 +112,9 @@ aws s3 cp --recursive s3://ngwpc-dev/ngen-static-files /ngencerf/data/ngen-stati
 ```
 
 In addition, copy the directory `module_parameter_files` and all its contents from 
-https://github.com/NGWPC/nwm-cal-mgr/-/tree/development/module_parameter_files to the `/ngencerf/data/ngen-static-files` directory
+https://github.com/NGWPC/nwm-cal-mgr/tree/development/module_parameter_files to the `/ngencerf/data/ngen-static-files` directory.
+Unfortunately, GitHub does not provided an easy way to just download a single directory.  So it might be easiest to clone the entire repo and then 
+copy that one directory.
 
 When done, your `ngen-static-files` directory should look something like this
 
@@ -150,14 +152,6 @@ Confirm that you can log in with the new password
 # psql -h localhost -U postgres
 ```
 
-When you run `runCerf.sh` for the first time, or after dropping all tables from the database or if the gages have been changed,  include the `--load-static` option.  
-For example,
-```
-./runCerf.sh --load-static
-```
-
-To update the code, do a `git pull` and run `runCerf.sh` again
-
 
 **_Important:_**
 During development, there might be times when the entire database needs to be initialized.  
@@ -177,9 +171,9 @@ where `public` is the name of your schema.
 
 
 # Running the server
-To run the server, use `runCerf.sh`.  If you are running for the first time, or you have dropped all the tables in the table base, then included the `--load-static` option
+To run the server, use `runCerf.sh`. 
 ```
-./runCerf.sh [--load-static]
+./runCerf.sh
 ```
 
 **Note:** If running with NGEN_ENVIRONMENT=LOCAL or DOCKER, then it is important to run `pre_start.py` from `manage.py` before the
@@ -212,6 +206,10 @@ Extract the access token.  For all subsequent requests, you need to include an `
 type `Bearer token` that includes the access token.
 
 # Importing test data
+
+```
+Note: Need to update to reference to new CLI
+```
 
 The `cli` directory contains an `ngencerf.sh` command line script which will allow you to import data and create a calibration run job without having to go though the UI.  
 
@@ -255,16 +253,16 @@ Follow these steps to pull the latest docker containers.
    2. Follow the instructions here to 'Manage Docker as a non-root user': https://docs.docker.com/engine/install/linux-postinstall/#manage-docker-as-a-non-root-user
    3. (Use your AWS credentials to login)
    ```
-   docker login registry.sh.nextgenwaterprediction.com
-   docker pull registry.sh.nextgenwaterprediction.com/ngwpc/nwm-ngen/cal-mgr:latest && docker tag registry.sh.nextgenwaterprediction.com/ngwpc/nwm-ngen/cal-mgr:latest cal-mgr
-   docker pull registry.sh.nextgenwaterprediction.com/ngwpc/nwm-ngen/ngen-fcst:latest && docker tag registry.sh.nextgenwaterprediction.com/ngwpc/nwm-ngen/ngen-fcst:latest ngen-fcst
-   docker pull registry.sh.nextgenwaterprediction.com/ngwpc/nwm-ngen/ngen-forcing/ngen-bmi-forcing:latest && docker tag registry.sh.nextgenwaterprediction.com/ngwpc/nwm-ngen/ngen-forcing/ngen-bmi-forcing:latest ngen-bmi-forcing
+
+   docker pull ghcr.io/ngwpc/nwm-cal-mgr:latest && docker tag ghcr.io/ngwpc/nwm-cal-mgr nwm-cal-mgr
+   docker pull ghcr.io/ngwpc/nwm-fcst-mgr:latest && docker tag ghcr.io/ngwpc/nwm-fcst-mgr:latest nwm-fcst-mgr
+   docker pull ghcr.io/ngwpc/ngen-bmi-forcing:latest && docker tag ghcr.io/ngwpc/ngen-bmi-forcing:latest ngen-bmi-forcing
    ```
 
    **Note:** If you are developing and have updates to the repos that you want to include, use one of the following from the appropriate repo directory:
    ```
-  docker build --tag=cal-mgr . 
-  docker build --tag=ngen-fcst . 
+  docker build --tag=nwm-cal-mgr . 
+  docker build --tag=nwm-fcst-mgr . 
   docker build --file Dockerfile.bmi-forcings --tag=ngen-bmi-forcing . 
    ```
  
@@ -333,8 +331,8 @@ peter.a.kronenberg@U-12SMBYD5450YI:~$ tree /ngencerf -L 4 -n -A
 ```
 
 
-# Installing ngen and cal-mgr
-**Note:** This process is not recommended.  Run ngen and cal-mgr in a docker container as described in Runtime Environments
+# Installing ngen and nwm-cal-mgr
+**Note:** This process is not recommended.  Run ngen and nwm-cal-mgr in a docker container as described in Runtime Environments
 
 Follow the instructions at https://confluence.nextgenwaterprediction.com/display/NGWPC/Build+ngen-cal+and+ngen+from+GitLab. 
 
