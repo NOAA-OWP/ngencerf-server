@@ -5,7 +5,7 @@ from typing import Literal
 from django.conf import settings
 
 from calibration.enums import ValidationType
-from calibration.models import CalibrationRun, ForecastRun, ValidationRun
+from calibration.models import CalibrationRun, ForecastRun, ValidationRun, ColdStartRun
 from cerfServer.settings import NGEN_ENVIRONMENT
 
 logger = logging.getLogger(__name__)
@@ -156,6 +156,10 @@ def get_output_validation_iteration_plot_dir(run: CalibrationRun, iteration_num:
     return os.path.join(get_output_validation_run_dir(run), f'Plot_Valid_{worker_name}_iter{iteration_num}')
 
 
+def get_output_cold_start_run_dir(run: CalibrationRun) -> str:
+    return os.path.join(get_output_dir(run), 'Cold_Start_Run')
+
+
 def get_output_forecast_run_dir(run: CalibrationRun) -> str:
     return os.path.join(get_output_dir(run), 'Forecast_Run')
 
@@ -272,6 +276,10 @@ def get_validation_iteration_stdout_file(run: CalibrationRun, worker_name: str, 
     return os.path.join(get_output_validation_run_dir(run), f"ngen-cal_validation_{worker_name}_iter{iteration_num}_stdout.log")
 
 
+def get_cold_start_dir(cold_start_run: ColdStartRun) -> str:
+    return os.path.join(get_output_cold_start_run_dir(cold_start_run.calibration_run), f'forecast_{cold_start_run.id}')
+
+
 def get_forecast_dir(forecast_run: ForecastRun) -> str:
     return os.path.join(get_output_forecast_run_dir(forecast_run.calibration_run), f'forecast_{forecast_run.id}')
 
@@ -292,18 +300,16 @@ def get_forecast_output_file(forecast_run: ForecastRun) -> str:
     return os.path.join(get_forecast_output_dir(forecast_run), f'{forecast_run.calibration_run.gage.gage_id}_output.csv')
 
 
-#
-# def get_forecast_forcing_download_stdout_file(forecast_run: ForecastRun) -> str:
-#     return os.path.join(get_forecast_dir(forecast_run), 'forecast_forcing_download_stdout.log')
+def get_cold_start_stdout_file(cold_start_run: ColdStartRun) -> str:
+    return os.path.join(get_cold_start_dir(cold_start_run), 'cold_start_stdout.log')
 
 
 def get_forecast_stdout_file(forecast_run: ForecastRun) -> str:
     return os.path.join(get_forecast_dir(forecast_run), 'forecast_stdout.log')
 
 
-#
-# def get_forecast_forcing_download_performance_file(forecast_run: ForecastRun) -> str:
-#     return os.path.join(get_forecast_dir(forecast_run), 'forecast_forcing_download_performance.log')
+def get_cold_start_performance_file(cold_start_run: ColdStartRun) -> str:
+    return os.path.join(get_cold_start_dir(cold_start_run), 'cold_start_performance.log')
 
 
 def get_forecast_performance_file(forecast_run: ForecastRun) -> str:
@@ -314,15 +320,11 @@ def get_forecast_realization_file(forecast_run: ForecastRun) -> str:
     return os.path.join(get_forecast_dir(forecast_run), f'{forecast_run.calibration_run.gage.gage_id}_realization_config_bmi_fcst.json')
 
 
-def get_cold_start_realization_file(forecast_run: ForecastRun) -> str:
-    return os.path.join(get_forecast_dir(forecast_run), f'{forecast_run.calibration_run.gage.gage_id}_realization_config_bmi_cold_start.json')
+def get_cold_start_realization_file(cold_start_run: ColdStartRun) -> str:
+    return os.path.join(get_cold_start_dir(cold_start_run), f'{cold_start_run.calibration_run.gage.gage_id}_realization_config_bmi_cold_start.json')
 
 
-#
-# def get_forecast_forcing_download_path(forecast_run: ForecastRun) -> str:
-#     return os.path.join(get_forecast_dir(forecast_run), f'forecast_forcing_{forecast_run.id}')
-
-
+# TODO Do we still need this?
 def get_forecast_temp_dir(forecast_run: ForecastRun) -> str:
     # TODO Need Kyle to create the directory, so we can use /tmp and not create it ourselves
     # temp_dir = os.path.join('/tmp', f'forcing_workdir_Calibration_{forecast_run.calibration_run.id}_Forecast_{forecast_run.id}')
@@ -364,6 +366,10 @@ def get_validation_iteration_git_info_file(run: ValidationRun, worker_name: str,
 
 def get_forecast_git_info_file(forecast_run: ForecastRun) -> str:
     return os.path.join(get_forecast_dir(forecast_run), "git_info_forecast.json")
+
+
+def get_cold_start_git_info_file(cold_start_run: ColdStartRun) -> str:
+    return os.path.join(get_cold_start_dir(cold_start_run), "git_info_forecast.json")
 
 
 def get_validation_metrics_valid_best_file(run: CalibrationRun) -> str:

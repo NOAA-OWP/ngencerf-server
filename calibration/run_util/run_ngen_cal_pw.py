@@ -59,9 +59,9 @@ def submit_job_to_slurm(run: BaseRun, owner: User, arguments: dict[str, str], st
         url_endpoint = settings.SLURM_SUBMIT_FORECAST_JOB_ENDPOINT
         payload = {
             'forecast_run_id': (None, run.id),
-            'forcing_dir': (None, arguments['forcing_dir']),
-            'input_file': (None, arguments['validation_best_input']),
-            'forecast_dir': (None, arguments['forecast_dir']),
+            'validation_yaml': (None, arguments['validation_yaml']),
+            'forecast_realization': (None, arguments['forecast_realization']),
+            # 'cold_start_realization': (None, arguments['cold_start_realization']),
             'stdout_file': (None, stdout_file),
         }
     else:

@@ -15,7 +15,7 @@ from django.utils.timezone import now
 
 from calibration.enums import OptimizationEnum, ValidationMetricPeriod, ValidationType, MetricEnum
 from calibration.models import Iteration, CalibrationRun, IterationMetric, IterationParameter, CalibrationParameter, ValidationRun, \
-    PerformanceMetrics, ValidationMetrics, NWMRetrospectiveMetrics, IterationResult, ForecastRun
+    PerformanceMetrics, ValidationMetrics, NWMRetrospectiveMetrics, IterationResult, ForecastRun, ColdStartRun
 from calibration.models.base_run import BaseRun
 from calibration.util.caching import have_LSTM
 from calibration.util.ngen_locations import get_realization_file_path, get_metrics_iteration_file, \
@@ -23,7 +23,7 @@ from calibration.util.ngen_locations import get_realization_file_path, get_metri
     get_validation_metrics_valid_best_file, get_validation_metrics_valid_iteration_file, \
     get_validation_performance_file, get_calibration_performance_file, get_validation_metrics_nwm_retrospective_file, get_output_iteration_csv, \
     get_validation_special_performance_file, \
-    get_forecast_performance_file, get_params_iteration_file
+    get_forecast_performance_file, get_params_iteration_file, get_cold_start_performance_file
 from calibration.views.calibration_swe_views import generate_swe_ts_data
 from calibration.views.common import CerfException, get_job_description, find_validation_worker_with_matching_id
 
@@ -98,6 +98,25 @@ def read_calibration_output(calibration_run: CalibrationRun, failed_so_far: bool
             calibration_run.save(update_fields=['realization_file_path'])
 
             process_iterations_for_all_workers(calibration_run)
+
+    logger.info(f"End of processing output for {job_description}")
+
+
+def read_cold_start_output(run: ColdStartRun, _failed_so_far: bool) -> None:
+    """
+    Processes the output of a forecast run by parsing performance metrics.
+
+    :param run: The ColdStartRun instance.
+    :param _failed_so_far: Indicates whether the job has failed up to this point.
+    """
+
+    job_description = get_job_description(run)
+
+    logger.info(f"Processing output for {job_description}, status={run.status}")
+    with transaction.atomic():
+        create_performance_metrics(run, get_cold_start_performance_file(run))
+
+    # No other processing needed
 
     logger.info(f"End of processing output for {job_description}")
 

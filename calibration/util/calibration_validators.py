@@ -5,7 +5,7 @@ from rest_framework.fields import empty
 from rest_framework.settings import api_settings
 
 from calibration.enums import DataTypeEnum, UnitsEnum, LocationEnum, ForcingSourceEnum, ObservationalSourceEnum, DomainEnum, StatusEnum, \
-    OptimizationEnum, GeopackageSourceEnum, SlurmStatusEnum, JobGenesis, PlotDefinitionsEnum, ForecastCycleEnum, LogCategory, LogName, NgenLogging
+    OptimizationEnum, GeopackageSourceEnum, SlurmStatusEnum, JobGenesis, PlotDefinitionsEnum, ForecastConfigEnum, LogCategory, LogName, NgenLogging
 from calibration.util.caching import get_cached_modules_with_groups
 
 
@@ -170,8 +170,15 @@ class CreateValidationRequestSerializer(CalibrationRunSerializer):
     iteration_id = serializers.IntegerField(required=True)
 
 
+# TODO Fix these
+class CreateColdStartRequestSerializer(CalibrationRunSerializer):
+    configuration_name = serializers.CharField(required=True, validators=[enum_validator(ForecastConfigEnum)])
+    cycle_date = serializers.DateTimeField(required=True, allow_null=False)
+    cold_start_date = serializers.DateTimeField(required=False, allow_null=False)
+
+
 class CreateForecastRequestSerializer(CalibrationRunSerializer):
-    configuration_name = serializers.CharField(required=True, validators=[enum_validator(ForecastCycleEnum)])
+    configuration_name = serializers.CharField(required=True, validators=[enum_validator(ForecastConfigEnum)])
     cycle_date = serializers.DateTimeField(required=True, allow_null=False)
     cold_start_date = serializers.DateTimeField(required=False, allow_null=False)
 
@@ -375,6 +382,7 @@ class ValidationStatusSerializer(ValidationRunSerializer):
 class CalibrationJobsResponseSerializer(BaseSerializer):
     calibration_run_id = serializers.IntegerField(required=True)
     gage_id = serializers.CharField(required=True, allow_null=True)
+    domain_name = serializers.CharField(required=True, allow_null=True)
     job_genesis = serializers.CharField(required=True, validators=[enum_validator(JobGenesis)])
     created_at = serializers.DateTimeField(required=True)
     status = serializers.CharField(required=True, validators=[enum_validator(StatusEnum)])
@@ -656,12 +664,19 @@ class CreateAndRunValidationResponseSerializer(GenericResponseSerializer):
     submit_date = serializers.DateTimeField(required=True, allow_null=False)
 
 
+class CreateAndRunColdStartResponseSerializer(BaseSerializer):
+    message = serializers.CharField(required=True)
+    calibration_run_id = serializers.IntegerField(required=True)
+    coldstart_run_id = serializers.IntegerField(required=True)
+    submit_date = serializers.DateTimeField(required=True, allow_null=False)
+    cold_start_status = serializers.CharField(required=True, validators=[enum_validator(StatusEnum)])
+
+
 class CreateAndRunForecastResponseSerializer(BaseSerializer):
     message = serializers.CharField(required=True)
     calibration_run_id = serializers.IntegerField(required=True)
     forecast_run_id = serializers.IntegerField(required=True)
     submit_date = serializers.DateTimeField(required=True, allow_null=False)
-    forecast_status = serializers.CharField(required=True, validators=[enum_validator(StatusEnum)])
 
 
 # Geopackage from Data Services
@@ -948,7 +963,9 @@ class GetStatusValidationsResponseSerializer(CommonStatusFieldsMixin, Validation
 
 
 class GetStatusForecastsResponseSerializer(CommonStatusFieldsMixin, ForecastRunSerializer):
-    cycle = serializers.CharField(required=True, validators=[enum_validator(ForecastCycleEnum)])
+    configuration = serializers.CharField(required=True, validators=[enum_validator(ForecastConfigEnum)])
+    cycle_date = serializers.DateTimeField(required=True, allow_null=False)
+    cold_start_date = serializers.DateTimeField(required=False, allow_null=True)
     # forcing_download = GetStatusForcingDownloadSerializer(required=False, allow_null=True)
 
 
@@ -1056,21 +1073,30 @@ class MPINodesRulesResponseSerializer(GenericMessageResponseSerializer):
 ##################################
 # Forecast Tab
 ##################################
-class ForecastCycleSerializer(BaseSerializer):
-    name = serializers.CharField(required=True, validators=[enum_validator(ForecastCycleEnum)])
+class ForecastConfigSerializer(BaseSerializer):
+    name = serializers.CharField(required=True, validators=[enum_validator(ForecastConfigEnum)])
     data_sources = serializers.CharField(required=False, allow_null=True)
     time_range = serializers.CharField(required=False, allow_null=True)
     is_active = serializers.BooleanField(required=True)
+    domain = serializers.CharField(required=False, validators=[enum_validator(DomainEnum)])
+    availability_lag = serializers.IntegerField(required=True)
+    cycle_start = serializers.IntegerField(required=True)
+    cycle_end = serializers.IntegerField(required=True)
+    cycle_freq = serializers.IntegerField(required=True)
+    fcst_win = serializers.IntegerField(required=True)
+    fcst_timestep = serializers.FloatField(required=True)
 
 
 class LoadForecastTabResponseSerializer(BaseSerializer):
-    forecast_cycle_values = ForecastCycleSerializer(many=True)
+    forecast_configuration_values = ForecastConfigSerializer(many=True)
 
 
 class ForecastJobsResponseSerializer(BaseSerializer):
     calibration_run_id = serializers.IntegerField(required=True)
     forecast_run_id = serializers.IntegerField(required=True)
-    cycle = serializers.CharField(required=True, validators=[enum_validator(ForecastCycleEnum)])
+    configuration = serializers.CharField(required=True, validators=[enum_validator(ForecastConfigEnum)])
+    cycle_date = serializers.DateTimeField(required=True, allow_null=False)
+    cold_start_date = serializers.DateTimeField(required=False, allow_null=True)
     gage_id = serializers.CharField(required=True)
     forecast_status = serializers.CharField(required=True, validators=[enum_validator(StatusEnum)])
     # forcing_download_status = serializers.CharField(required=True, validators=[enum_validator(StatusEnum)])

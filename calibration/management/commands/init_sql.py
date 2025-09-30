@@ -6,10 +6,10 @@ from django.contrib.auth import get_user_model
 from django.core.exceptions import ObjectDoesNotExist
 from django.core.management.base import BaseCommand, CommandError
 
-from calibration.enums import DataTypeEnum
+from calibration.enums import DataTypeEnum, DomainEnum
 from calibration.enums_vanilla import JobType
 from calibration.models import Domain, ObservationalSource, Optimization, Metric, OptimizationInput, PlotDefinition, \
-    GeopackageSource, ForecastCycle, CustomUser
+    GeopackageSource, ForecastConfiguration, CustomUser
 from calibration.models.forcing_source import ForcingSource
 from calibration.models.module import Module
 from calibration.models.module_group import ModuleGroup
@@ -50,7 +50,7 @@ class Command(BaseCommand):
             logger.error('********************************')
             sys.exit(1)
 
-        logger.info(f"In init_sql: email: {cast(CustomUser, self.user).email}")
+        logger.info(f"In init_sql: email: {cast(Cust            omUser, self.user).email}")
 
         # List of all initialization functions to run in sequence
         steps = [
@@ -101,36 +101,36 @@ class Command(BaseCommand):
     def define_output_variables(self):
         if self.DELETE_FLAG:
             OutputVariable.objects.all().delete()
-        
-        output_variable_names = ["sfcheadsubrt",
-          "inflow",
-          "outflow",
-          "reservoir_assimilated_value",
-          "water_sfc_elev",
-          "nudge",
-          "qBucket",
-          "streamflow",
-          "velocity",
-          "ACSNOM",
-          "SNOWT_AVG",
-          "SOILICE",
-          "SOILSAT_TOP",
-          "QRAIN",
-          "FSNO",
-          "SNOWH",
-          "SNLIQ",
-          "SNEQV",
-          "QSNOW",
-          "SOIL_T",
-          "SOIL_M",
-          "SFCRNOFF",
-          "TRAD",
-          "LH",
-          "FIRA",
-          "HFX"
-        ]
 
-        values = [{"name": name, "order": order+1} for order, name in enumerate(output_variable_names)]
+        output_variable_names = ["sfcheadsubrt",
+                                 "inflow",
+                                 "outflow",
+                                 "reservoir_assimilated_value",
+                                 "water_sfc_elev",
+                                 "nudge",
+                                 "qBucket",
+                                 "streamflow",
+                                 "velocity",
+                                 "ACSNOM",
+                                 "SNOWT_AVG",
+                                 "SOILICE",
+                                 "SOILSAT_TOP",
+                                 "QRAIN",
+                                 "FSNO",
+                                 "SNOWH",
+                                 "SNLIQ",
+                                 "SNEQV",
+                                 "QSNOW",
+                                 "SOIL_T",
+                                 "SOIL_M",
+                                 "SFCRNOFF",
+                                 "TRAD",
+                                 "LH",
+                                 "FIRA",
+                                 "HFX"
+                                 ]
+
+        values = [{"name": name, "order": order + 1} for order, name in enumerate(output_variable_names)]
 
         for v in values:
             OutputVariable.objects.update_or_create(name=v['name'], defaults={"order": v['order'], "created_by": self.user})
@@ -142,58 +142,58 @@ class Command(BaseCommand):
         values = [{"name": "Topoflow",
                    "description": "description",
                    "groups": ["Glacier"],
-                   "output_variables": ["ACSNOM","SNOWH","SNEQV","QSNOW","TRAD","LH","FIRA","HFX"],
+                   "output_variables": ["ACSNOM", "SNOWH", "SNEQV", "QSNOW", "TRAD", "LH", "FIRA", "HFX"],
                    "is_active": False},
                   {"name": "Noah-OWP-Modular",
                    "description": "An extended, refactored version of the Noah-MP land surface model",
                    "groups": ["Snowmelt", "Evapotranspiration"],
-                   "output_variables": ["ACSNOM","SNOWT_AVG","QRAIN","FSNO","SNOWH","SNLIQ","SNEQV","QSNOW","TRAD","LH","FIRA","HFX"]},
+                   "output_variables": ["ACSNOM", "SNOWT_AVG", "QRAIN", "FSNO", "SNOWH", "SNLIQ", "SNEQV", "QSNOW", "TRAD", "LH", "FIRA", "HFX"]},
                   {"name": "Snow-17",
                    "description": "Snow17 is a snow accumulation and melt model that has been used by the National Weather Service since the late 1970s for operational streamflow forecasting.  It is a temperature-index model",
                    "groups": ["Snowmelt"],
-                   "output_variables": ["ACSNOM","SNOWH","SNEQV"]},
-                  {"name": "UEB", "description": 
-                   "description", 
+                   "output_variables": ["ACSNOM", "SNOWH", "SNEQV"]},
+                  {"name": "UEB", "description":
+                      "description",
                    "groups": ["Snowmelt"],
-                   "output_variables": ["ACSNOM","SNOWT_AVG","QRAIN","SNEQV","QSNOW","TRAD","LH","FIRA","HFX"]},
+                   "output_variables": ["ACSNOM", "SNOWT_AVG", "QRAIN", "SNEQV", "QSNOW", "TRAD", "LH", "FIRA", "HFX"]},
                   {"name": "CFE-S",
                    "description": "The Conceptual Functional Equivalent (CFE) model to the National Water Model. The X represents the Xinanjiang function (configuration: surface_partitioning_scheme= Xinanjiang)",
                    "groups": ["Rainfall Runoff"],
-                   "output_variables": ["sfcheadsubrt","qBucket","streamflow","QRAIN","SFCRNOFF"]},
+                   "output_variables": ["sfcheadsubrt", "qBucket", "streamflow", "QRAIN", "SFCRNOFF"]},
                   {"name": "CFE-X",
                    "description": "The Conceptual Functional Equivalent (CFE) model to the National Water Model. The S represents the Schaake function (configuration: surface_partitioning_scheme=Schaake)",
                    "groups": ["Rainfall Runoff"],
-                   "output_variables": ["sfcheadsubrt","qBucket","streamflow","QRAIN","SFCRNOFF"]},
+                   "output_variables": ["sfcheadsubrt", "qBucket", "streamflow", "QRAIN", "SFCRNOFF"]},
                   {"name": "LSTM",
                    "description": "description",
                    "groups": ["Glacier", "Snowmelt", "Evapotranspiration", "Soil Moisture", "Rainfall Runoff"]},
-                  {"name": "PET", "description": 
-                   "description", "groups": ["Evapotranspiration"],
+                  {"name": "PET", "description":
+                      "description", "groups": ["Evapotranspiration"],
                    "is_active": False},
                   {"name": "TopModel",
                    "description": "A physically based, distributed watershed model that simulates hydrologic fluxes of water.",
                    "groups": ["Rainfall Runoff"],
-                   "output_variables": ["streamflow","QRAIN","SFCRNOFF"]},
+                   "output_variables": ["streamflow", "QRAIN", "SFCRNOFF"]},
                   {"name": "Sac-SMA",
                    "description": "A BMI enabled version of the Sacramento Soil Moisture Accounting (Sac-SMA) model.  This version of Sac-SMA allows for multiple hydrological response units (HRUs) to be modeled at once.",
                    "groups": ["Rainfall Runoff"],
-                   "output_variables": ["qBucket","streamflow","SFCRNOFF"]},
+                   "output_variables": ["qBucket", "streamflow", "SFCRNOFF"]},
                   {"name": "LASAM",
                    "description": "Lumped Arid/Semi-arid Model (LASAM) for infiltration and surface runoff.  The LASAM simulates infiltration and runoff based on Layered Green & Ampt with redistribution (LGAR) model.).",
                    "groups": ["Rainfall Runoff"],
-                   "output_variables": ["qBucket","streamflow","SOILSAT_TOP","QRAIN","SOIL_M","SFCRNOFF"]},
+                   "output_variables": ["qBucket", "streamflow", "SOILSAT_TOP", "QRAIN", "SOIL_M", "SFCRNOFF"]},
                   {"name": "SMP",
                    "description": "The soil moisture profiles (SMP schemes provide soil moisture distributed over a one-dimensional vertical column and depth to water table. These schemes facilitate coupling among hydrological and thermal models such as (CFE and SFT or LASAM and SFT).",
                    "groups": ["Soil Moisture"],
-                   "output_variables": ["SOILSAT_TOP","SOIL_M"]},
+                   "output_variables": ["SOILSAT_TOP", "SOIL_M"]},
                   {"name": "SFT",
                    "description": "The soil freeze-thaw model simulates the transport of heat in soil using a one-dimensional vertical column. The model uses a standard diffusion equation discretized using a fully-implicit scheme at the interior and a semi-implicit scheme at the top and bottom boundaries, similar to NOAH-MP. More details are provided below.",
                    "groups": ["Soil Moisture"],
-                   "output_variables": ["SOILICE","SOIL_T"]},
+                   "output_variables": ["SOILICE", "SOIL_T"]},
                   {"name": "T-Route",
                    "description": "Tree-Based Channel Routing -  a dynamic channel routing model, offers a comprehensive solution for river network routing problems. Provides a series lateral inflows for each node in a channel network and computes the resulting streamflows.",
                    "groups": ["Routing"],
-                   "output_variables": ["inflow","outflow","reservoir_assimilated_value","water_sfc_elev","nudge","streamflow","velocity",""]}
+                   "output_variables": ["inflow", "outflow", "reservoir_assimilated_value", "water_sfc_elev", "nudge", "streamflow", "velocity", ""]}
                   ]
 
         for v in values:
@@ -203,7 +203,7 @@ class Command(BaseCommand):
 
             group_names = v['groups'] if 'groups' in v else []
             groups = ModuleGroup.objects.filter(name__in=group_names)
-            
+
             output_variable_names = v['output_variables'] if 'output_variables' in v else []
             output_variables = OutputVariable.objects.filter(name__in=output_variable_names)
 
@@ -302,30 +302,280 @@ class Command(BaseCommand):
                                                                 "description": v['description'],
                                                                 "created_by": self.user})
 
-    def define_forecast_cycle(self):
+    def define_forecast_configuration(self):
         if self.DELETE_FLAG:
-            ForecastCycle.objects.all().delete()
+            ForecastConfiguration.objects.all().delete()
+
+            """
+            # For each forecast configuration, provide one or more lists that specify the following information (in order):
+            # - cycle_start: start time of forecast cycles in Zulu time or UTC (e.g., 0Z)
+            # - cycle_end: end time of forecast cycles in Zulu time or UTC (e.g., 23Z)
+            # - cycle_freq: frequency of forecast cycles in hours (e.g., 1)
+            # - fcst_win: forecast window in hours (e.g., 18)
+            # - fcst_timestep: forecast timestep in hours (e.g., 1)
+            short_range: [0, 23, 1, 18, 1]
+            short_range_alaska:
+            - [0, 18, 6, 15, 1]
+            - [3, 21, 6, 45, 1]
+    
+            short_range_hawaii: [0, 12, 12, 48, 0.25]
+            short_range_puertorico: [6, 18, 12, 48, 1]
+            medium_range_blend: [0, 18, 6, 240, 1]
+            medium_range_mem1: [0, 18, 6, 240, 1]
+            medium_range_mem2: [0, 18, 6, 204, 1]
+            medium_range_mem3: [0, 18, 6, 204, 1]
+            medium_range_mem4: [0, 18, 6, 204, 1]
+            medium_range_mem5: [0, 18, 6, 204, 1]
+            medium_range_mem6: [0, 18, 6, 204, 1]
+            medium_range_blend_alaska: [0, 18, 6, 240, 1]
+            medium_range_alaska_mem1: [0, 18, 6, 240, 1]
+            medium_range_alaska_mem2: [0, 18, 6, 204, 1]
+            medium_range_alaska_mem3: [0, 18, 6, 204, 1]
+            medium_range_alaska_mem4: [0, 18, 6, 204, 1]
+            medium_range_alaska_mem5: [0, 18, 6, 204, 1]
+            medium_range_alaska_mem6: [0, 18, 6, 204, 1]
+            long_range_mem1: [0, 18, 6, 720, 6]
+            long_range_mem2: [0, 18, 6, 720, 6]
+            long_range_mem3: [0, 18, 6, 720, 6]
+            long_range_mem4: [0, 18, 6, 720, 6](edited)
+            """
+
+        alaska_domain = DomainEnum.get_instance('Alaska')
+        hawaii_domain = DomainEnum.get_instance('Hawaii')
+        puerto_rico_domain = DomainEnum.get_instance('Puerto_Rico')
+        conus_domain = DomainEnum.get_instance('CONUS')
 
         values = [
-            {"name": "Analysis and Assimilation (AnA)", "internal_name": "standard_ana", "data_sources": "HRRR, RAP, MRMS-MS, MRMS-RO, USGS gages",
-             "time_range": "3 hr",
-             "is_active": False},
-            {"name": "Short Range Forecast", "internal_name": "short_range", "data_sources": "HRRR, RAP",
-             "time_range": "Latest forecast cycle, 18 hours", "is_active": True},
-            {"name": "Extended AnA", "internal_name": "extended_ana", "data_sources": "RAP, HRRR, Stage IV", "time_range": "tbd", "is_active": False},
-            {"name": "Medium Range Forecast", "internal_name": "medium_range", "data_sources": "tbd", "time_range": "tbd", "is_active": False},
-            {"name": "Long Range AnA", "internal_name": "long_range_ana", "data_sources": "HRRR, RAP, MRMS-MS, MRMS-RO, USGS gages",
-             "time_range": "tbd", "is_active": False},
-            {"name": "Long Range Forecast", "internal_name": "long_range", "data_sources": "long_range_forecast", "time_range": "tbd",
-             "is_active": False},
+            {
+                "name": "Analysis and Assimilation (AnA)", "internal_name": "standard_ana", "data_sources": "HRRR, RAP, MRMS-MS, MRMS-RO, USGS gages",
+                "time_range": "3 hr",
+                "domain": conus_domain,
+                "cycle_start": 0, "cycle_end": 23, "cycle_freq": 1, "fcst_win": 48, "fcst_timestep": 1,
+                "availability_lag": 6,
+                "is_active": True
+            },
+            {
+                "name": "Short Range Forecast", "internal_name": "short_range", "data_sources": "HRRR, RAP",
+                "time_range": "Latest forecast cycle - 18 hours",
+                "domain": conus_domain,
+                "cycle_start": 0, "cycle_end": 23, "cycle_freq": 1, "fcst_win": 18, "fcst_timestep": 1,
+                "availability_lag": 6,
+                "is_active": True
+            },
+            {
+                "name": "Short Range Alaska", "internal_name": "short_range_alaska", "data_sources": "tbd",
+                "time_range": "Latest forecast cycle - 15 hours (for even-numbered cycles)",
+                "domain": alaska_domain,
+                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 15, "fcst_timestep": 1,
+                "availability_lag": 6,
+                "is_active": True
+            },
+            {
+                "name": "Short Range Extended Alaska", "internal_name": "short_range_extended_alaska", "data_sources": "tbd",
+                "time_range": "Latest forecast cycle - 45 hours (for odd-numbered cycles)",
+                "domain": alaska_domain,
+                "cycle_start": 3, "cycle_end": 21, "cycle_freq": 6, "fcst_win": 45, "fcst_timestep": 1,
+                "availability_lag": 6,
+                "is_active": True
+            },
+            {
+                "name": "Short Range Hawaii", "internal_name": "short_range_hawaii", "data_sources": "tbd",
+                "time_range": "Latest forecast cycle - 48 hours",
+                "domain": hawaii_domain,
+                "cycle_start": 0, "cycle_end": 23, "cycle_freq": 1, "fcst_win": 48, "fcst_timestep": 0.25,
+                "availability_lag": 6,
+                "is_active": False
+            },
+            {
+                "name": "Short Range Puerto Rico", "internal_name": "short_range_puertorico", "data_sources": "tbd",
+                "time_range": "Latest forecast cycle - 48 hours",
+                "domain": puerto_rico_domain,
+                "cycle_start": 6, "cycle_end": 18, "cycle_freq": 12, "fcst_win": 48, "fcst_timestep": 1,
+                "availability_lag": 6,
+                "is_active": True
+            },
+            {
+                "name": "Extended AnA", "internal_name": "extended_ana", "data_sources": "RAP, HRRR, Stage IV",
+                "time_range": "tbd",
+                "domain": conus_domain,
+                "cycle_start": 0, "cycle_end": 23, "cycle_freq": 1, "fcst_win": 48, "fcst_timestep": 1,
+                "availability_lag": 6,
+                "is_active": True
+            },
+            {
+                "name": "Medium Range Blend", "internal_name": "medium_range_blend", "data_sources": "tbd",
+                "time_range": "Latest forecast cycle - 240 hours",
+                "domain": conus_domain,
+                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 240, "fcst_timestep": 1,
+                "availability_lag": 6,
+                "is_active": True
+            },
+            {
+                "name": "Medium Range MEM1", "internal_name": "medium_range_mem1", "data_sources": "tbd",
+                "time_range": "Latest forecast cycle - 204 hours",
+                "domain": conus_domain,
+                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 204, "fcst_timestep": 1,
+                "availability_lag": 6,
+                "is_active": False
+            },
+            {
+                "name": "Medium Range MEM2", "internal_name": "medium_range_mem2", "data_sources": "tbd",
+                "time_range": "Latest forecast cycle - 204 hours",
+                "domain": conus_domain,
+                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 204, "fcst_timestep": 1,
+                "availability_lag": 6,
+                "is_active": False
+            },
+            {
+                "name": "Medium Range MEM3", "internal_name": "medium_range_mem3", "data_sources": "tbd",
+                "time_range": "Latest forecast cycle - 204 hours",
+                "domain": conus_domain,
+                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 204, "fcst_timestep": 1,
+                "availability_lag": 6,
+                "is_active": False
+            },
+            {
+                "name": "Medium Range MEM4", "internal_name": "medium_range_mem4", "data_sources": "tbd",
+                "time_range": "Latest forecast cycle - 204 hours", "domain": conus_domain,
+                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 204, "fcst_timestep": 1,
+                "availability_lag": 6,
+                "is_active": False
+            },
+            {
+                "name": "Medium Range MEM5", "internal_name": "medium_range_mem5", "data_sources": "tbd",
+                "time_range": "Latest forecast cycle - 204 hours",
+                "domain": conus_domain,
+                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 204, "fcst_timestep": 1,
+                "availability_lag": 6,
+                "is_active": False
+            },
+            {
+                "name": "Medium Range MEM6", "internal_name": "medium_range_mem6", "data_sources": "tbd",
+                "time_range": "Latest forecast cycle - 204 hours",
+                "domain": conus_domain,
+                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 204, "fcst_timestep": 1,
+                "availability_lag": 6,
+                "is_active": False
+            },
+            {
+                "name": "Medium Range Blend Alaska", "internal_name": "medium_range_blend_alaska", "data_sources": "tbd",
+                "time_range": "Latest forecast cycle - 240 hours",
+                "domain": alaska_domain,
+                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 240, "fcst_timestep": 1,
+                "availability_lag": 6,
+                "is_active": True
+            },
+            {
+                "name": "Medium Range Alaska MEM1", "internal_name": "medium_range_alaska_mem1", "data_sources": "tbd",
+                "time_range": "Latest forecast cycle -204 hours",
+                "domain": alaska_domain,
+                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 204, "fcst_timestep": 1,
+                "availability_lag": 6,
+                "is_active": False
+            },
+            {
+                "name": "Medium Range Alaska MEM2", "internal_name": "medium_range_alaska_mem2", "data_sources": "tbd",
+                "time_range": "Latest forecast cycle - 204 hours",
+                "domain": alaska_domain,
+                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 204, "fcst_timestep": 1,
+                "availability_lag": 6,
+                "is_active": False
+            },
+            {
+                "name": "Medium Range Alaska MEM3", "internal_name": "medium_range_alaska_mem3", "data_sources": "tbd",
+                "time_range": "Latest forecast cycle - 204 hours",
+                "domain": alaska_domain,
+                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 204, "fcst_timestep": 1,
+                "availability_lag": 6,
+                "is_active": False
+            },
+            {
+                "name": "Medium Range Alaska MEM4", "internal_name": "medium_range_alaska_mem4", "data_sources": "tbd",
+                "time_range": "Latest forecast cycle - 204 hours",
+                "domain": alaska_domain,
+                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 204, "fcst_timestep": 1,
+                "availability_lag": 6,
+                "is_active": False
+            },
+            {
+                "name": "Medium Range Alaska MEM5", "internal_name": "medium_range_alaska_mem5", "data_sources": "tbd",
+                "time_range": "Latest forecast cycle - 204 hours",
+                "domain": alaska_domain,
+                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 204, "fcst_timestep": 1,
+                "availability_lag": 6,
+                "is_active": False
+            },
+            {
+                "name": "Medium Range Alaska MEM6", "internal_name": "medium_range_alaska_mem6", "data_sources": "tbd",
+                "time_range": "Latest forecast cycle - 204 hours",
+                "domain": alaska_domain,
+                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 204, "fcst_timestep": 1,
+                "availability_lag": 6,
+                "is_active": False
+            },
+            {
+                "name": "Long Range AnA", "internal_name": "long_range_ana", "data_sources": "HRRR, RAP, MRMS-MS, MRMS-RO, USGS gages",
+                "time_range": "tbd",
+                "domain": conus_domain,
+                "cycle_start": 0, "cycle_end": 23, "cycle_freq": 1, "fcst_win": 48, "fcst_timestep": 1,
+                "availability_lag": 6,
+                "is_active": False
+            },
+            {
+                "name": "Long Range Forecast", "internal_name": "long_range", "data_sources": "long_range_forecast",
+                "time_range": "tbd",
+                "domain": conus_domain,
+                "cycle_start": 0, "cycle_end": 23, "cycle_freq": 1, "fcst_win": 48, "fcst_timestep": 1,
+                "availability_lag": 6,
+                "is_active": False
+            },
+            {
+                "name": "Long Range MEM1", "internal_name": "long_range_mem1", "data_sources": "tbd",
+                "time_range": "Latest forecast cycle - 720 hours",
+                "domain": conus_domain,
+                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 720, "fcst_timestep": 6,
+                "availability_lag": 12,
+                "is_active": True
+            },
+            {
+                "name": "Long Range MEM2", "internal_name": "long_range_mem2", "data_sources": "tbd",
+                "time_range": "Latest forecast cycle - 720 hours",
+                "domain": conus_domain,
+                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 720, "fcst_timestep": 6,
+                "availability_lag": 12,
+                "is_active": True
+            },
+            {
+                "name": "Long Range MEM3", "internal_name": "long_range_mem3", "data_sources": "tbd",
+                "time_range": "Latest forecast cycle - 720 hours",
+                "domain": conus_domain,
+                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 720, "fcst_timestep": 6,
+                "availability_lag": 12,
+                "is_active": True
+            },
+            {
+                "name": "Long Range MEM4", "internal_name": "long_range_mem4", "data_sources": "tbd",
+                "time_range": "Latest forecast cycle - 720 hours",
+                "domain": conus_domain,
+                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 720, "fcst_timestep": 6,
+                "availability_lag": 12,
+                "is_active": True
+            },
         ]
 
         for v in values:
-            ForecastCycle.objects.update_or_create(name=v['name'],
-                                                   defaults={"is_active": v.get('is_active', True),
+            ForecastConfiguration.objects.update_or_create(name=v['name'],
+                                                           defaults={"is_active": v.get('is_active', True),
                                                              "internal_name": v['internal_name'],
                                                              "data_sources": v['data_sources'],
                                                              "time_range": v['time_range'],
+                                                             "domain": v['domain'],
+                                                             "availability_lag": v['availability_lag'],
+                                                             "cycle_start": v['cycle_start'],
+                                                             "cycle_end": v['cycle_end'],
+                                                             "cycle_freq": v['cycle_freq'],
+                                                             "fcst_win": v['fcst_win'],
+                                                             "fcst_timestep": v['fcst_timestep'],
                                                              "created_by": self.user})
 
     def define_optimization(self):

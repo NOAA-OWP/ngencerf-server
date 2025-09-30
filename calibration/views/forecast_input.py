@@ -2,8 +2,8 @@ import copy
 import logging
 
 from calibration.enums import StatusEnum
-from calibration.models import ForecastRun
-from calibration.util.ngen_locations import get_forecast_dir, FORECAST_FORCING_TEMPLATES
+from calibration.models import ForecastRun, ColdStartRun
+from calibration.util.ngen_locations import get_forecast_dir, FORECAST_FORCING_TEMPLATES, get_cold_start_dir
 from calibration.views.called_from import called_from
 from calibration.views.common import format_datetime, join_with_or, ErrorReport, readonly_transaction
 from calibration.views.ngen_cal_input import build_config
@@ -26,11 +26,11 @@ CONFIG_TEMPLATE = {
 }
 
 
-def create_forecast_input(run: ForecastRun) -> tuple[ErrorReport | None, str | None]:
+def create_forecast_input(run: ForecastRun | ColdStartRun) -> tuple[ErrorReport | None, str | None]:
     """
 
 
-    :param run: The CalibrationRun instance to validate and prepare.
+    :param run: The ForecatRun or ColdStartRun instance to validate and prepare.
     :return: A tuple (ErrorReport, config_file_path):
              - error_object: ErrorReport object with errors and warnings.
              - config_file_path: Path to the generated config file if build is successful, else None.
@@ -47,29 +47,32 @@ def create_forecast_input(run: ForecastRun) -> tuple[ErrorReport | None, str | N
     with readonly_transaction():
         allowed_status_names = [StatusEnum.SUBMITTED.value]
         if run.status.name not in allowed_status_names:
+            job_name = 'Forecast' if isinstance(run, ForecastRun) else 'Cold Start'
             error_object.add_warning(
-                f'Forecast Job {run.id} is not in an allowed status: '
+                f'{job_name} Job {run.id} is not in an allowed status: '
                 f'{join_with_or(allowed_status_names)}. '
                 f'Current status: {run.status.name}'
             )
             return error_object, None
 
-        # Deepcopy config template
-        config: dict[str, dict[str, str | int | float | bool]] = copy.deepcopy(CONFIG_TEMPLATE)
+    # Deepcopy config template
+    config: dict[str, dict[str, str | int | float | bool]] = copy.deepcopy(CONFIG_TEMPLATE)
 
-        forcing = config['Forcing']
+    forcing = config['Forcing']
 
+    forcing['forecast_configuration'] = run.configuration.internal_name
+    if isinstance(run, ForecastRun):
         forcing['cycle_datetime'] = format_datetime(run.cycle_date)
-        # TODO
-        forcing['forecast_configuration'] = run.cycle.internal_name  # Need to get the internal name
-        forcing['forecast_configuration'] = 'short_range'
-        forcing['use_cold_start'] = run.cold_start_date is not None
+    else:
         forcing['cold_start_datetime'] = format_datetime(run.cold_start_date) if run.cold_start_date else None
+
+    forcing['use_cold_start'] = isinstance(run, ColdStartRun)
 
     # -----------------------------
     # FILE WRITE PHASE
     # -----------------------------
+    config_location = get_forecast_dir(run) if isinstance(run, ForecastRun) else get_cold_start_dir(run)
     if not error_object.has_errors() and not error_object.has_warnings():
-        config_file = build_config(config, get_forecast_dir(run), 'forecast-input.config')
+        config_file = build_config(config, config_location, 'forecast-input.config')
 
     return error_object, config_file

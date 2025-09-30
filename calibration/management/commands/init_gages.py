@@ -8,7 +8,7 @@ from django.core.exceptions import ObjectDoesNotExist
 from django.core.management.base import BaseCommand, CommandError
 
 from calibration.enums import DomainEnum
-from calibration.models import Gage, Domain, Rfc, CustomUser
+from calibration.models import Gage, Rfc, CustomUser
 from cerfServer.settings import BASE_DIR
 
 logger = logging.getLogger(__name__)
@@ -19,7 +19,6 @@ logger = logging.getLogger(__name__)
 # 3 Mapping files to get nws_id
 # 4 Additional gages
 
-domains = list(Domain.objects.only('id', 'name').values('id', 'name'))
 alaska_domain = DomainEnum.get_instance('Alaska')
 hawaii_domain = DomainEnum.get_instance('Hawaii')
 puerto_rico_domain = DomainEnum.get_instance('Puerto_Rico')

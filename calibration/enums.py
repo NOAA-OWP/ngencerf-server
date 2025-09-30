@@ -2,7 +2,7 @@ from typing import Any, Type
 
 from django.core.cache import cache
 
-from calibration.models import Status, ForcingSource, ObservationalSource, Domain, Optimization, GeopackageSource, PlotDefinition, ForecastCycle, \
+from calibration.models import Status, ForcingSource, ObservationalSource, Domain, Optimization, GeopackageSource, PlotDefinition, ForecastConfiguration, \
     Metric
 from calibration.util.AbstractEnum import AbstractEnum
 
@@ -94,14 +94,14 @@ class GeopackageSourceEnum(AbstractEnum):
         return {'is_active': True}
 
 
-class ForecastCycleEnum(AbstractEnum):
+class ForecastConfigEnum(AbstractEnum):
     """
     Enum for Forecast Cycles,
     """
 
     @classmethod
-    def get_model(cls) -> Type[ForecastCycle]:
-        return ForecastCycle
+    def get_model(cls) -> Type[ForecastConfiguration]:
+        return ForecastConfiguration
 
 
 class DomainEnum(AbstractEnum):

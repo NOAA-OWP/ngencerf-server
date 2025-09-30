@@ -159,7 +159,7 @@ def get_status(request: Request) -> Response:
         forecast_data = {
             'forecast_run_id': run.id,
             'status': run.status.name,
-            'cycle': run.cycle.name,
+            'configuration': run.configuration.name,
             'submit_date': run.submit_date,
             'run_start': run.run_start,
             'run_end': run.run_end
@@ -920,39 +920,6 @@ def validation_job_slurm_callback(request: Request) -> Response:
         get_validation_run,
         run_validation_job_callback_pw
     )
-
-#
-# @extend_schema(
-#     request=ForecastForcingDownloadJobSlurmCallbackRequestSerializer,
-#     responses={
-#         202: None,
-#         400: OpenApiResponse(
-#             response=ErrorResponseSerializer,
-#             description="Validation error or parsing error"
-#         ),
-#         500: OpenApiResponse(
-#             response=ErrorResponseSerializer,
-#             description="Internal server error"
-#         )
-#     },
-#     description="Callback for Slurm to call when a forecast forcing download job ends"
-# )
-# @api_view(['POST'])
-# @handle_exceptions
-# @auth_scope_required(TOKEN_SLURM_SCOPE)
-# def forecast_forcing_download_job_slurm_callback(request: Request) -> Response:
-#     """
-#     Handles a callback from Slurm to update the status of a forecast forcing download job.
-#
-#     :param request: HTTP request containing Slurm job details and status.
-#     :return: HTTP 202 response indicating the callback was processed.
-#     """
-#     return handle_slurm_callback(
-#         request,
-#         ForecastForcingDownloadJobSlurmCallbackRequestSerializer,
-#         get_forecast_forcing_download_run,
-#         run_forecast_forcing_download_job_callback_pw
-#     )
 
 
 @extend_schema(

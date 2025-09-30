@@ -219,7 +219,7 @@ def get_jobs(
             .filter(query)
             .select_related("gage", "status", "objective_function", "optimization")
             .values(
-                "id", "gage__gage_id", "submit_date", "user_formulation_name",
+                "id", "gage__gage_id", "gage__domain__name", "submit_date", "user_formulation_name",
                 "calibration_start_period", "calibration_end_period",
                 "status__name", "job_genesis", "created_at",
                 "objective_function__name", "optimization__name",
@@ -277,6 +277,7 @@ def get_jobs(
             result = {
                 'calibration_run_id': run_id,
                 'gage_id': run['gage__gage_id'],
+                'domain_name': run['gage__domain__name'],
                 'status': run['status__name'],
                 'objective_function': run.get('objective_function__name'),  # may be None
                 'optimization_algorithm': run.get('optimization__name'),  # may be None
@@ -498,7 +499,7 @@ def get_forecast_jobs(request: Request) -> Response:
 
     for f in forecast_jobs:
         f['forecast_run_id'] = f.pop('id')
-        f['cycle'] = f.pop('cycle__name')
+        f['configuration'] = f.pop('configuration__name')
         f['gage_id'] = f.pop('calibration_run__gage__gage_id')
         f['forecast_status'] = f.pop('status__name')
 

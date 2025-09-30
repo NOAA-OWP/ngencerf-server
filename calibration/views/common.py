@@ -25,14 +25,14 @@ from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import AccessToken
 
 from calibration.enums import StatusEnum, ValidationType, JobGenesis, NgenLogging
-from calibration.models import CalibrationRun, ValidationRun, Status, ForecastCycle, ForecastRun, CustomUser
+from calibration.models import CalibrationRun, ValidationRun, Status, ForecastConfiguration, ForecastRun, CustomUser, ColdStartRun
 from calibration.models import Iteration
 from calibration.models.base_run import BaseRun
 from calibration.util.caching import get_cached_modules_with_groups
 from calibration.util.calibration_validators import ErrorResponseSerializer, BaseSerializer
 from calibration.util.cloud_util import path_exists
 from calibration.util.ngen_locations import get_forecast_dir, get_output_calibration_run_dir, \
-    get_output_validation_run_dir, get_ngen_logging_file, get_ngen_logging_basename
+    get_output_validation_run_dir, get_ngen_logging_file, get_ngen_logging_basename, get_cold_start_dir
 
 logger = logging.getLogger(__name__)
 
@@ -296,29 +296,53 @@ def create_validation_run_internal(
     return validation_run
 
 
+def create_cold_start_run_internal(
+        calibration_run: CalibrationRun,
+        configuration: ForecastConfiguration,
+        cold_start_date: datetime,
+) -> ColdStartRun:
+    """
+    Create a new ColdStartRun object for the given CalibrationRun.
+
+    :param calibration_run: The calibration run that this forecast run is associated with.
+    :param configuration: The configuration for this forecast
+    :param cold_start_date: An optional date to cold start the forecast before the cycle date
+    :return: The newly created ColdStartRun instance.
+    """
+
+    cold_start_run = ColdStartRun.objects.create(status=StatusEnum.SAVED.db_instance,
+                                                 calibration_run=calibration_run,
+                                                 configuration=configuration,
+                                                 cold_start_date=cold_start_date)
+    os.makedirs(get_cold_start_dir(cold_start_run))
+    logger.info(f"Creating {get_job_description(cold_start_run)}")
+
+    return cold_start_run
+
+
 def create_forecast_run_internal(
         calibration_run: CalibrationRun,
-        configuration: ForecastCycle,
-        cycle_date: datetime,
-        cold_start_date: datetime = None,
+        cold_start_run: ColdStartRun,
+        configuration: ForecastConfiguration,
+        cycle_date: datetime
 ) -> ForecastRun:
     """
     Create a new ForecastRun object for the given CalibrationRun.
 
     :param calibration_run: The calibration run that this forecast run is associated with.
-    :param configuration: The cycle for this forecast
-    :param cycle_date
-    :param cold_start_date
+    :param cold_start_run: (optional) The cold start run that this forecast run is associated with.
+    :param configuration: The configuration for this forecast
+    :param cycle_date: The date to start the cycle
     :return: The newly created ForecastRun instance.
     """
 
     forecast_run = ForecastRun.objects.create(status=StatusEnum.SAVED.db_instance,
                                               calibration_run=calibration_run,
-                                              cycle=configuration,
-                                              cycle_date=cycle_date,
-                                              cold_start_date=cold_start_date)
+                                              cold_start_run=cold_start_run,
+                                              configuration=configuration,
+                                              cycle_date=cycle_date)
     os.makedirs(get_forecast_dir(forecast_run))
-    logger.info(f"Creating Forecast Job {forecast_run.id} for Calibration Job {calibration_run.id}")
+    logger.info(f"Creating {get_job_description(forecast_run)}")
 
     return forecast_run
 
@@ -621,7 +645,10 @@ def get_job_description(run: BaseRun) -> str:
     elif isinstance(run, ValidationRun):
         return f"Validation Job {run.id} for Calibration Job {run.calibration_run.id}, type: {run.validation_type}, user: {run.calibration_run.owner.username}"
     elif isinstance(run, ForecastRun):
-        return f"Forecast Job {run.id} for Calibration Job {run.calibration_run.id}, user: {run.calibration_run.owner.username}"
+        cold_start_data = f'using Cold Start Job {run.cold_start.id}' if run.cold_start else ''
+        return f"Forecast Job {run.id} for Calibration Job {run.calibration_run.id} {cold_start_data}, user: {run.calibration_run.owner.username}"
+    elif isinstance(run, ColdStartRun):
+        return f"Col dStart Job {run.id} for Calibration Job {run.calibration_run.id}, user: {run.calibration_run.owner.username}"
     # elif isinstance(run, ForecastForcingDownloadRun):
     #     return f"Forecast Forcing Download Job {run.id} for Forecast Job {run.forecast_run.id} for Calibration Job {run.forecast_run.calibration_run.id}, user: {run.forecast_run.calibration_run.owner.username}"
 

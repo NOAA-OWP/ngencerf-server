@@ -8,20 +8,20 @@ from rest_framework.decorators import api_view
 from rest_framework.request import Request
 from rest_framework.response import Response
 
-from calibration.enums import ForecastCycleEnum, StatusEnum
+from calibration.enums import ForecastConfigEnum, StatusEnum
 from calibration.run_util.run_common import submit_job
-from calibration.util.calibration_validators import ErrorResponseSerializer, EmptySerializer, LoadForecastTabResponseSerializer, \
-    ForecastRunSerializer, CreateAndRunForecastResponseSerializer, DeleteForecastRunResponseSerializer
+from calibration.util.calibration_validators import ErrorResponseSerializer, LoadForecastTabResponseSerializer, \
+    ForecastRunSerializer, CreateAndRunForecastResponseSerializer, DeleteForecastRunResponseSerializer, CalibrationRunSerializer
 from calibration.util.ngen_locations import get_forecast_dir
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import handle_exceptions, validate_response, validate_request, get_forecast_run, create_forecast_run_internal, \
-    ResponseError, get_user_email, get_elapsed_str, readonly_transaction
+    ResponseError, get_user_email, get_elapsed_str, readonly_transaction, get_calibration_run, truncate_large_fields
 
 logger = logging.getLogger(__name__)
 
 
 @extend_schema(
-    request=EmptySerializer,
+    request=CalibrationRunSerializer,
     responses={
         200: LoadForecastTabResponseSerializer,
         400: OpenApiResponse(
@@ -52,21 +52,37 @@ def load_forecast_tab(request: Request) -> Response:
     data = request.data if request.method == 'POST' else request.query_params.dict()
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
 
-    validator, error_return = validate_request(EmptySerializer, data)
+    validator, error_return = validate_request(CalibrationRunSerializer, data)
+    if error_return:
+        return error_return
+
+    calibration_run_id = validator.get('calibration_run_id')
+
+    calibration_run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=[StatusEnum.DONE])
     if error_return:
         return error_return
 
     with readonly_transaction():
-        cycle_values = ForecastCycleEnum.get_choices_with_fields(
-            fields=['name', 'data_sources', 'time_range', 'is_active']
+        # TODO This will only return activate configurations.  Do we want to return everything and let the UI filter?
+        configuration_values = ForecastConfigEnum.get_choices_with_fields(
+            fields=['name', 'data_sources', 'time_range', 'is_active',
+                    'cycle_start', 'cycle_end', 'cycle_freq', 'fcst_win', 'fcst_timestep', 'availability_lag'
+                    ],
+            extra_filter={'domain': calibration_run.gage.domain}
         )
 
-    response = {'forecast_cycle_values': cycle_values}
+    response = {'forecast_configuration_values': configuration_values}
 
-    response_validator, error_response = validate_response(LoadForecastTabResponseSerializer, response)
+    response_validator, error_response = validate_response(LoadForecastTabResponseSerializer,
+                                                           response,
+                                                           fields_to_truncate=['forecast_configuration_values'],
+                                                           max_length=5
+                                                           )
     if error_response:
         return error_response
-    logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {json.dumps(response_validator.data)}')
+    logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - '
+                 f'{json.dumps(truncate_large_fields(response_validator.data, fields_to_truncate=["forecast_configuration_values"], max_length=5))}'
+                 )
 
     return Response(response_validator.data)
 
@@ -108,7 +124,7 @@ def clone_and_run_forecast_job(request: Request) -> Response:
     if error_return:
         return error_return
 
-    new_forecast_run = create_forecast_run_internal(run.calibration_run, run.cycle)
+    new_forecast_run = create_forecast_run_internal(run.calibration_run, run.configuration, run.cycle_date, run.cold_start_date)
     submit_job(new_forecast_run)
 
     response = {
@@ -121,7 +137,8 @@ def clone_and_run_forecast_job(request: Request) -> Response:
     response_validator, error_response = validate_response(CreateAndRunForecastResponseSerializer, response)
     if error_response:
         return error_response
-    logger.debug(f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
+    logger.debug(
+        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
 
     return Response(response_validator.data)
 
@@ -179,6 +196,7 @@ def delete_forecast_job(request: Request) -> Response:
     response_validator, error_response = validate_response(DeleteForecastRunResponseSerializer, response)
     if error_response:
         return error_response
-    logger.debug(f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
+    logger.debug(
+        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
 
     return Response(response_validator.data)

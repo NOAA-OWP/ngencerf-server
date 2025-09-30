@@ -1,4 +1,4 @@
-from django.contrib.auth import get_user_model
+from django.conf import settings
 from django.db import models
 
 from calibration.models.base_run import BaseRun
@@ -6,7 +6,7 @@ from calibration.models.base_run import BaseRun
 
 class CalibrationRun(BaseRun):  # Inherit from BaseRun
     is_active = models.BooleanField(null=False, default=True)
-    owner = models.ForeignKey(get_user_model(), null=False, on_delete=models.RESTRICT, db_index=True)
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, null=False, on_delete=models.RESTRICT, db_index=True)
     gage = models.ForeignKey('Gage', null=True, on_delete=models.RESTRICT)
     job_genesis = models.CharField(max_length=20, null=False)
     job_data_dir = models.CharField(max_length=255, null=False)

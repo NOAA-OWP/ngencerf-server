@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import shutil
+from datetime import datetime, timezone, timedelta
 from functools import lru_cache
 
 from django.conf import settings
@@ -15,7 +16,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.request import Request
 from rest_framework.response import Response
 
-from calibration.enums import StatusEnum, ValidationType, JobGenesis, ForecastCycleEnum
+from calibration.enums import StatusEnum, ValidationType, JobGenesis, ForecastConfigEnum
 from calibration.models import CalibrationRun, ValidationRun, ForecastRun
 from calibration.run_util.run_common import submit_job
 from calibration.util.calibration_validators import FooterResponseSerializer, \
@@ -31,7 +32,8 @@ from calibration.views.calibration_import_export_views import load_calibration_r
 from calibration.views.calibration_run_views import resolve_job_data_dir
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import handle_exceptions, validate_response, get_calibration_run, create_calibration_run_internal, ResponseError, \
-    validate_request, create_validation_run_internal, create_forecast_run_internal, get_user_email, get_elapsed_str, readonly_transaction
+    validate_request, create_validation_run_internal, create_forecast_run_internal, get_user_email, get_elapsed_str, readonly_transaction, \
+    format_datetime, create_cold_start_run_internal, get_job_description
 
 logger = logging.getLogger(__name__)
 
@@ -180,13 +182,13 @@ def create_and_run_validation(request: Request) -> Response:
             description="Internal server error"
         )
     },
-    description="Create and run a new forecast"
+    description="Create and run a new forecast with optional cold start"
 )
 @api_view(['POST'])
 @handle_exceptions
 def create_and_run_forecast(request: Request) -> Response:
     """
-    Creates and runs a new forecast run for a specified calibration run and cycle_name name.
+    Creates and runs a new forecast run with an optional cold start for a specified calibration run and cycle_name name.
 
     :param request: The HTTP request object containing calibration and iteration details.
     :return: JSON response with validation run details or error information.
@@ -203,24 +205,78 @@ def create_and_run_forecast(request: Request) -> Response:
     cycle_date = validator.get('cycle_date')
     cold_start_date = validator.get('cold_start_date')
 
+    run_cold_start = cold_start_date is not None
+
     calibration_run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=[StatusEnum.DONE])
     if error_return:
         return error_return
 
+    forecast_errors = []
+
+    configuration = ForecastConfigEnum.get_instance(configuration_name)
+    if configuration.domain != calibration_run.gage.domain:
+        forecast_errors.append(f"{configuration_name} is not a valid configuration for domain {calibration_run.gage.domain.name}")
+
+    # Define allowed cycle date range
+    min_cycle_date = datetime(2022, 1, 1, tzinfo=timezone.utc)
+    max_cycle_date = datetime.now(tz=timezone.utc)
+
+    # Reject cycles earlier than the minimum allowed date
+    if cycle_date < min_cycle_date:
+        forecast_errors.append(f"Cycle cannot start before {format_datetime(min_cycle_date)}")
+
+    # Adjust the maximum allowed cycle date based on forecast availability lag
+    future_forecast_availability = configuration.availability_lag or 0
+
+    # Subtract lag hours from max_cycle_date to account for delayed availability
+    max_cycle_date = max_cycle_date - timedelta(hours=future_forecast_availability)
+
+    # Warn if cycle date is later than adjusted maximum availability
+    if cycle_date > max_cycle_date:
+        # TODO Check what to do with this.  Is it a fatal error or just a warning?
+        forecast_errors.append(f"Forecast availability is not guaranteed less than {future_forecast_availability} hours ahead of time.")
+
+    if (cycle_date.hour - configuration.cycle_start) % configuration.cycle_freq != 0:
+        # Hour offset from cycle start must align with evenly by cycle frequency
+        forecast_errors.append(
+            f"Cycle hour {cycle_date.hour}:00 is not available. Forecasts are available every {configuration.cycle_freq} hours from {configuration.cycle_start}:00 to {configuration.cycle_end}:00.")
+
+    # If a cold start date is provided, validate its position relative to cycle date
+    if run_cold_start:
+        if cold_start_date > cycle_date:
+            forecast_errors.append("Cold start date must be earlier than cycle date")
+        if cold_start_date < min_cycle_date:
+            forecast_errors.append(f"Cold start cannot be before {format_datetime(min_cycle_date)}")
+
+    if forecast_errors:
+        return ResponseError("Error submitting forecast", errors=forecast_errors)
+
+    cold_start_run = create_cold_start_run_internal(
+        calibration_run,
+        configuration,
+        cold_start_date
+    ) if cold_start_date else None
+
     forecast_run = create_forecast_run_internal(
         calibration_run,
-        ForecastCycleEnum.get_instance(configuration_name),
-        cycle_date,
-        cold_start_date
+        cold_start_run,
+        configuration,
+        cycle_date
     )
 
-    submit_job(forecast_run)
+    if run_cold_start:
+        # Forecast Job will run automatically after the cold start
+        submit_job(cold_start_run)
+    else:
+        submit_job(forecast_run)
 
+    msg = get_job_description(cold_start_run if run_cold_start else forecast_run) + 'created and submitted'
+    if run_cold_start:
+        msg += f', followed by Forecast Job {forecast_run.id}'
     response = {
-        'message': f'Forecast Job {forecast_run.id} created and submitted for Calibration Job {calibration_run.id}',
+        'message': msg,
         'calibration_run_id': calibration_run.id,
         'forecast_run_id': forecast_run.id,
-        'forecast_status': forecast_run.status.name,
         'submit_date': forecast_run.submit_date
     }
 
