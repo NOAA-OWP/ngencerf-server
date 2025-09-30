@@ -13,10 +13,8 @@ from calibration.enums import StatusEnum, ValidationType
 from calibration.enums_vanilla import ScriptEnum
 from calibration.models import CalibrationRun, ValidationRun, ForecastRun
 from calibration.models.base_run import BaseRun
-from calibration.models.forecast_forcing_download_run import ForecastForcingDownloadRun
 from calibration.run_util.run_common import set_job_status, job_registry, get_job_registry_key, run_generic_job_end_callback, \
-    finalize_calibration_after_callback, \
-    finalize_validation_after_callback, finalize_forecast_after_callback, finalize_forecast_forcing_download_after_callback
+    finalize_calibration_after_callback, finalize_validation_after_callback, finalize_forecast_after_callback
 from calibration.views.common import get_job_description
 from cerfServer.settings import NGEN_CAL_VENV, NGEN_ENVIRONMENT, NgenEnvironmentEnum
 
@@ -51,10 +49,6 @@ def run_job_local(run: BaseRun, cmd_line_args: dict[str, str], stdout_file: str,
             ScriptEnum.VALIDATION_ITERATION if run.validation_type == ValidationType.VALID_ITERATION.value else ScriptEnum.VALIDATION
         )
         callback_function = run_validation_job_callback_local
-    elif isinstance(run, ForecastForcingDownloadRun):
-        script_cmd = ScriptEnum.FORECAST_FORCING
-        callback_function = run_forecast_forcing_download_job_callback_local
-        venv = settings.FORCING_ENGINE_ENV
     elif isinstance(run, ForecastRun):
         script_cmd = ScriptEnum.FORECAST
         callback_function = run_forecast_job_callback_local
@@ -168,12 +162,14 @@ run_forecast_job_callback_local = functools.partial(
     run_generic_job_end_callback, check_if_failed=check_local_for_failure, finalize_func=finalize_forecast_after_callback
 )
 
-# Handles the completion of a forecast job in the local environment.
-# - Uses `check_local_status` to validate the job's exit code.
-# - Executes `finalize_forecast` to finalize the forecast job and mark it as DONE.
-run_forecast_forcing_download_job_callback_local = functools.partial(
-    run_generic_job_end_callback, check_if_failed=check_local_for_failure, finalize_func=finalize_forecast_forcing_download_after_callback
-)
+
+#
+# # Handles the completion of a forecast job in the local environment.
+# # - Uses `check_local_status` to validate the job's exit code.
+# # - Executes `finalize_forecast` to finalize the forecast job and mark it as DONE.
+# run_forecast_forcing_download_job_callback_local = functools.partial(
+#     run_generic_job_end_callback, check_if_failed=check_local_for_failure, finalize_func=finalize_forecast_forcing_download_after_callback
+# )
 
 
 def spawn_job(run: BaseRun, args: list[str], callback_function: Callable[[Future], None], simulate: bool = False) -> None:

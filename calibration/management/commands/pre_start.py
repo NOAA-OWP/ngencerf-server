@@ -4,7 +4,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from calibration.enums import StatusEnum
-from calibration.models import CalibrationRun, ValidationRun, ForecastForcingDownloadRun, ForecastRun
+from calibration.models import CalibrationRun, ValidationRun, ForecastRun
 from django.conf import settings
 from cerfServer.settings import NgenEnvironmentEnum
 
@@ -36,9 +36,6 @@ class Command(BaseCommand):
 
                 fcst_count = ForecastRun.objects.filter(status=running_status).update(status=error_status)
                 logger.info(f'Updated {fcst_count} forecast run records')
-
-                ffdr_count = ForecastForcingDownloadRun.objects.filter(status=running_status).update(status=error_status)
-                logger.info(f'Updated {ffdr_count} forecast forcing download run records')
 
             logger.info("Cleanup of running jobs completed successfully.")
 

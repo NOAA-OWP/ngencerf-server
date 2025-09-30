@@ -109,13 +109,13 @@ def clone_and_run_forecast_job(request: Request) -> Response:
         return error_return
 
     new_forecast_run = create_forecast_run_internal(run.calibration_run, run.cycle)
-    submit_job(new_forecast_run.forcing_download_run)
+    submit_job(new_forecast_run)
 
     response = {
-        'message': f'Forcing download job for Forecast Job {new_forecast_run.id} cloned from Job {run.id} and submitted for Calibration Job {new_forecast_run.calibration_run.id}',
+        'message': f'Forecast Job {new_forecast_run.id} cloned from Job {run.id} and submitted for Calibration Job {new_forecast_run.calibration_run.id}',
         'calibration_run_id': new_forecast_run.calibration_run.id,
         'forecast_run_id': new_forecast_run.id,
-        'submit_date': new_forecast_run.forcing_download_run.submit_date
+        'submit_date': new_forecast_run.submit_date
     }
 
     response_validator, error_response = validate_response(CreateAndRunForecastResponseSerializer, response)
@@ -163,15 +163,14 @@ def delete_forecast_job(request: Request) -> Response:
     if error_return:
         return error_return
 
-    if (run.status in [StatusEnum.RUNNING.db_instance, StatusEnum.SUBMITTED.db_instance] or
-            run.forcing_download_run.status in [StatusEnum.RUNNING.db_instance, StatusEnum.SUBMITTED.db_instance]):
+    if run.status in [StatusEnum.RUNNING.db_instance, StatusEnum.SUBMITTED.db_instance]:
         return ResponseError(f'Forecast Job {run.id} is running.  Cannot delete a running job')
 
     run_id = run.id
 
     with transaction.atomic():
-        # Delete the Forcing download Run  and that will automatically delete the Forecast Run
-        run.forcing_download_run.delete()
+        # Delete the Forecast Run
+        run.delete()
         logger.info(f"Deleting directory {get_forecast_dir(run)}")
         shutil.rmtree(get_forecast_dir(run), ignore_errors=True)
 

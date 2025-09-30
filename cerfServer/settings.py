@@ -247,7 +247,7 @@ os.makedirs(NGEN_LOGGING_DIR, exist_ok=True)
 
 NGEN_STATIC_DIR = os.path.join(NGEN_CAL_MOUNT_POINT, 'ngen-static-files')
 NGEN_CAL_WORK_DIR = os.path.join(NGEN_CAL_MOUNT_POINT, 'ngen-cal-work')
-NGEN_FORCING_WORK_DIR = os.path.join(NGEN_CAL_MOUNT_POINT, 'forecast_forcing_work')
+NGEN_FORCING_WORK_DIR = os.path.join(NGEN_CAL_MOUNT_POINT, 'forecast_work')
 
 # -----------------------------
 # Forcing environments
@@ -289,8 +289,7 @@ RUNTIME_INFO = {
 SIMULATE_FLAGS = {
     JobType.CALIBRATION: False,
     JobType.VALIDATION: False,
-    JobType.FORECAST: False,
-    JobType.FORECAST_FORCING_DOWNLOAD: False,
+    JobType.FORECAST: False
 }
 
 NGEN_ENVIRONMENT_STR = os.getenv('NGEN_ENVIRONMENT', NgenEnvironmentEnum.LOCAL.name)
@@ -310,7 +309,7 @@ SLURM_URL = os.getenv("SLURM_URL")
 SLURM_SUBMIT_CALIBRATION_JOB_ENDPOINT = 'submit-calibration-job'
 SLURM_SUBMIT_VALIDATION_JOB_ENDPOINT = 'submit-validation-job'
 SLURM_SUBMIT_FORECAST_JOB_ENDPOINT = 'submit-forecast-job'
-SLURM_SUBMIT_FORECAST_FORCING_DOWNLOAD_JOB_ENDPOINT = 'submit-forecast-forcing-download-job'
+# SLURM_SUBMIT_FORECAST_FORCING_DOWNLOAD_JOB_ENDPOINT = 'submit-forecast-forcing-download-job'
 SLURM_JOB_STATUS_ENDPOINT = 'job-status'
 SLURM_CANCEL_JOB_ENDPOINT = 'cancel-job'
 

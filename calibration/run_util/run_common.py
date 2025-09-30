@@ -20,19 +20,16 @@ from calibration.enums import StatusEnum, ValidationType, SlurmStatusEnum, Forci
 from calibration.enums_vanilla import JobType
 from calibration.models import CalibrationRun, ValidationRun, Iteration, ForecastRun
 from calibration.models.base_run import BaseRun
-from calibration.models.forecast_forcing_download_run import ForecastForcingDownloadRun
-from calibration.util.file_util import get_single_file
 from calibration.util.git_util import get_git_info_internal
 from calibration.util.ngen_locations import get_calibration_input_file, get_validation_best_stdout_file, get_validation_control_stdout_file, \
     get_calibration_stdout_file, get_validation_best_input_file, get_validation_control_input_file, get_validation_iteration_stdout_file, \
-    get_forecast_forcing_download_stdout_file, get_forecast_stdout_file, get_geopackage_dir_for_job, get_forecast_forcing_download_path, \
-    get_forecast_dir, get_forecast_forcing_config_file, get_validation_iteration_git_info_file, get_forecast_download_git_info_file, \
+    get_forecast_stdout_file, get_forecast_dir, get_validation_iteration_git_info_file, \
     get_validation_special_git_info_file, get_calibration_git_info_file, get_forecast_git_info_file, get_forcing_dir_for_job, \
-    get_observational_file_for_job
+    get_observational_file_for_job, get_forecast_realization_file, get_cold_start_realization_file
 from calibration.views import ngen_cal_input
 from calibration.views.common import ResponseError, CerfException, create_validation_run_internal, get_job_description, write_ngen_logging_file
 from calibration.views.end_of_job_processing import read_validation_output, read_calibration_output, read_forecast_output
-from calibration.views.forecast_forcing_input import build_forecast_forcing_download_config
+from calibration.views.forecast_input import create_forecast_input
 from calibration.views.ngen_cal_input import ready_to_run
 from cerfServer.settings import NgenEnvironmentEnum
 
@@ -110,7 +107,7 @@ def get_run_owner(run: BaseRun):
         return run.owner
     elif hasattr(run, 'calibration_run'):  # ValidationRun, ForecastRun
         return run.calibration_run.owner
-    elif hasattr(run, 'forecast_run') and hasattr(run.forecast_run, 'calibration_run'):  # ForecastForcingDownloadRun
+    elif hasattr(run, 'forecast_run') and hasattr(run.forecast_run, 'calibration_run'):
         return run.forecast_run.calibration_run.owner
     raise AttributeError(f"Cannot determine owner for run of type {type(run).__name__}")
 
@@ -285,35 +282,36 @@ def run_validation_job(validation_run: ValidationRun) -> None:
     )
 
 
-def run_forecast_forcing_download_job(forecast_forcing_download_run: ForecastForcingDownloadRun) -> None:
-    """
-    Start a forecast forcing download job by determining input and output file paths.
-
-    This function is intended to be passed as an argument to `submit_job`
-    and not called directly.
-
-    :param forecast_forcing_download_run: The ForecastForcingDownloadRun object representing the job.
-    """
-    build_forecast_forcing_download_config(forecast_forcing_download_run)
-
-    gpkg_file = get_single_file(get_geopackage_dir_for_job(forecast_forcing_download_run.forecast_run.calibration_run))
-    cycle_name = forecast_forcing_download_run.forecast_run.cycle.internal_name
-    config_file = get_forecast_forcing_config_file(forecast_forcing_download_run.forecast_run)
-    forcing_dir = get_forecast_forcing_download_path(forecast_forcing_download_run.forecast_run)
-    os.makedirs(forcing_dir, exist_ok=True)
-    stdout_file = get_forecast_forcing_download_stdout_file(forecast_forcing_download_run.forecast_run)
-
-    execute_job(
-        forecast_forcing_download_run,
-        {
-            'cycle_name': cycle_name,
-            'gpkg_file': gpkg_file,
-            'config_file': config_file,
-            'forcing_dir': forcing_dir
-        },
-        stdout_file,
-        simulate=settings.SIMULATE_FLAGS.get(JobType.FORECAST_FORCING_DOWNLOAD, False)
-    )
+#
+# def run_forecast_forcing_download_job(forecast_forcing_download_run: ForecastForcingDownloadRun) -> None:
+#     """
+#     Start a forecast forcing download job by determining input and output file paths.
+#
+#     This function is intended to be passed as an argument to `submit_job`
+#     and not called directly.
+#
+#     :param forecast_forcing_download_run: The ForecastForcingDownloadRun object representing the job.
+#     """
+#     build_forecast_forcing_download_config(forecast_forcing_download_run)
+#
+#     gpkg_file = get_single_file(get_geopackage_dir_for_job(forecast_forcing_download_run.forecast_run.calibration_run))
+#     cycle_name = forecast_forcing_download_run.forecast_run.cycle.internal_name
+#     config_file = get_forecast_forcing_config_file(forecast_forcing_download_run.forecast_run)
+#     forcing_dir = get_forecast_forcing_download_path(forecast_forcing_download_run.forecast_run)
+#     os.makedirs(forcing_dir, exist_ok=True)
+#     stdout_file = get_forecast_forcing_download_stdout_file(forecast_forcing_download_run.forecast_run)
+#
+#     execute_job(
+#         forecast_forcing_download_run,
+#         {
+#             'cycle_name': cycle_name,
+#             'gpkg_file': gpkg_file,
+#             'config_file': config_file,
+#             'forcing_dir': forcing_dir
+#         },
+#         stdout_file,
+#         simulate=settings.SIMULATE_FLAGS.get(JobType.FORECAST_FORCING_DOWNLOAD, False)
+#     )
 
 
 def run_forecast_job(forecast_run: ForecastRun) -> None:
@@ -325,17 +323,21 @@ def run_forecast_job(forecast_run: ForecastRun) -> None:
 
     :param forecast_run: The ForecastRun object representing the job.
     """
-    forcing_dir = get_forecast_forcing_download_path(forecast_run)
-    validation_best_input = get_validation_best_input_file(forecast_run.calibration_run)
-    forecast_dir = os.path.basename(get_forecast_dir(forecast_run))
+    validation_yaml = get_validation_best_input_file(forecast_run.calibration_run)
+    if not os.path.exists(validation_yaml):
+        raise CerfException(
+            f"Input file '{validation_yaml}' does not exist for {get_job_description(forecast_run)}"
+        )
+    forecast_realization = get_forecast_realization_file(forecast_run)
+    cold_start_realization = get_cold_start_realization_file(forecast_run) if forecast_run.cold_start_date else 'None'
     stdout_file = get_forecast_stdout_file(forecast_run)
 
     execute_job(
         forecast_run,
         {
-            'forcing_dir': forcing_dir,
-            'validation_best_input': validation_best_input,
-            'forecast_dir': forecast_dir
+            'validation_yaml': validation_yaml,
+            'forecast_realization': forecast_realization,
+            'cold_start_realization': cold_start_realization
         },
         stdout_file,
         simulate=settings.SIMULATE_FLAGS.get(JobType.FORECAST, False)
@@ -352,7 +354,7 @@ def submit_job(run: BaseRun, logging_config=None) -> Response | None:
     - For each run type, a git info file is created prior to execution.
     - If an error occurs during submission, the job status is set to 'FAILED' and the error is logged.
 
-    :param run: A CalibrationRun, ValidationRun, ForecastForcingDownloadRun, or ForecastRun object.
+    :param run: A CalibrationRun, ValidationRun or ForecastRun object.
     :param logging_config: Optional logging configuration to use when creating calibration job logs.
     :return: None if successful; a DRF Response object if the job is not ready or fails preprocessing.
     :raises CerfException: If the run type is unsupported or job execution fails.
@@ -370,7 +372,7 @@ def submit_job(run: BaseRun, logging_config=None) -> Response | None:
         run.save(update_fields=['submit_date', 'status'])
 
     try:
-        # Special handling for calibration jobs
+        # Do pre-processing for certain jobs
         if isinstance(run, CalibrationRun):
             write_ngen_logging_file(run, logging_config)
             fatal, response = prepare_calibration_job(run)
@@ -385,6 +387,8 @@ def submit_job(run: BaseRun, logging_config=None) -> Response | None:
                     run.failure_messages = json.dumps(failure_message)
                     run.save(update_fields=['status', 'failure_messages'])
                 return response
+        elif isinstance(run, ForecastRun):
+            _, _ = prepare_forecast_job(run)
 
         # Determine the appropriate job execution function
         if isinstance(run, CalibrationRun):
@@ -397,10 +401,6 @@ def submit_job(run: BaseRun, logging_config=None) -> Response | None:
                 create_git_info(get_validation_iteration_git_info_file(run, run.worker_name, run.iteration_num))
 
             run_validation_job(run)
-        elif isinstance(run, ForecastForcingDownloadRun):
-            create_git_info(get_forecast_download_git_info_file(run))
-
-            run_forecast_forcing_download_job(run)
         elif isinstance(run, ForecastRun):
             create_git_info(get_forecast_git_info_file(run))
 
@@ -467,7 +467,6 @@ def prepare_calibration_job(calibration_run: CalibrationRun) -> tuple[bool, Resp
             )
 
         logger.info(f'Running RealizationBuilder.build_calib_realization for Calibration Job {calibration_run.id}')
-        # create_input(config_file)
         rb = RealizationBuilder(config_file)
         rb.build_calib_realization()
     except Exception as e:
@@ -477,6 +476,38 @@ def prepare_calibration_job(calibration_run: CalibrationRun) -> tuple[bool, Resp
         raise CerfException(msg) from e
 
     logger.info(f'Return from build_calib_realization for Calibration Job {calibration_run.id}')
+    return False, None
+
+
+def prepare_forecast_job(forecast_run: ForecastRun) -> tuple[bool, Response | None]:
+    """
+    Prepare a ForecastRun job by generating configuration files.
+
+    This function performs:
+    - Input file generation using `create_input`
+
+    This is only used internally by `submit_job` for ForecastRun.
+
+    :param forecast_run: The ForecastRun object to prepare.
+    :return: A tuple (fatal_error: bool, Response). If preparation is successful, returns (False, None).
+             If errors occur, returns (True, error response) or (False, warning response).
+    """
+
+    job_description = get_job_description(forecast_run)
+    try:
+        error, config_file = create_forecast_input(forecast_run)
+        logger.info(f'Running RealizationBuilder.build_fcst_realization for {job_description} with config {config_file}')
+        rb = RealizationBuilder(input_path=config_file,
+                                valid_yaml=get_validation_best_input_file(forecast_run.calibration_run),
+                                fcst_run_name=os.path.basename(get_forecast_dir(forecast_run)))
+        rb.build_fcst_realization()
+    except Exception as e:
+        CalibrationRun.objects.filter(id=forecast_run.id).update(status=StatusEnum.FAILED.db_instance)
+        msg = f'Exception during build_calib_realization for {job_description} - {str(e)}'
+        logger.exception(msg)
+        raise CerfException(msg) from e
+
+    logger.info(f'Return from build_calib_realization for {job_description}')
     return False, None
 
 
@@ -636,23 +667,24 @@ def finalize_validation_after_callback(run: ValidationRun, failed_so_far: bool) 
     process_validation_output_and_maybe_create_best(run, failed_so_far)  # Process the validation results and handle best-run logic.
 
 
-def finalize_forecast_forcing_download_after_callback(run: ForecastForcingDownloadRun, failed_so_far: bool) -> None:
-    """
-    Finalizes a forecast forcing download job after it has completed.
-
-    :param run: The ForecastForcingDownloadRun object representing the job.
-    - Processes the output of the forecast forcing download.
-    - Marks the forecast forcing download job as DONE in the database.
-    - Submits the associated forecast job.
-    :param failed_so_far: Indicates whether the job has failed up to this point.
-    - True if the job encountered a failure.
-    - False if the job has completed successfully so far.
-    """
-    read_forecast_output(run, failed_so_far)
-    if not failed_so_far:
-        set_job_status(run, StatusEnum.DONE)  # Update the job's status to DONE in the database.
-        # submit the forecast job with the forcing data
-        submit_job(run.forecast_run)
+#
+# def finalize_forecast_forcing_download_after_callback(run: ForecastForcingDownloadRun, failed_so_far: bool) -> None:
+#     """
+#     Finalizes a forecast forcing download job after it has completed.
+#
+#     :param run: The ForecastForcingDownloadRun object representing the job.
+#     - Processes the output of the forecast forcing download.
+#     - Marks the forecast forcing download job as DONE in the database.
+#     - Submits the associated forecast job.
+#     :param failed_so_far: Indicates whether the job has failed up to this point.
+#     - True if the job encountered a failure.
+#     - False if the job has completed successfully so far.
+#     """
+#     read_forecast_output(run, failed_so_far)
+#     if not failed_so_far:
+#         set_job_status(run, StatusEnum.DONE)  # Update the job's status to DONE in the database.
+#         # submit the forecast job with the forcing data
+#         submit_job(run.forecast_run)
 
 
 def finalize_forecast_after_callback(run: ForecastRun, failed_so_far: bool) -> None:

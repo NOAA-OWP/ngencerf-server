@@ -8,7 +8,6 @@ class ScriptEnum(StrEnum):
     VALIDATION = "validation"
     VALIDATION_ITERATION = "validation_iteration"
     FORECAST = "forecast"
-    FORECAST_FORCING = "forecast_forcing"
 
 
 class NgenEnvironmentEnum(StrEnum):
@@ -21,5 +20,4 @@ class JobType(StrEnum):
     CALIBRATION = 'calibration'
     VALIDATION = 'validation'
     FORECAST = 'forecast'
-    FORECAST_FORCING_DOWNLOAD = 'forecast_forcing_download'
     COMPARISON = 'comparison'

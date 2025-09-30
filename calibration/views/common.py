@@ -28,7 +28,6 @@ from calibration.enums import StatusEnum, ValidationType, JobGenesis, NgenLoggin
 from calibration.models import CalibrationRun, ValidationRun, Status, ForecastCycle, ForecastRun, CustomUser
 from calibration.models import Iteration
 from calibration.models.base_run import BaseRun
-from calibration.models.forecast_forcing_download_run import ForecastForcingDownloadRun
 from calibration.util.caching import get_cached_modules_with_groups
 from calibration.util.calibration_validators import ErrorResponseSerializer, BaseSerializer
 from calibration.util.cloud_util import path_exists
@@ -135,28 +134,29 @@ def get_validation_run(
     return get_run_instance(ValidationRun, validation_run_id, user, run_status, 'calibration_run__owner', 'calibration_run__is_archived')
 
 
-def get_forecast_forcing_download_run(
-        forecast_forcing_download_run_id: int,
-        user: User | None,
-        run_status: list[StatusEnum] | None = None
-) -> tuple[ForecastForcingDownloadRun | None, Response | None]:
-    """
-    Retrieve a ForecastForcingDownloadRun instance by its ID, filtering by owner and status.
-
-    :param forecast_forcing_download_run_id: The ID of the ForecastForcingDownloadRun to retrieve.
-    :param user: The user requesting the ForecastForcingDownloadRun. If None, no owner filtering is applied.
-    :param run_status: A list of allowed statuses for the ForecastRun.
-    :return: A tuple containing the ForecastForcingDownloadRUn instance (or None if
-
-not found) and an optional Response with an error.
-    """
-    return get_run_instance(
-        ForecastForcingDownloadRun,
-        forecast_forcing_download_run_id, user,
-        run_status,
-        'forecast_run__calibration_run__owner',
-        'forecast_run__calibration_run__is_archived'
-    )
+#
+# def get_forecast_forcing_download_run(
+#         forecast_forcing_download_run_id: int,
+#         user: User | None,
+#         run_status: list[StatusEnum] | None = None
+# ) -> tuple[ForecastForcingDownloadRun | None, Response | None]:
+#     """
+#     Retrieve a ForecastForcingDownloadRun instance by its ID, filtering by owner and status.
+#
+#     :param forecast_forcing_download_run_id: The ID of the ForecastForcingDownloadRun to retrieve.
+#     :param user: The user requesting the ForecastForcingDownloadRun. If None, no owner filtering is applied.
+#     :param run_status: A list of allowed statuses for the ForecastRun.
+#     :return: A tuple containing the ForecastForcingDownloadRUn instance (or None if
+#
+# not found) and an optional Response with an error.
+#     """
+#     return get_run_instance(
+#         ForecastForcingDownloadRun,
+#         forecast_forcing_download_run_id, user,
+#         run_status,
+#         'forecast_run__calibration_run__owner',
+#         'forecast_run__calibration_run__is_archived'
+#     )
 
 
 def get_forecast_run(
@@ -298,23 +298,25 @@ def create_validation_run_internal(
 
 def create_forecast_run_internal(
         calibration_run: CalibrationRun,
-        cycle: ForecastCycle
+        configuration: ForecastCycle,
+        cycle_date: datetime,
+        cold_start_date: datetime = None,
 ) -> ForecastRun:
     """
     Create a new ForecastRun object for the given CalibrationRun.
-    The forecast_forcing_download object is always created at the same time to facilitate the separate job needed for downloading the forcing data
 
     :param calibration_run: The calibration run that this forecast run is associated with.
-    :param cycle: The cycle for this forecast
+    :param configuration: The cycle for this forecast
+    :param cycle_date
+    :param cold_start_date
     :return: The newly created ForecastRun instance.
     """
 
-    forcing_download_run = ForecastForcingDownloadRun.objects.create(status=StatusEnum.SAVED.db_instance)
-
     forecast_run = ForecastRun.objects.create(status=StatusEnum.SAVED.db_instance,
                                               calibration_run=calibration_run,
-                                              cycle=cycle,
-                                              forcing_download_run=forcing_download_run)
+                                              cycle=configuration,
+                                              cycle_date=cycle_date,
+                                              cold_start_date=cold_start_date)
     os.makedirs(get_forecast_dir(forecast_run))
     logger.info(f"Creating Forecast Job {forecast_run.id} for Calibration Job {calibration_run.id}")
 
@@ -611,7 +613,7 @@ def get_job_description(run: BaseRun) -> str:
     """
     Get a descriptive string identifying the job type and owner.
 
-    :param run: Job instance (CalibrationRun, ValidationRun, ForecastRun, ForecastForcingDownloadRun).
+    :param run: Job instance (CalibrationRun, ValidationRun, ForecastRun).
     :return: Description of the job.
     """
     if isinstance(run, CalibrationRun):
@@ -620,8 +622,8 @@ def get_job_description(run: BaseRun) -> str:
         return f"Validation Job {run.id} for Calibration Job {run.calibration_run.id}, type: {run.validation_type}, user: {run.calibration_run.owner.username}"
     elif isinstance(run, ForecastRun):
         return f"Forecast Job {run.id} for Calibration Job {run.calibration_run.id}, user: {run.calibration_run.owner.username}"
-    elif isinstance(run, ForecastForcingDownloadRun):
-        return f"Forecast Forcing Download Job {run.id} for Forecast Job {run.forecast_run.id} for Calibration Job {run.forecast_run.calibration_run.id}, user: {run.forecast_run.calibration_run.owner.username}"
+    # elif isinstance(run, ForecastForcingDownloadRun):
+    #     return f"Forecast Forcing Download Job {run.id} for Forecast Job {run.forecast_run.id} for Calibration Job {run.forecast_run.calibration_run.id}, user: {run.forecast_run.calibration_run.owner.username}"
 
     raise ValueError(f"Unknown job type: {type(run).__name__}")
 

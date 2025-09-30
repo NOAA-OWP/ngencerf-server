@@ -31,8 +31,6 @@ from cerfServer.settings import NGEN_ENVIRONMENT
 
 logger = logging.getLogger(__name__)
 
-# For now, make this a constant, which is used in 2 places.  We need to tell ngen-cal as well as slurm
-
 # DO NOT MODIFY THIS TEMPLATE IN-PLACE.
 # Use `copy.deepcopy(CONFIG_TEMPLATE)` to safely create per-thread instances.
 CONFIG_TEMPLATE = {
@@ -503,7 +501,7 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
     # WRITE PHASE
     # -----------------------------
     with transaction.atomic():
-        # If not errors, then leave the status alone, either READY or SUBMITTED
+        # If no errors, then leave the status alone, either READY or SUBMITTED
 
         if run.status in [StatusEnum.SAVED.db_instance, StatusEnum.READY.db_instance]:
             if run.status == StatusEnum.SAVED.db_instance and not error_object.has_errors() and not error_object.has_warnings():
@@ -521,7 +519,7 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
     # FILE WRITE PHASE
     # -----------------------------
     if build and not error_object.has_errors() and not error_object.has_warnings():
-        config_file = build_config(config, run.job_data_dir)
+        config_file = build_config(config, run.job_data_dir, 'ngen-cal.config')
 
     return error_object, config_file
 
@@ -576,15 +574,16 @@ class CustomTomlEncoder(TomlEncoder):
         return super().dump_value(v)
 
 
-def build_config(config: dict, directory: str) -> str:
+def build_config(config: dict, directory: str, filename: str) -> str:
     """
     Builds the configuration file for the run and saves it to the specified directory.
 
     :param config: The configuration dictionary to be saved.
     :param directory: The directory in which to save the configuration file.
+    :param filename: The filename in which to save the configuration file.
     :return: The path to the saved configuration file.
     """
-    config_file = os.path.join(directory, 'ngen-cal.config')
+    config_file = os.path.join(directory, filename)
 
     logger.info(f'Saving config to {config_file}')
 

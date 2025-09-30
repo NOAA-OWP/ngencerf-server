@@ -5,7 +5,7 @@ from typing import Literal
 from django.conf import settings
 
 from calibration.enums import ValidationType
-from calibration.models import CalibrationRun, ForecastRun, ValidationRun, ForecastForcingDownloadRun
+from calibration.models import CalibrationRun, ForecastRun, ValidationRun
 from cerfServer.settings import NGEN_ENVIRONMENT
 
 logger = logging.getLogger(__name__)
@@ -13,7 +13,8 @@ logger = logging.getLogger(__name__)
 static_dirs = [
     NWM_RETROSPECTIVE_DIR := os.path.join(settings.NGEN_STATIC_DIR, 'nwm_retrospective'),
     PARQUET_DIR := os.path.join(settings.NGEN_STATIC_DIR, 'parquet'),
-    NGEN_MODULE_PARAMETERS := os.path.join(settings.NGEN_STATIC_DIR, 'module_parameter_files')
+    NGEN_MODULE_PARAMETERS := os.path.join(settings.NGEN_STATIC_DIR, 'module_parameter_files'),
+    FORECAST_FORCING_TEMPLATES := os.path.join(settings.NGEN_STATIC_DIR, 'forecast_forcing_templates')
 ]
 
 files = [
@@ -40,14 +41,14 @@ forecast_forcing_scripts = [
     FORCING_BMI_SCRIPT_PATH := os.path.join(settings.NGEN_FORCING_REPO_ROOT, 'NextGen_Forcings_Engine_BMI', 'run_bmi_model.py')
 ]
 
-forecast_forcing_work_directories = [
+forecast_work_directories = [
     FORCING_RAW_INPUT := os.path.join(settings.NGEN_FORCING_WORK_DIR, 'raw_input'),
     FORCING_ESMF_MESH := os.path.join(settings.NGEN_FORCING_WORK_DIR, 'esmf_mesh'),
     FORCING_HRRR := os.path.join(FORCING_RAW_INPUT, 'HRRR'),
     FORCING_RAP := os.path.join(FORCING_RAW_INPUT, 'RAP'),
 ]
 
-for f in forecast_forcing_work_directories:
+for f in forecast_work_directories:
     os.makedirs(f, exist_ok=True)
     # On PW, the server runs as root, but the Slurm jobs do not, so we need to adjust the permissions
     os.chmod(f, 0o777)
@@ -283,32 +284,43 @@ def get_forecast_forcing_config_file(forecast_run: ForecastRun) -> str:
     return os.path.join(get_forecast_dir(forecast_run), f'forecast_forcing_config.yaml')
 
 
-def get_forecast_forcing_cycle_config_file(forecast_run: ForecastRun) -> str:
-    return os.path.join(get_forecast_dir(forecast_run), f'{forecast_run.cycle.internal_name}_config.yaml')
+# def get_forecast_forcing_cycle_config_file(forecast_run: ForecastRun) -> str:
+#     return os.path.join(get_forecast_dir(forecast_run), f'{forecast_run.cycle.internal_name}_config.yaml')
 
 
 def get_forecast_output_file(forecast_run: ForecastRun) -> str:
     return os.path.join(get_forecast_output_dir(forecast_run), f'{forecast_run.calibration_run.gage.gage_id}_output.csv')
 
 
-def get_forecast_forcing_download_stdout_file(forecast_run: ForecastRun) -> str:
-    return os.path.join(get_forecast_dir(forecast_run), 'forecast_forcing_download_stdout.log')
+#
+# def get_forecast_forcing_download_stdout_file(forecast_run: ForecastRun) -> str:
+#     return os.path.join(get_forecast_dir(forecast_run), 'forecast_forcing_download_stdout.log')
 
 
 def get_forecast_stdout_file(forecast_run: ForecastRun) -> str:
     return os.path.join(get_forecast_dir(forecast_run), 'forecast_stdout.log')
 
 
-def get_forecast_forcing_download_performance_file(forecast_run: ForecastRun) -> str:
-    return os.path.join(get_forecast_dir(forecast_run), 'forecast_forcing_download_performance.log')
+#
+# def get_forecast_forcing_download_performance_file(forecast_run: ForecastRun) -> str:
+#     return os.path.join(get_forecast_dir(forecast_run), 'forecast_forcing_download_performance.log')
 
 
 def get_forecast_performance_file(forecast_run: ForecastRun) -> str:
     return os.path.join(get_forecast_dir(forecast_run), 'forecast_performance.log')
 
 
-def get_forecast_forcing_download_path(forecast_run: ForecastRun) -> str:
-    return os.path.join(get_forecast_dir(forecast_run), f'forecast_forcing_{forecast_run.id}')
+def get_forecast_realization_file(forecast_run: ForecastRun) -> str:
+    return os.path.join(get_forecast_dir(forecast_run), f'{forecast_run.calibration_run.gage.gage_id}_realization_config_bmi_fcst.json')
+
+
+def get_cold_start_realization_file(forecast_run: ForecastRun) -> str:
+    return os.path.join(get_forecast_dir(forecast_run), f'{forecast_run.calibration_run.gage.gage_id}_realization_config_bmi_cold_start.json')
+
+
+#
+# def get_forecast_forcing_download_path(forecast_run: ForecastRun) -> str:
+#     return os.path.join(get_forecast_dir(forecast_run), f'forecast_forcing_{forecast_run.id}')
 
 
 def get_forecast_temp_dir(forecast_run: ForecastRun) -> str:
@@ -345,8 +357,9 @@ def get_validation_iteration_git_info_file(run: ValidationRun, worker_name: str,
     return os.path.join(get_output_validation_run_dir(run.calibration_run), f"git_info_{worker_name}_iter{iteration_num}.json")
 
 
-def get_forecast_download_git_info_file(forecast_forcing_download_run: ForecastForcingDownloadRun) -> str:
-    return os.path.join(get_forecast_dir(forecast_forcing_download_run.forecast_run), "git_info_forecast_download.json")
+#
+# def get_forecast_download_git_info_file(forecast_forcing_download_run: ForecastForcingDownloadRun) -> str:
+#     return os.path.join(get_forecast_dir(forecast_forcing_download_run.forecast_run), "git_info_forecast_download.json")
 
 
 def get_forecast_git_info_file(forecast_run: ForecastRun) -> str:

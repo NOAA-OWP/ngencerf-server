@@ -492,8 +492,7 @@ def get_forecast_jobs(request: Request) -> Response:
             .filter(calibration_run__owner=request.user)
             .values(
                 'id', 'calibration_run_id', 'cycle__name', 'submit_date',
-                'calibration_run__gage__gage_id', 'status__name',
-                'forcing_download_run__status__name'
+                'calibration_run__gage__gage_id', 'status__name'
             )
         )
 
@@ -502,7 +501,6 @@ def get_forecast_jobs(request: Request) -> Response:
         f['cycle'] = f.pop('cycle__name')
         f['gage_id'] = f.pop('calibration_run__gage__gage_id')
         f['forecast_status'] = f.pop('status__name')
-        f['forcing_download_status'] = f.pop('forcing_download_run__status__name')
 
     response = {'forecast_jobs': forecast_jobs}
     response_validator, error_response = validate_response(

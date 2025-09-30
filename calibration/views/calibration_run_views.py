@@ -15,23 +15,21 @@ from rest_framework.response import Response
 
 from calibration.enums import StatusEnum
 from calibration.enums_vanilla import JobType
-from calibration.models import Iteration, ValidationRun, ForecastRun, ForecastForcingDownloadRun, CalibrationRun, Status
+from calibration.models import Iteration, ValidationRun, ForecastRun, CalibrationRun, Status
 from calibration.run_util.run_common import cancel_job_common, submit_job
 from calibration.run_util.run_ngen_cal_pw import SlurmStatusEnum, run_calibration_job_callback_pw, run_validation_job_callback_pw, \
-    run_forecast_job_callback_pw, run_forecast_forcing_download_job_callback_pw
+    run_forecast_job_callback_pw
 from calibration.util.calibration_validators import CalibrationRunSerializer, GenericResponseSerializer, \
     ErrorResponseSerializer, ReportIterationSerializer, SubmitCalibrationJobResponseSerializer, GetIterationsResponseSerializer, \
     CalibrationJobSlurmCallbackRequestSerializer, ValidationJobSlurmCallbackRequestSerializer, EmptySerializer, \
-    GetStatusRequestSerializer, GetStatusResponseSerializer, \
-    GetStatusForComparisonRequestSerializer, GetStatusForComparisonResponseSerializer, \
-    CalibrationOrValidationOrForecastRunSerializer, ForecastJobSlurmCallbackRequestSerializer, \
-    ForecastForcingDownloadJobSlurmCallbackRequestSerializer, CancelJobResponseSerializer, ValidationRunSerializer, \
+    GetStatusRequestSerializer, GetStatusResponseSerializer, GetStatusForComparisonRequestSerializer, GetStatusForComparisonResponseSerializer, \
+    CalibrationOrValidationOrForecastRunSerializer, ForecastJobSlurmCallbackRequestSerializer, CancelJobResponseSerializer, ValidationRunSerializer, \
     GenericResponseSerializerWithValidator, RunCalibrationJob, MPINodesRulesSerializer, MPINodesRulesResponseSerializer
 from calibration.views import ngen_cal_input
 from calibration.views.calibration_swe_views import generate_swe_ts_data
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import ResponseError, get_calibration_run, handle_exceptions, validate_response, validate_request, \
-    generate_custom_token, TOKEN_SLURM_SCOPE, get_validation_run, get_forecast_run, get_forecast_forcing_download_run, join_with_or, get_user_email, \
+    generate_custom_token, TOKEN_SLURM_SCOPE, get_validation_run, get_forecast_run, get_user_email, \
     get_job_description, get_elapsed_str, readonly_transaction, truncate_large_fields, auth_scope_required
 from calibration.views.end_of_job_processing import read_calibration_output
 
@@ -118,22 +116,14 @@ def get_status(request: Request) -> Response:
         )
 
         # Retrieve forecast runs with related PerformanceMetrics data
-        forecast_runs = ForecastRun.objects.filter(
-            calibration_run=calibration_run
-        ).select_related("performance_metrics", "forcing_download_run").only(
+        forecast_runs = ForecastRun.objects.filter(calibration_run=calibration_run).select_related(
+            "performance_metrics"
+        ).only(
             "id", "status__name", "failure_messages", "submit_date",
             "performance_metrics__elapsed_time", "performance_metrics__num_cpus",
             "performance_metrics__cpu_time", "performance_metrics__max_rss",
             "performance_metrics__max_disk_read", "performance_metrics__max_disk_write",
             "performance_metrics__reserved_time",
-            "forcing_download_run__status__name",
-            "forcing_download_run__performance_metrics__elapsed_time",
-            "forcing_download_run__performance_metrics__num_cpus",
-            "forcing_download_run__performance_metrics__cpu_time",
-            "forcing_download_run__performance_metrics__max_rss",
-            "forcing_download_run__performance_metrics__max_disk_read",
-            "forcing_download_run__performance_metrics__max_disk_write",
-            "forcing_download_run__performance_metrics__reserved_time"
         )
 
     # Construct validation response with performance metrics as needed
@@ -187,23 +177,17 @@ def get_status(request: Request) -> Response:
         if should_include_metrics(run.status, include_performance_metrics):
             forecast_data['performance_metrics'] = get_performance_metrics(run.performance_metrics)
 
-        # Forcing download sub-run
-        forcing_download = run.forcing_download_run
-        if forcing_download:
-            forcing_download_data = {
-                'forcing_download_run_id': forcing_download.id,
-                'status': forcing_download.status.name,
-                'elapsed_time': forcing_download.performance_metrics.elapsed_time if forcing_download.performance_metrics else None
-            }
-            fm_fd = parse_failure_messages(forcing_download.failure_messages)
-            if fm_fd is not None:
-                forcing_download_data['failure_messages'] = fm_fd
-
-            if should_include_metrics(forcing_download.status, include_performance_metrics):
-                forcing_download_data['performance_metrics'] = get_performance_metrics(forcing_download.performance_metrics)
-            forecast_data['forcing_download'] = forcing_download_data
-
-        forecast_response.append(forecast_data)
+        # if forcing_download:
+        #     forcing_download_data = {
+        #         'forcing_download_run_id': forcing_download.id,
+        #         'status': forcing_download.status.name,
+        #         'elapsed_time': forcing_download.performance_metrics.elapsed_time if forcing_download.performance_metrics else None
+        #     }
+        #     if should_include_metrics(forcing_download.status, include_performance_metrics):
+        #         forcing_download_data['performance_metrics'] = get_performance_metrics(forcing_download.performance_metrics)
+        #     forecast_data['forcing_download'] = forcing_download_data
+        #
+        # forecast_response.append(forecast_data)
 
     # Prepare the main response without calibration performance metrics if not requested
     response = {
@@ -791,45 +775,41 @@ def cancel_job(request: Request) -> Response:
         run_type = JobType.VALIDATION.value
         run, error_return = get_validation_run(validation_run_id, request.user, run_status=[StatusEnum.RUNNING, StatusEnum.SUBMITTED])
     else:
-        # Retrieve the ForecastForcingDownloadRun regardless of its status,
-        # using the provided forecast_run_id to get the forcing download run.
-        # First, get the ForecastRun (to access the forcing_download_run id).
-        forecast_run_unfiltered, error_return = get_forecast_run(forecast_run_id, request.user, run_status=list(StatusEnum))
-        if error_return:
-            return error_return
+        run_type = JobType.FORECAST.value
+        run, error_return = get_forecast_run(forecast_run_id, request.user, run_status=list(StatusEnum))
 
-        forecast_forcing_download_run, forcing_error = get_forecast_forcing_download_run(
-            forecast_run_unfiltered.forcing_download_run.id,
-            request.user,
-            run_status=list(StatusEnum)
-        )
-        if forcing_error:
-            return forcing_error
+        # forecast_forcing_download_run, forcing_error = get_forecast_forcing_download_run(
+        #     forecast_run_unfiltered.forcing_download_run.id,
+        #     request.user,
+        #     run_status=list(StatusEnum)
+        # )
+        # if forcing_error:
+        #     return forcing_error
 
-        # Check the status of the forcing download run.
-        if forecast_forcing_download_run.status in [StatusEnum.RUNNING.db_instance, StatusEnum.SUBMITTED.db_instance]:
-            # Forcing download run is running: cancel it.
-            run = forecast_forcing_download_run
-            # Call it a Forecast job and not Forcing Download
-            run_type = JobType.FORECAST.value
-        elif forecast_forcing_download_run.status == StatusEnum.DONE.db_instance:
-            # Forcing download run is done.
-            # Retrieve the forecast run from the forcing run.
-            forecast_run = forecast_forcing_download_run.forecast_run
-            if forecast_run.status in [StatusEnum.RUNNING.db_instance, StatusEnum.SUBMITTED.db_instance]:
-                run = forecast_run
-                run_type = JobType.FORECAST.value
-
-            else:
-                error = (f'{ForecastRun.__name__} {forecast_run.id} is not in an allowed status: '
-                         f'{join_with_or([StatusEnum.RUNNING.value, StatusEnum.SUBMITTED.value])}. '
-                         f'Current status: {forecast_run.status.name}')
-                return ResponseError(error)
-        else:
-            error = (f'{ForecastForcingDownloadRun.__name__} {forecast_forcing_download_run.id} is not in an allowed status: '
-                     f'{join_with_or([StatusEnum.RUNNING.value, StatusEnum.SUBMITTED.value, StatusEnum.DONE.value])}. '
-                     f'Current status: {forecast_forcing_download_run.status.name}')
-            return ResponseError(error)
+        # # Check the status of the forcing download run.
+        # if forecast_forcing_download_run.status in [StatusEnum.RUNNING.db_instance, StatusEnum.SUBMITTED.db_instance]:
+        #     # Forcing download run is running: cancel it.
+        #     run = forecast_forcing_download_run
+        #     # Call it a Forecast job and not Forcing Download
+        #     run_type = JobType.FORECAST.value
+        # elif forecast_forcing_download_run.status == StatusEnum.DONE.db_instance:
+        #     # Forcing download run is done.
+        #     # Retrieve the forecast run from the forcing run.
+        #     forecast_run = forecast_forcing_download_run.forecast_run
+        #     if forecast_run.status in [StatusEnum.RUNNING.db_instance, StatusEnum.SUBMITTED.db_instance]:
+        #         run = forecast_run
+        #         run_type = JobType.FORECAST.value
+        #
+        #     else:
+        #         error = (f'{ForecastRun.__name__} {forecast_run.id} is not in an allowed status: '
+        #                  f'{join_with_or([StatusEnum.RUNNING.value, StatusEnum.SUBMITTED.value])}. '
+        #                  f'Current status: {forecast_run.status.name}')
+        #         return ResponseError(error)
+        # else:
+        #     error = (f'{ForecastForcingDownloadRun.__name__} {forecast_forcing_download_run.id} is not in an allowed status: '
+        #              f'{join_with_or([StatusEnum.RUNNING.value, StatusEnum.SUBMITTED.value, StatusEnum.DONE.value])}. '
+        #              f'Current status: {forecast_forcing_download_run.status.name}')
+        #     return ResponseError(error)
 
     if not cancel_job_common(run):
         return ResponseError(f"Unable to cancel {run_type.capitalize()} Job {run.id}")
@@ -941,38 +921,38 @@ def validation_job_slurm_callback(request: Request) -> Response:
         run_validation_job_callback_pw
     )
 
-
-@extend_schema(
-    request=ForecastForcingDownloadJobSlurmCallbackRequestSerializer,
-    responses={
-        202: None,
-        400: OpenApiResponse(
-            response=ErrorResponseSerializer,
-            description="Validation error or parsing error"
-        ),
-        500: OpenApiResponse(
-            response=ErrorResponseSerializer,
-            description="Internal server error"
-        )
-    },
-    description="Callback for Slurm to call when a forecast forcing download job ends"
-)
-@api_view(['POST'])
-@handle_exceptions
-@auth_scope_required(TOKEN_SLURM_SCOPE)
-def forecast_forcing_download_job_slurm_callback(request: Request) -> Response:
-    """
-    Handles a callback from Slurm to update the status of a forecast forcing download job.
-
-    :param request: HTTP request containing Slurm job details and status.
-    :return: HTTP 202 response indicating the callback was processed.
-    """
-    return handle_slurm_callback(
-        request,
-        ForecastForcingDownloadJobSlurmCallbackRequestSerializer,
-        get_forecast_forcing_download_run,
-        run_forecast_forcing_download_job_callback_pw
-    )
+#
+# @extend_schema(
+#     request=ForecastForcingDownloadJobSlurmCallbackRequestSerializer,
+#     responses={
+#         202: None,
+#         400: OpenApiResponse(
+#             response=ErrorResponseSerializer,
+#             description="Validation error or parsing error"
+#         ),
+#         500: OpenApiResponse(
+#             response=ErrorResponseSerializer,
+#             description="Internal server error"
+#         )
+#     },
+#     description="Callback for Slurm to call when a forecast forcing download job ends"
+# )
+# @api_view(['POST'])
+# @handle_exceptions
+# @auth_scope_required(TOKEN_SLURM_SCOPE)
+# def forecast_forcing_download_job_slurm_callback(request: Request) -> Response:
+#     """
+#     Handles a callback from Slurm to update the status of a forecast forcing download job.
+#
+#     :param request: HTTP request containing Slurm job details and status.
+#     :return: HTTP 202 response indicating the callback was processed.
+#     """
+#     return handle_slurm_callback(
+#         request,
+#         ForecastForcingDownloadJobSlurmCallbackRequestSerializer,
+#         get_forecast_forcing_download_run,
+#         run_forecast_forcing_download_job_callback_pw
+#     )
 
 
 @extend_schema(

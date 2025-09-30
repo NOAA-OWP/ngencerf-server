@@ -10,7 +10,7 @@ class BaseRun(BaseModel):
     slurm_job_id = models.IntegerField(null=True)
     performance_metrics = models.ForeignKey('PerformanceMetrics', null=True, on_delete=models.CASCADE)
     status = models.ForeignKey('Status', null=False, on_delete=models.RESTRICT, db_index=True)
-    failure_messages = models.CharField(max_length=500, null=True)
+    failure_messages = models.TextField(null=True)
 
     class Meta:
         abstract = True

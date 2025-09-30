@@ -16,7 +16,7 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 
 from calibration.enums import StatusEnum, ValidationType, JobGenesis, ForecastCycleEnum
-from calibration.models import CalibrationRun, ValidationRun, ForecastRun, ForecastForcingDownloadRun
+from calibration.models import CalibrationRun, ValidationRun, ForecastRun
 from calibration.run_util.run_common import submit_job
 from calibration.util.calibration_validators import FooterResponseSerializer, \
     ErrorResponseSerializer, CreateCalibrationRunResponseSerializer, \
@@ -199,7 +199,9 @@ def create_and_run_forecast(request: Request) -> Response:
         return error_return
 
     calibration_run_id = validator.get('calibration_run_id')
-    cycle_name = validator.get('cycle_name')
+    configuration_name = validator.get('configuration_name')
+    cycle_date = validator.get('cycle_date')
+    cold_start_date = validator.get('cold_start_date')
 
     calibration_run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=[StatusEnum.DONE])
     if error_return:
@@ -207,17 +209,19 @@ def create_and_run_forecast(request: Request) -> Response:
 
     forecast_run = create_forecast_run_internal(
         calibration_run,
-        ForecastCycleEnum.get_instance(cycle_name)
+        ForecastCycleEnum.get_instance(configuration_name),
+        cycle_date,
+        cold_start_date
     )
-    submit_job(forecast_run.forcing_download_run)
+
+    submit_job(forecast_run)
 
     response = {
-        'message': f'Forcing download job for Forecast Job {forecast_run.id} created and submitted for Calibration Job {calibration_run.id}',
+        'message': f'Forecast Job {forecast_run.id} created and submitted for Calibration Job {calibration_run.id}',
         'calibration_run_id': calibration_run.id,
         'forecast_run_id': forecast_run.id,
         'forecast_status': forecast_run.status.name,
-        'forecast_forcing_download_status': forecast_run.forcing_download_run.status.name,
-        'submit_date': forecast_run.forcing_download_run.submit_date
+        'submit_date': forecast_run.submit_date
     }
 
     response_validator, error_response = validate_response(CreateAndRunForecastResponseSerializer, response)
@@ -427,9 +431,9 @@ def has_running_associated_jobs(run: CalibrationRun) -> str | None:
     if ForecastRun.objects.filter(calibration_run=run, status__in=running_statuses).exists():
         return f'Calibration Job {run.id} has associated forecast jobs that are still running. Cannot proceed until they are completed.'
 
-    # Check if any associated forcing download jobs are running
-    if ForecastForcingDownloadRun.objects.filter(forecast_run__calibration_run=run, status__in=running_statuses).exists():
-        return f'Calibration Job {run.id} has associated forcing download jobs that are still running. Cannot proceed until they are completed.'
+    # # Check if any associated forcing download jobs are running
+    # if ForecastForcingDownloadRun.objects.filter(forecast_run__calibration_run=run, status__in=running_statuses).exists():
+    #     return f'Calibration Job {run.id} has associated forcing download jobs that are still running. Cannot proceed until they are completed.'
 
     # No running jobs found
     return None
