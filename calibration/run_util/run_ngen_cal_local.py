@@ -11,10 +11,10 @@ from django.conf import settings
 
 from calibration.enums import StatusEnum, ValidationType
 from calibration.enums_vanilla import ScriptEnum
-from calibration.models import CalibrationRun, ValidationRun, ForecastRun
+from calibration.models import CalibrationRun, ValidationRun, ForecastRun, ColdStartRun
 from calibration.models.base_run import BaseRun
 from calibration.run_util.run_common import set_job_status, job_registry, get_job_registry_key, run_generic_job_end_callback, \
-    finalize_calibration_after_callback, finalize_validation_after_callback, finalize_forecast_after_callback
+    finalize_calibration_after_callback, finalize_validation_after_callback, finalize_forecast_after_callback, finalize_cold_start_after_callback
 from calibration.views.common import get_job_description
 from cerfServer.settings import NGEN_CAL_VENV, NGEN_ENVIRONMENT, NgenEnvironmentEnum
 
@@ -49,6 +49,9 @@ def run_job_local(run: BaseRun, cmd_line_args: dict[str, str], stdout_file: str,
             ScriptEnum.VALIDATION_ITERATION if run.validation_type == ValidationType.VALID_ITERATION.value else ScriptEnum.VALIDATION
         )
         callback_function = run_validation_job_callback_local
+    elif isinstance(run, ColdStartRun):
+        script_cmd = ScriptEnum.COLD_START
+        callback_function = run_cold_start_job_callback_local
     elif isinstance(run, ForecastRun):
         script_cmd = ScriptEnum.FORECAST
         callback_function = run_forecast_job_callback_local
@@ -153,6 +156,13 @@ run_calibration_job_callback_local = functools.partial(
 # - Executes `finalize_validation` to process validation results and potentially mark the best validation run.
 run_validation_job_callback_local = functools.partial(
     run_generic_job_end_callback, check_if_failed=check_local_for_failure, finalize_func=finalize_validation_after_callback
+)
+
+# Handles the completion of a cold start job in the local environment.
+# - Uses `check_local_status` to validate the job's exit code.
+# - Executes `finalize_cold_start` to finalize the cold start job and mark it as DONE.
+run_cold_start_job_callback_local = functools.partial(
+    run_generic_job_end_callback, check_if_failed=check_local_for_failure, finalize_func=finalize_cold_start_after_callback
 )
 
 # Handles the completion of a forecast job in the local environment.

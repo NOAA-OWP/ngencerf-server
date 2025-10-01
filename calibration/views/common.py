@@ -134,29 +134,20 @@ def get_validation_run(
     return get_run_instance(ValidationRun, validation_run_id, user, run_status, 'calibration_run__owner', 'calibration_run__is_archived')
 
 
-#
-# def get_forecast_forcing_download_run(
-#         forecast_forcing_download_run_id: int,
-#         user: User | None,
-#         run_status: list[StatusEnum] | None = None
-# ) -> tuple[ForecastForcingDownloadRun | None, Response | None]:
-#     """
-#     Retrieve a ForecastForcingDownloadRun instance by its ID, filtering by owner and status.
-#
-#     :param forecast_forcing_download_run_id: The ID of the ForecastForcingDownloadRun to retrieve.
-#     :param user: The user requesting the ForecastForcingDownloadRun. If None, no owner filtering is applied.
-#     :param run_status: A list of allowed statuses for the ForecastRun.
-#     :return: A tuple containing the ForecastForcingDownloadRUn instance (or None if
-#
-# not found) and an optional Response with an error.
-#     """
-#     return get_run_instance(
-#         ForecastForcingDownloadRun,
-#         forecast_forcing_download_run_id, user,
-#         run_status,
-#         'forecast_run__calibration_run__owner',
-#         'forecast_run__calibration_run__is_archived'
-#     )
+def get_cold_start_run(
+        cold_start_run_id: int,
+        user: User | None,
+        run_status: list[StatusEnum] | None = None
+) -> tuple[ForecastRun | None, Response | None]:
+    """
+    Retrieve a ColdStartRun by ID, optionally filtering by owner and status.
+
+    :param cold_start_run_id: The ID of the ColdStartRun.
+    :param user: User requesting the ColdStartRun; if None, no owner filtering.
+    :param run_status: Allowed statuses for the ColdStartRun.
+    :return: Tuple of ColdStartRun or None, and Response if error or None.
+    """
+    return get_run_instance(ColdStartRun, cold_start_run_id, user, run_status, 'calibration_run__owner', 'calibration_run__is_archived')
 
 
 def get_forecast_run(
@@ -645,10 +636,10 @@ def get_job_description(run: BaseRun) -> str:
     elif isinstance(run, ValidationRun):
         return f"Validation Job {run.id} for Calibration Job {run.calibration_run.id}, type: {run.validation_type}, user: {run.calibration_run.owner.username}"
     elif isinstance(run, ForecastRun):
-        cold_start_data = f'using Cold Start Job {run.cold_start.id}' if run.cold_start else ''
-        return f"Forecast Job {run.id} for Calibration Job {run.calibration_run.id} {cold_start_data}, user: {run.calibration_run.owner.username}"
+        cold_start_data = f' using Cold Start Job {run.cold_start_run.id}' if run.cold_start_run else ''
+        return f"Forecast Job {run.id} for Calibration Job {run.calibration_run.id}{cold_start_data}, user: {run.calibration_run.owner.username}"
     elif isinstance(run, ColdStartRun):
-        return f"Col dStart Job {run.id} for Calibration Job {run.calibration_run.id}, user: {run.calibration_run.owner.username}"
+        return f"Cold Start Job {run.id} for Calibration Job {run.calibration_run.id}, user: {run.calibration_run.owner.username}"
     # elif isinstance(run, ForecastForcingDownloadRun):
     #     return f"Forecast Forcing Download Job {run.id} for Forecast Job {run.forecast_run.id} for Calibration Job {run.forecast_run.calibration_run.id}, user: {run.forecast_run.calibration_run.owner.username}"
 

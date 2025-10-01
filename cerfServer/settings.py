@@ -273,7 +273,7 @@ NGEN_FORECAST_DOCKER_CMD = f'docker run --rm --name {{name}} -v {NGEN_CAL_MOUNT_
 # Used when running in NGEN_ENVIRONMENT=LOCAL
 CAL_MGR_SCRIPT = os.path.join(CAL_MGR_REPO_ROOT, 'docker', 'run-ngen-cal.sh')
 NGEN_FORECAST_SCRIPT = os.path.join(NGEN_FORECAST_REPO_ROOT, 'docker', 'run-ngen-fcst.sh')
-FORECAST_FORCING_SCRIPT = os.path.join(NGEN_FORCING_REPO_ROOT, 'docker', 'run-ngen-forcing.sh')
+NGEN_COLD_START_SCRIPT = os.path.join(NGEN_FORECAST_REPO_ROOT, 'docker', 'run-ngen-fcst.sh')
 
 RUNTIME_INFO = {
     ScriptEnum.CALIBRATION: (CAL_MGR_DOCKER_CMD, CAL_MGR_SCRIPT),
@@ -308,8 +308,8 @@ except KeyError:
 SLURM_URL = os.getenv("SLURM_URL")
 SLURM_SUBMIT_CALIBRATION_JOB_ENDPOINT = 'submit-calibration-job'
 SLURM_SUBMIT_VALIDATION_JOB_ENDPOINT = 'submit-validation-job'
+SLURM_SUBMIT_COLD_START_JOB_ENDPOINT = 'submit-cold_start-job'
 SLURM_SUBMIT_FORECAST_JOB_ENDPOINT = 'submit-forecast-job'
-# SLURM_SUBMIT_FORECAST_FORCING_DOWNLOAD_JOB_ENDPOINT = 'submit-forecast-forcing-download-job'
 SLURM_JOB_STATUS_ENDPOINT = 'job-status'
 SLURM_CANCEL_JOB_ENDPOINT = 'cancel-job'
 

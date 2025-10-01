@@ -298,14 +298,14 @@ def run_cold_start_job(cold_start_run: ColdStartRun) -> None:
         raise CerfException(
             f"Input file '{validation_yaml}' does not exist for {get_job_description(cold_start_run)}"
         )
-    cold_start_realization = get_cold_start_realization_file(cold_start_run)
+    realization_file = get_cold_start_realization_file(cold_start_run)
     stdout_file = get_cold_start_stdout_file(cold_start_run)
 
     execute_job(
         cold_start_run,
         {
             'validation_yaml': validation_yaml,
-            'cold_start_realization': cold_start_realization
+            'realization_file': realization_file
         },
         stdout_file,
         simulate=settings.SIMULATE_FLAGS.get(JobType.COLD_START, False)
@@ -326,14 +326,14 @@ def run_forecast_job(forecast_run: ForecastRun) -> None:
         raise CerfException(
             f"Input file '{validation_yaml}' does not exist for {get_job_description(forecast_run)}"
         )
-    forecast_realization = get_forecast_realization_file(forecast_run)
+    realization_file = get_forecast_realization_file(forecast_run)
     stdout_file = get_forecast_stdout_file(forecast_run)
 
     execute_job(
         forecast_run,
         {
             'validation_yaml': validation_yaml,
-            'forecast_realization': forecast_realization
+            'realization_file': realization_file
         },
         stdout_file,
         simulate=settings.SIMULATE_FLAGS.get(JobType.FORECAST, False)

@@ -89,6 +89,10 @@ class CalibrationRunSerializer(BaseSerializer):
     calibration_run_id = serializers.IntegerField(required=True)
 
 
+class ColdStartRunSerializer(BaseSerializer):
+    cold_start_run_id = serializers.IntegerField(required=True)
+
+
 class ForecastRunSerializer(BaseSerializer):
     forecast_run_id = serializers.IntegerField(required=True)
 
@@ -676,6 +680,7 @@ class CreateAndRunForecastResponseSerializer(BaseSerializer):
     message = serializers.CharField(required=True)
     calibration_run_id = serializers.IntegerField(required=True)
     forecast_run_id = serializers.IntegerField(required=True)
+    cold_start_run_id = serializers.IntegerField(required=True, allow_null=True)
     submit_date = serializers.DateTimeField(required=True, allow_null=False)
 
 
@@ -1007,6 +1012,10 @@ class CalibrationJobSlurmCallbackRequestSerializer(CalibrationRunSerializer):
 
 
 class ValidationJobSlurmCallbackRequestSerializer(ValidationRunSerializer):
+    job_status = serializers.CharField(required=True, validators=[SlurmStatusEnum])
+
+
+class ColdStartJobSlurmCallbackRequestSerializer(ColdStartRunSerializer):
     job_status = serializers.CharField(required=True, validators=[SlurmStatusEnum])
 
 

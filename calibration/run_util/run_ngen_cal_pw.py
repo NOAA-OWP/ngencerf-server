@@ -8,7 +8,7 @@ from django.contrib.auth import get_user_model
 from rest_framework import status
 
 from calibration.enums import StatusEnum, SlurmStatusEnum
-from calibration.models import CalibrationRun, ValidationRun, ForecastRun
+from calibration.models import CalibrationRun, ValidationRun, ForecastRun, ColdStartRun
 from calibration.models.base_run import BaseRun
 from calibration.run_util.run_common import set_job_status, run_generic_job_end_callback, finalize_calibration_after_callback, \
     finalize_validation_after_callback, finalize_forecast_after_callback
@@ -55,13 +55,20 @@ def submit_job_to_slurm(run: BaseRun, owner: User, arguments: dict[str, str], st
             'iteration': (None, arguments.get('iteration_num'))
         }
     # TODO Have Alvaro remove Forecast Download
+    elif isinstance(run, ColdStartRun):
+        url_endpoint = settings.SLURM_SUBMIT_COLD_START_JOB_ENDPOINT
+        payload = {
+            'cold_start_run_id': (None, run.id),
+            'validation_yaml': (None, arguments['validation_yaml']),
+            'realization_file': (None, arguments['realization_file']),
+            'stdout_file': (None, stdout_file),
+        }
     elif isinstance(run, ForecastRun):
         url_endpoint = settings.SLURM_SUBMIT_FORECAST_JOB_ENDPOINT
         payload = {
             'forecast_run_id': (None, run.id),
             'validation_yaml': (None, arguments['validation_yaml']),
-            'forecast_realization': (None, arguments['forecast_realization']),
-            # 'cold_start_realization': (None, arguments['cold_start_realization']),
+            'realization_file': (None, arguments['realization_file']),
             'stdout_file': (None, stdout_file),
         }
     else:
@@ -135,16 +142,16 @@ run_validation_job_callback_pw = functools.partial(
 # Handles the completion of a forecast job in the PW environment.
 # - Uses `check_pw_status` to validate the job's status.
 # - Executes `finalize_forecast` to finalize the forecast job and mark it as DONE.
+run_cold_start_job_callback_pw = functools.partial(
+    run_generic_job_end_callback, check_if_failed=check_pw_for_failure, finalize_func=finalize_cold_start_after_callback
+)
+
+# Handles the completion of a forecast job in the PW environment.
+# - Uses `check_pw_status` to validate the job's status.
+# - Executes `finalize_forecast` to finalize the forecast job and mark it as DONE.
 run_forecast_job_callback_pw = functools.partial(
     run_generic_job_end_callback, check_if_failed=check_pw_for_failure, finalize_func=finalize_forecast_after_callback
 )
-
-# # Handles the completion of a forecast job in the PW environment.
-# # - Uses `check_pw_status` to validate the job's status.
-# # - Executes `finalize_forecast` to finalize the forecast job and mark it as DONE.
-# run_forecast_forcing_download_job_callback_pw = functools.partial(
-#     run_generic_job_end_callback, check_if_failed=check_pw_for_failure, finalize_func=finalize_forecast_forcing_download_after_callback
-# )
 
 
 def cancel_slurm_job(run: BaseRun) -> bool:

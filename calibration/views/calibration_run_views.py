@@ -18,19 +18,20 @@ from calibration.enums_vanilla import JobType
 from calibration.models import Iteration, ValidationRun, ForecastRun, CalibrationRun, Status
 from calibration.run_util.run_common import cancel_job_common, submit_job
 from calibration.run_util.run_ngen_cal_pw import SlurmStatusEnum, run_calibration_job_callback_pw, run_validation_job_callback_pw, \
-    run_forecast_job_callback_pw
+    run_forecast_job_callback_pw, run_cold_start_job_callback_pw
 from calibration.util.calibration_validators import CalibrationRunSerializer, GenericResponseSerializer, \
     ErrorResponseSerializer, ReportIterationSerializer, SubmitCalibrationJobResponseSerializer, GetIterationsResponseSerializer, \
     CalibrationJobSlurmCallbackRequestSerializer, ValidationJobSlurmCallbackRequestSerializer, EmptySerializer, \
     GetStatusRequestSerializer, GetStatusResponseSerializer, GetStatusForComparisonRequestSerializer, GetStatusForComparisonResponseSerializer, \
     CalibrationOrValidationOrForecastRunSerializer, ForecastJobSlurmCallbackRequestSerializer, CancelJobResponseSerializer, ValidationRunSerializer, \
-    GenericResponseSerializerWithValidator, RunCalibrationJob, MPINodesRulesSerializer, MPINodesRulesResponseSerializer
+    GenericResponseSerializerWithValidator, RunCalibrationJob, MPINodesRulesSerializer, MPINodesRulesResponseSerializer, \
+    ColdStartJobSlurmCallbackRequestSerializer
 from calibration.views import ngen_cal_input
 from calibration.views.calibration_swe_views import generate_swe_ts_data
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import ResponseError, get_calibration_run, handle_exceptions, validate_response, validate_request, \
     generate_custom_token, TOKEN_SLURM_SCOPE, get_validation_run, get_forecast_run, get_user_email, \
-    get_job_description, get_elapsed_str, readonly_transaction, truncate_large_fields, auth_scope_required
+    get_job_description, get_elapsed_str, readonly_transaction, truncate_large_fields, auth_scope_required, get_cold_start_run
 from calibration.views.end_of_job_processing import read_calibration_output
 
 logger = logging.getLogger(__name__)
@@ -919,6 +920,39 @@ def validation_job_slurm_callback(request: Request) -> Response:
         ValidationJobSlurmCallbackRequestSerializer,
         get_validation_run,
         run_validation_job_callback_pw
+    )
+
+
+@extend_schema(
+    request=ColdStartJobSlurmCallbackRequestSerializer,
+    responses={
+        202: None,
+        400: OpenApiResponse(
+            response=ErrorResponseSerializer,
+            description="Validation error or parsing error"
+        ),
+        500: OpenApiResponse(
+            response=ErrorResponseSerializer,
+            description="Internal server error"
+        )
+    },
+    description="Callback for Slurm to call when a cold start job ends"
+)
+@api_view(['POST'])
+@handle_exceptions
+@auth_scope_required(TOKEN_SLURM_SCOPE)
+def cold_start_job_slurm_callback(request: Request) -> Response:
+    """
+    Handles a callback from Slurm to update the status of a cold start job.
+
+    :param request: HTTP request containing Slurm job details and status.
+    :return: HTTP 202 response indicating the callback was processed.
+    """
+    return handle_slurm_callback(
+        request,
+        ColdStartJobSlurmCallbackRequestSerializer,
+        get_cold_start_run,
+        run_cold_start_job_callback_pw
     )
 
 

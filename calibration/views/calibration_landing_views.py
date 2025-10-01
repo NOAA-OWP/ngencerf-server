@@ -270,14 +270,15 @@ def create_and_run_forecast(request: Request) -> Response:
     else:
         submit_job(forecast_run)
 
-    msg = get_job_description(cold_start_run if run_cold_start else forecast_run) + 'created and submitted'
+    msg = get_job_description(cold_start_run if run_cold_start else forecast_run) + ' created and submitted'
     if run_cold_start:
         msg += f', followed by Forecast Job {forecast_run.id}'
     response = {
         'message': msg,
         'calibration_run_id': calibration_run.id,
         'forecast_run_id': forecast_run.id,
-        'submit_date': forecast_run.submit_date
+        'cold_start_run_id': cold_start_run.id,
+        'submit_date': cold_start_run.submit_date if run_cold_start else forecast_run.submit_date
     }
 
     response_validator, error_response = validate_response(CreateAndRunForecastResponseSerializer, response)
