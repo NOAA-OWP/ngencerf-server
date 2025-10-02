@@ -38,28 +38,25 @@ from cerfServer.settings import NgenEnvironmentEnum
 
 logger = logging.getLogger(__name__)
 
-# Job registry to store subprocess objects keyed by a tuple of (calibration_run_id, validation_run_id)
-job_registry: dict[tuple[int, int], subprocess.Popen] = {}
+# Job registry to store subprocess objects keyed by a unique string (e.g., "calibration_123")
+job_registry: dict[str, subprocess.Popen] = {}
 
 
-def get_job_registry_key(run: BaseRun) -> tuple[int, int]:
+def get_job_registry_key(run: BaseRun) -> str:
     """
-    Generate a unique key for the job registry based on run type.
+    Generate a unique string key for the job registry based on run type.
 
-    The first element is always the calibration run ID.
-    The second element is the specific run ID or -1 for CalibrationRun.
+    Format: "<run_class>_<id>" (all lowercase).
+    Examples:
+      - CalibrationRun(id=123) → "calibrationrun_123"
+      - ValidationRun(id=45)   → "validationrun_45"
+      - ForecastRun(id=67)     → "forecastrun_67"
+      - ForecastForcingDownloadRun(id=89) → "forecastforcingdownloadrun_89"
 
-    :param run: The CalibrationRun, ValidationRun, or ForecastRun object.
-    :return: A tuple (calibration_run_id, specific_run_id).
+    :param run: The CalibrationRun, ValidationRun, ForecastRun, or ForecastForcingDownloadRun object.
+    :return: A unique string key for the job registry.
     """
-    if isinstance(run, CalibrationRun):
-        return run.id, -1
-    elif isinstance(run, (ValidationRun, ForecastRun)):
-        return run.calibration_run.id, run.id
-    elif isinstance(run, ForecastForcingDownloadRun):
-        return run.forecast_run.calibration_run.id, run.forecast_run.id
-
-    raise TypeError(f"Unsupported run type: {type(run).__name__}")
+    return f"{run.__class__.__name__.lower()}_{run.id}"
 
 
 def set_job_status(run: BaseRun, status: StatusEnum, failure_messages: dict = None) -> None:
