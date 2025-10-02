@@ -32,7 +32,8 @@ from calibration.util.caching import get_cached_modules_with_groups
 from calibration.util.calibration_validators import ErrorResponseSerializer, BaseSerializer
 from calibration.util.cloud_util import path_exists
 from calibration.util.ngen_locations import get_forecast_dir, get_output_calibration_run_dir, \
-    get_output_validation_run_dir, get_ngen_logging_file, get_ngen_logging_basename, get_cold_start_dir
+    get_output_validation_run_dir, get_cold_start_dir, get_ngen_logging_file, \
+    get_ngen_logging_basename
 
 logger = logging.getLogger(__name__)
 
@@ -640,8 +641,6 @@ def get_job_description(run: BaseRun) -> str:
         return f"Forecast Job {run.id} for Calibration Job {run.calibration_run.id}{cold_start_data}, user: {run.calibration_run.owner.username}"
     elif isinstance(run, ColdStartRun):
         return f"Cold Start Job {run.id} for Calibration Job {run.calibration_run.id}, user: {run.calibration_run.owner.username}"
-    # elif isinstance(run, ForecastForcingDownloadRun):
-    #     return f"Forecast Forcing Download Job {run.id} for Forecast Job {run.forecast_run.id} for Calibration Job {run.forecast_run.calibration_run.id}, user: {run.forecast_run.calibration_run.owner.username}"
 
     raise ValueError(f"Unknown job type: {type(run).__name__}")
 

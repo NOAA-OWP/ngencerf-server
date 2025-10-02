@@ -1103,12 +1103,12 @@ class LoadForecastTabResponseSerializer(BaseSerializer):
 class ForecastJobsResponseSerializer(BaseSerializer):
     calibration_run_id = serializers.IntegerField(required=True)
     forecast_run_id = serializers.IntegerField(required=True)
+    domain_name = serializers.CharField(required=True)
     configuration = serializers.CharField(required=True, validators=[enum_validator(ForecastConfigEnum)])
     cycle_date = serializers.DateTimeField(required=True, allow_null=False)
-    cold_start_date = serializers.DateTimeField(required=False, allow_null=True)
+    cold_start_date = serializers.DateTimeField(required=True, allow_null=True)
     gage_id = serializers.CharField(required=True)
     forecast_status = serializers.CharField(required=True, validators=[enum_validator(StatusEnum)])
-    # forcing_download_status = serializers.CharField(required=True, validators=[enum_validator(StatusEnum)])
     submit_date = serializers.DateTimeField(required=True, allow_null=True)
 
 

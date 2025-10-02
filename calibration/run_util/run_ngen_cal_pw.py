@@ -11,7 +11,7 @@ from calibration.enums import StatusEnum, SlurmStatusEnum
 from calibration.models import CalibrationRun, ValidationRun, ForecastRun, ColdStartRun
 from calibration.models.base_run import BaseRun
 from calibration.run_util.run_common import set_job_status, run_generic_job_end_callback, finalize_calibration_after_callback, \
-    finalize_validation_after_callback, finalize_forecast_after_callback
+    finalize_validation_after_callback, finalize_forecast_after_callback, finalize_cold_start_after_callback
 from calibration.util.calibration_validators import GenericMessageResponseSerializer, SlurmSubmitResponseSerializer
 from calibration.views.common import generate_custom_token, TOKEN_SLURM_SCOPE, get_job_description, validate_response_data
 
@@ -28,7 +28,7 @@ def submit_job_to_slurm(run: BaseRun, owner: User, arguments: dict[str, str], st
     constructs the payload with input arguments and authentication token,
     and submits the job using an HTTP POST request.
 
-    :param run: The CalibrationRun, ValidationRun, ForecastRun object.
+    :param run: The CalibrationRun, ValidationRun, ColdStartRun or ForecastRun object.
     :param owner: The owner (user instance) of the job, used to generate the auth token.
     :param arguments: Dictionary containing command-line arguments for the job (e.g., 'input_file').
     :param stdout_file: The path to the file where job output will be written.
@@ -73,7 +73,7 @@ def submit_job_to_slurm(run: BaseRun, owner: User, arguments: dict[str, str], st
         }
     else:
         raise ValueError(
-            f"Unsupported run type: {type(run).__name__}. Expected one of CalibrationRun, ValidationRun, ForecastRun."
+            f"Unsupported run type: {type(run).__name__}. Expected one of CalibrationRun, ValidationRun, ColdStartRun, ForecastRun."
         )
 
     url = urljoin(settings.SLURM_URL, url_endpoint)
@@ -105,7 +105,7 @@ def check_pw_for_failure(run: BaseRun, slurm_status: SlurmStatusEnum) -> bool:
     This function updates the job's status based on its Slurm completion status,
     and determines whether the job was successful, canceled, or failed.
 
-    :param run: The job object (CalibrationRun, ValidationRun, ForecastRun, etc.) being monitored.
+    :param run: The job object (CalibrationRun, ValidationRun, ColdStartRun, ForecastRun, etc.) being monitored.
     :param slurm_status: The SlurmStatusEnum indicating the job's completion status.
     :return: True if the job failed or was canceled, False otherwise.
     """
@@ -161,7 +161,7 @@ def cancel_slurm_job(run: BaseRun) -> bool:
     This function constructs the payload with the Slurm job ID, sends an HTTP POST
     request to the Slurm cancellation endpoint, and validates the response.
 
-    :param run: The CalibrationRun, ValidationRun, ForecastRun, etc. object to terminate.
+    :param run: The CalibrationRun, ValidationRun, ColdStartRun, ForecastRun, etc. object to terminate.
     :return: True if the job was successfully canceled, False otherwise.
     :raises requests.exceptions.HTTPError: If the cancellation request fails with an HTTP error.
     """

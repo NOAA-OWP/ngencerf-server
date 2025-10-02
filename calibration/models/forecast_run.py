@@ -15,7 +15,7 @@ class ForecastRun(BaseRun):
     def __str__(self):
         return (
             f"ForecastRun {self.id}, "
-            f"cycle: {self.configuration.name}, "
+            f"configuration: {self.configuration.name}, "
             f"Calibration Job {self.calibration_run.id}, "
             f"owner: {self.calibration_run.owner.username}, "  # type: ignore[attr-defined]  # Suppress PyCharm warning for unresolved attribute
             f"status.name: {self.status.name}"

@@ -43,7 +43,7 @@ User = get_user_model()
 @handle_exceptions
 def get_calibration_jobs_for_evaluation(request: Request) -> Response:
     """
-    Retrieves calibration jobs that are either DONE or FAILED for evaluation purposes.
+    Retrieves calibration jobs that are DONE, FAILED, CANCELLED, or SERVER_ERROR for evaluation purposes.
 
     :param request: The HTTP request object.
     :return: JSON response with a list of calibration jobs or error information.
@@ -330,10 +330,10 @@ def get_validation_jobs_internal(
 
     :param calibration_run_id: ID of the calibration run to fetch validation jobs for.
     :param detail_level: Determines the level of detail in the response:
-        - 'ids': Returns only validation job IDs excluding VALID_CONTROL.
-        - 'status': Returns validation_run_id, validation_type, and status, including VALID_CONTROL.
-        - 'detailed': Returns full validation job details including parameters.
-    :return: A list of validation job IDs, status summaries, or detailed dicts.
+        - IDS: handled by get_jobs (this function returns []).
+        - STATUS: handled by get_jobs (this function returns []).
+        - DETAILS: returns full validation job details including parameters.
+    :return: [] unless detail_level == DETAILS, in which case a list of detailed dicts.
     """
     # Keep batch logic only for DETAILS; IDS/STATUS are already handled in get_jobs
     if detail_level != GetValidationJobsScope.DETAILS:
@@ -454,6 +454,55 @@ def get_validation_jobs(request: Request) -> Response:
     return Response(response_validator.data)
 
 
+def get_forecast_jobs_internal(
+        user: User,
+        run_status: list[StatusEnum] | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Internal helper to retrieve forecast jobs for a user (READ ONLY).
+    Intended to be reused by multiple endpoints.
+
+    :param user: Owner of the jobs to fetch.
+    :param run_status: Optional list of StatusEnum values to filter on.
+    :return: List[dict] shaped for GetForecastJobsResponseSerializer.
+             Includes forecast_run_id, configuration, domain_name,
+             gage_id, forecast_status, submit_date, cycle_date,
+             and cold_start_date.
+    """
+    query = Q(calibration_run__owner=user)
+
+    if run_status:
+        query &= Q(status__in=[s.db_instance for s in run_status])
+
+    with readonly_transaction():
+        rows = list(
+            ForecastRun.objects
+            .filter(query)
+            .values(
+                'id',
+                'calibration_run_id',
+                'configuration__name',
+                'configuration__domain__name',
+                'cycle_date',
+                'submit_date',
+                'calibration_run__gage__gage_id',
+                'status__name',
+                'cold_start_run__cold_start_date',
+            )
+        )
+
+    # Normalize keys expected by the API response/serializer
+    for f in rows:
+        f['forecast_run_id'] = f.pop('id')
+        f['configuration'] = f.pop('configuration__name')
+        f['domain_name'] = f.pop('configuration__domain__name')
+        f['gage_id'] = f.pop('calibration_run__gage__gage_id')
+        f['forecast_status'] = f.pop('status__name')
+        f['cold_start_date'] = f.pop('cold_start_run__cold_start_date')
+
+    return rows
+
+
 @extend_schema(
     request=EmptySerializer,
     responses={
@@ -486,22 +535,54 @@ def get_forecast_jobs(request: Request) -> Response:
     if error_return:
         return error_return
 
-    with readonly_transaction():
+    forecast_jobs = get_forecast_jobs_internal(request.user)
+    response = {'forecast_jobs': forecast_jobs}
+    response_validator, error_response = validate_response(
+        GetForecastJobsResponseSerializer, response,
+        fields_to_truncate=['forecast_jobs'], max_length=10
+    )
+    if error_response:
+        return error_response
 
-        forecast_jobs = list(
-            ForecastRun.objects
-            .filter(calibration_run__owner=request.user)
-            .values(
-                'id', 'calibration_run_id', 'cycle__name', 'submit_date',
-                'calibration_run__gage__gage_id', 'status__name'
-            )
+    logger.debug(
+        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - '
+        f'{json.dumps(truncate_large_fields(response_validator.data, fields_to_truncate=["forecast_jobs"], max_length=10))}'
+    )
+    return Response(response_validator.data)
+
+
+@extend_schema(
+    request=EmptySerializer,
+    responses={
+        200: GetForecastJobsResponseSerializer,
+        400: OpenApiResponse(
+            response=ErrorResponseSerializer,
+            description="Validation error or parsing error"
+        ),
+        500: OpenApiResponse(
+            response=ErrorResponseSerializer,
+            description="Internal server error"
         )
+    },
+    description="Get DONE forecast jobs"
+)
+@api_view(['POST', 'GET'])
+@handle_exceptions
+def get_forecast_jobs_for_verification(request: Request) -> Response:
+    """
+    Retrieves only DONE forecast jobs for the authenticated user (READ ONLY).
 
-    for f in forecast_jobs:
-        f['forecast_run_id'] = f.pop('id')
-        f['configuration'] = f.pop('configuration__name')
-        f['gage_id'] = f.pop('calibration_run__gage__gage_id')
-        f['forecast_status'] = f.pop('status__name')
+    :param request: The HTTP request object containing calibration run data.
+    :return: JSON response with validation jobs or error information.
+    """
+    data = request.data if request.method == 'POST' else request.query_params.dict()
+    logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
+
+    validator, error_return = validate_request(EmptySerializer, data)
+    if error_return:
+        return error_return
+
+    forecast_jobs = get_forecast_jobs_internal(request.user, run_status=[StatusEnum.DONE])
 
     response = {'forecast_jobs': forecast_jobs}
     response_validator, error_response = validate_response(

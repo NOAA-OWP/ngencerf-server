@@ -124,7 +124,7 @@ def clone_and_run_forecast_job(request: Request) -> Response:
     if error_return:
         return error_return
 
-    new_forecast_run = create_forecast_run_internal(run.calibration_run, run.configuration, run.cycle_date, run.cold_start_date)
+    new_forecast_run = create_forecast_run_internal(run.calibration_run, run.cold_start_run, run.configuration, run.cycle_date)
     submit_job(new_forecast_run)
 
     response = {
@@ -162,7 +162,8 @@ def clone_and_run_forecast_job(request: Request) -> Response:
 @handle_exceptions
 def delete_forecast_job(request: Request) -> Response:
     """
-    Delete a forecast job along with the associated forcing download job. Performs a hard delete if the run status is SAVED or READY, and a soft delete otherwise.
+    Delete a forecast job along with the associated cold start job. 
+    In the future, we shouldn't delete the cold start job with the forecast.  It should be treated independantly
 
     :param request: The HTTP request object.
     :return: A Response object with the deletion confirmation.
@@ -184,14 +185,28 @@ def delete_forecast_job(request: Request) -> Response:
         return ResponseError(f'Forecast Job {run.id} is running.  Cannot delete a running job')
 
     run_id = run.id
+    forecast_dir = get_forecast_dir(run)  # Save before delete
 
     with transaction.atomic():
+        cold_start_run = run.cold_start_run
+
         # Delete the Forecast Run
         run.delete()
-        logger.info(f"Deleting directory {get_forecast_dir(run)}")
+
+        # Delete the Cold Start Run if linked
+        if cold_start_run:
+            cold_start_run.delete()
+
+        logger.info(f"Deleting directory {forecast_dir}")
+        shutil.rmtree(forecast_dir, ignore_errors=True)
+
         shutil.rmtree(get_forecast_dir(run), ignore_errors=True)
 
-    response = {'message': f'Forecast Job {run.id} and associated records have been deleted', 'forecast_run_id': run_id}
+    message = f"Forecast Job {run_id} has been deleted"
+    if cold_start_run:
+        message += f" along with Cold Start Run {cold_start_run.id}"
+
+    response = {'message': message, 'forecast_run_id': run_id}
 
     response_validator, error_response = validate_response(DeleteForecastRunResponseSerializer, response)
     if error_response:
