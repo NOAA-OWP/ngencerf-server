@@ -113,8 +113,31 @@ aws s3 cp --recursive s3://ngwpc-dev/ngen-static-files /ngencerf/data/ngen-stati
 
 In addition, copy the directory `module_parameter_files` and all its contents from 
 https://github.com/NGWPC/nwm-cal-mgr/tree/development/module_parameter_files to the `/ngencerf/data/ngen-static-files` directory.
-Unfortunately, GitHub does not provided an easy way to just download a single directory.  So it might be easiest to clone the entire repo and then 
-copy that one directory.
+GitHub does not provided an easy way to just download a single directory, but here is a command to do it
+
+```
+cd /ngencerf/data/ngen-static-files
+rm -rf module_parameter_files
+git clone --depth 1 --filter=blob:none --sparse -b development https://github.com/NGWPC/nwm-cal-mgr.git tmp-nwm-cal-mgr && \
+cd tmp-nwm-cal-mgr && \
+git sparse-checkout set module_parameter_files && \
+mv module_parameter_files ../ && \
+cd .. && rm -rf tmp-nwm-cal-mgr
+```
+
+Copy the directory `https://github.com/NGWPC/ngen-forcing/tree/forecast_validation/NextGen_Forcings_Engine_BMI/BMI_NextGen_Configs/config_templates` 
+to the `/ngencerf/data/ngen-static-files` directory
+
+```
+cd /ngencerf/data/ngen-static-files
+rm -rf forecast_forcing_templates
+git clone --depth 1 --filter=blob:none --sparse -b development https://github.com/NGWPC/ngen-forcing.git tmp-ngen-forcing && \
+cd tmp-ngen-forcing && \
+git sparse-checkout set NextGen_Forcings_Engine_BMI/BMI_NextGen_Configs/config_templates && \
+mv NextGen_Forcings_Engine_BMI/BMI_NextGen_Configs/config_templates ../forecast_forcing_templates && \
+cd .. && rm -rf tmp-ngen-forcing
+```
+
 
 When done, your `ngen-static-files` directory should look something like this
 
