@@ -505,9 +505,9 @@ def validate_formulation(module_names: set[str]) -> tuple[list[str], list[str], 
             expected_str = join_with_or([str(c) for c in expected_counts])
             # Choose singular if exactly [1], otherwise plural
             word = "module" if len(expected_counts) == 1 and expected_counts[0] == 1 else "modules"
-            msg = f"{group_name} group is expected to have {expected_str} {word}, but it has {count}"
+            msg = f"{group_name} group is expected to have {expected_str} {word}, but it has {count}."
             if count > 1 and 'Noah-OWP-Modular' in module_names:
-                msg += f", and Noah-OWP-Modular will not be used for {group_name}."
+                msg += f" Noah-OWP-Modular will not be used for {group_name}."
             logger.warning(msg)
             if group_rules.get("fatal", False):
                 fatal_errors.append(msg)
