@@ -4,7 +4,7 @@ from django.db import migrations
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('calibration', '0033_update_forecast_cycles'),
+        ('calibration', '0033b_prepare_forecastcycle_for_rename'),
     ]
 
     operations = [
