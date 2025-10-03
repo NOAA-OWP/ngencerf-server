@@ -195,10 +195,10 @@ ENTERPRISE_DATA_URL = os.getenv('ENTERPRISE_DATA_URL', 'http://localhost:8001')
 # Due to circular imports, can't use the enums as keys.  But the values must match exactly
 FORCING_DATA_DIRS_AORC = {
     "AORC": 's3://ngwpc-forcing/aorc_2.2',
-    "NWM Retrospective":  's3://ngwpc-forcing/retrospective_2.2'
+    "NWM Retrospective": 's3://ngwpc-forcing/retrospective_2.2'
 }
 FORCING_DATA_DIRS_RETRO = {
-    "NWM Retrospective":  's3://ngwpc-forcing/retrospective_2.2'
+    "NWM Retrospective": 's3://ngwpc-forcing/retrospective_2.2'
 }
 
 # Translate urls from the format s3://bucket-name to S3_MOUNT_POINT/bucket
@@ -254,18 +254,24 @@ NGEN_CAL_RUN_DIR = os.path.join(NGEN_CAL_WORK_DIR, 'run_calib')
 NGEN_CAL_VENV = os.path.join(NGEN_CAL_WORK_DIR, 'venv.cal')
 
 # Used when running in NGEN_ENVIRONMENT=DOCKER
-# This assumes that the docker containers have been appropriately tagged as nwm-cal-mgr, nwm-fcst-mgr or ngen-forcing
-CAL_MGR_DOCKER_CMD = f'docker run --network host -v {NGEN_CAL_MOUNT_POINT}:{NGEN_CAL_MOUNT_POINT} nwm-cal-mgr'
-NGEN_FORCING_DOCKER_CMD = f'docker run --entrypoint /ngen-app/bin/run-ngen-forcing.sh -v {NGEN_CAL_MOUNT_POINT}:{NGEN_CAL_MOUNT_POINT} ngen-bmi-forcing'
-NGEN_FORECAST_DOCKER_CMD = f'docker run -v {NGEN_CAL_MOUNT_POINT}:{NGEN_CAL_MOUNT_POINT} nwm-fcst-mgr'
-
-# TODO Is this used?
-# NGEN_CONTAINERS = ['ngen', 'nwm-cal-mgr', 'ngen-bmi-forcing', 'nwm-fcst-mgr']
+# --rm ensures containers are auto-removed after exit
+# Use {name} placeholder for the container name, which will be substituted at runtime
+CAL_MGR_DOCKER_CMD = f'docker run --rm --network host --name {{name}} -v {NGEN_CAL_MOUNT_POINT}:{NGEN_CAL_MOUNT_POINT} nwm-cal-mgr'
+NGEN_FORCING_DOCKER_CMD = f'docker run --rm --entrypoint /ngen-app/bin/run-ngen-forcing.sh --name {{name}} -v {NGEN_CAL_MOUNT_POINT}:{NGEN_CAL_MOUNT_POINT} ngen-bmi-forcing'
+NGEN_FORECAST_DOCKER_CMD = f'docker run --rm --name {{name}} -v {NGEN_CAL_MOUNT_POINT}:{NGEN_CAL_MOUNT_POINT} nwm-fcst-mgr'
 
 # Used when running in NGEN_ENVIRONMENT=LOCAL
 CAL_MGR_SCRIPT = os.path.join(CAL_MGR_REPO_ROOT, 'docker', 'run-ngen-cal.sh')
 NGEN_FORECAST_SCRIPT = os.path.join(NGEN_FORECAST_REPO_ROOT, 'docker', 'run-ngen-fcst.sh')
 FORECAST_FORCING_SCRIPT = os.path.join(NGEN_FORCING_REPO_ROOT, 'docker', 'run-ngen-forcing.sh')
+
+RUNTIME_INFO = {
+    ScriptEnum.CALIBRATION: (CAL_MGR_DOCKER_CMD, CAL_MGR_SCRIPT),
+    ScriptEnum.VALIDATION: (CAL_MGR_DOCKER_CMD, CAL_MGR_SCRIPT),
+    ScriptEnum.VALIDATION_ITERATION: (CAL_MGR_DOCKER_CMD, CAL_MGR_SCRIPT),
+    ScriptEnum.FORECAST: (NGEN_FORECAST_DOCKER_CMD, NGEN_FORECAST_SCRIPT),
+    ScriptEnum.FORECAST_FORCING: (NGEN_FORCING_DOCKER_CMD, FORECAST_FORCING_SCRIPT)
+}
 
 # -----------------------------
 # Job Simulation Flags for use with NGEN_ENVIRONMENT=LOCAL or DOCKER
@@ -275,15 +281,6 @@ SIMULATE_FLAGS = {
     JobType.VALIDATION: False,
     JobType.FORECAST: False,
     JobType.FORECAST_FORCING_DOWNLOAD: False,
-}
-
-RUNTIME_INFO = {
-    ScriptEnum.CALIBRATION: (CAL_MGR_DOCKER_CMD, CAL_MGR_SCRIPT),
-    ScriptEnum.VALIDATION: (CAL_MGR_DOCKER_CMD, CAL_MGR_SCRIPT),
-    ScriptEnum.VALIDATION_ITERATION: (CAL_MGR_DOCKER_CMD, CAL_MGR_SCRIPT),
-    ScriptEnum.FORECAST: (NGEN_FORECAST_DOCKER_CMD, NGEN_FORECAST_SCRIPT),
-    ScriptEnum.FORECAST_FORCING: (NGEN_FORCING_DOCKER_CMD, FORECAST_FORCING_SCRIPT)
-    # TODO Add for Verification
 }
 
 NGEN_ENVIRONMENT_STR = os.getenv('NGEN_ENVIRONMENT', NgenEnvironmentEnum.LOCAL.name)

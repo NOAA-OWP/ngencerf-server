@@ -69,7 +69,9 @@ def run_job_local(run: BaseRun, cmd_line_args: dict[str, str], stdout_file: str,
         spawn_command = [settings.RUNTIME_INFO.get(script_cmd)[1]]
         extra = [stdout_file, venv]
     elif NGEN_ENVIRONMENT == NgenEnvironmentEnum.DOCKER:
-        spawn_command = settings.RUNTIME_INFO.get(script_cmd)[0].split()
+        container_name = get_job_registry_key(run)
+        # Format the docker run command with the container name
+        spawn_command = settings.RUNTIME_INFO.get(script_cmd)[0].format(name=container_name).split()
         extra = [stdout_file]  # Venv not required for Docker
     else:
         spawn_command = []
@@ -100,22 +102,43 @@ def check_local_for_failure(run: BaseRun, future: Future) -> bool:
     try:
         if future.exception() is not None:
             logger.error(f"Exception occurred in {get_job_description(run)}: {future.exception() or 'Unknown error'}")
-            set_job_status(run, StatusEnum.FAILED)
+            # Only mark FAILED if not already CANCELLED
+            if run.status != StatusEnum.CANCELLED.db_instance:
+                set_job_status(run, StatusEnum.FAILED)
+            else:
+                logger.info(f"{get_job_description(run)} already CANCELLED; preserving status despite exception")
             return True
 
         exit_code = future.result()
-        if exit_code == -15 or exit_code == -9:
-            logger.info(f"{get_job_description(run)} was cancelled")
-            set_job_status(run, StatusEnum.CANCELLED)
+
+        # Treat common cancel exit codes as cancellation:
+        # -15 SIGTERM, -9 SIGKILL, 143 = 128+15, 137 = 128+9
+        cancelled_codes = (-15, -9, 143, 137)
+        if exit_code in cancelled_codes:
+            if run.status == StatusEnum.CANCELLED.db_instance:
+                logger.info(f"{get_job_description(run)} was already marked CANCELLED (exit {exit_code})")
+            else:
+                logger.info(f"{get_job_description(run)} was cancelled (exit {exit_code})")
+                set_job_status(run, StatusEnum.CANCELLED)
             return True
-        elif exit_code != 0:
-            logger.error(f"{get_job_description(run)} ending due to abnormal return code {exit_code}")
-            set_job_status(run, StatusEnum.FAILED)
+
+        if exit_code != 0:
+            # Only downgrade to FAILED if not already CANCELLED
+            if run.status != StatusEnum.CANCELLED.db_instance:
+                logger.error(f"{get_job_description(run)} ending due to abnormal return code {exit_code}")
+                set_job_status(run, StatusEnum.FAILED)
+            else:
+                logger.info(f"{get_job_description(run)} ended with nonzero code {exit_code}, but preserving CANCELLED status")
             return True
+
         return False
+
     except Exception as e:
         logger.exception(f"Error in callback for {get_job_description(run)}: {str(e)}")
-        set_job_status(run, StatusEnum.FAILED)
+        if run.status != StatusEnum.CANCELLED.db_instance:
+            set_job_status(run, StatusEnum.FAILED)
+        else:
+            logger.info(f"{get_job_description(run)} already CANCELLED; preserving status despite callback error")
         return True
 
 
@@ -209,32 +232,40 @@ def spawn_job(run: BaseRun, args: list[str], callback_function: Callable[[Future
 
 def cancel_local_job(run: BaseRun) -> bool:
     """
-    Terminate a running local job and remove it from the job registry.
+    Terminate a running job (LOCAL or DOCKER) and remove it from the job registry.
 
     This function attempts to gracefully terminate the process associated with the
     given `run` object. If successful, it removes the job from the global job registry.
 
+    - LOCAL: kills the spawned process directly.
+    - DOCKER: sends `docker kill <container_name>`. Containers use `--rm`, so they're auto-removed after exit.
+
     :param run: The CalibrationRun, ValidationRun, or ForecastRun object to cancel.
     :return: True if the job was successfully terminated, False otherwise.
-
-    # TODO There is a known issue that cancelling a job doesn't actually work if the ngen/ngen-cal is running in a Docker container.
-    # Probably need to do a Docker kill, But that means we need to give each run a unique Docker name.
     """
     job_description = get_job_description(run)
-
     logger.info(f"Cancelling {job_description}")
 
-    if isinstance(run, ForecastRun):
-        # #TODO Special handling.  If we are downloading the forcing data, then we need to send a cancel request to the Forcing server
-        pass
+    key = get_job_registry_key(run)
 
-    process = job_registry.get(get_job_registry_key(run))
-
-    if process:
-        process.terminate()  # Gracefully terminates the process
-
-        logger.info(f"{job_description} has been terminated.")
-        return True
+    if NGEN_ENVIRONMENT == NgenEnvironmentEnum.DOCKER:
+        container_name = key
+        logger.info(f"Killing Docker container {container_name}")
+        result = subprocess.run(["docker", "kill", container_name], check=False, capture_output=True, text=True)
+        if result.returncode == 0:
+            logger.info(f"Container {container_name} killed successfully")
+            job_registry.pop(key, None)
+            return True
+        else:
+            logger.warning(f"Failed to kill container {container_name}: {result.stderr.strip()}")
+            return False
     else:
-        logger.warning(f"No running job found for {job_description}")
-        return False
+        process = job_registry.get(key)
+        if process:
+            process.terminate()
+            logger.info(f"{job_description} has been terminated.")
+            job_registry.pop(key, None)
+            return True
+        else:
+            logger.warning(f"No running job found for {job_description}")
+            return False
