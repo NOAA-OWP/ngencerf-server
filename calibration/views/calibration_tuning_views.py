@@ -21,7 +21,7 @@ from calibration.enums import StatusEnum
 from calibration.enums_vanilla import JobType
 from calibration.models import CalibrationFormulation, CalibrationParameter, CalibrationRun
 from calibration.util import cloud_util
-from calibration.util.caching import get_cached_module_by_name, have_LSTM
+from calibration.util.caching import get_cached_module_by_name, have_LSTM, get_cached_modules_by_id
 from calibration.util.calibration_validators import CalibrationRunSerializer, SaveTuningRequestSerializer, LoadTuningResponseSerializer, \
     GenericResponseSerializer, ErrorResponseSerializer, UploadUserParameterFile, UserParameterFileUploadResponse
 from calibration.util.ngen_locations import get_observational_file_for_job, get_forcing_dir_for_job
@@ -136,32 +136,36 @@ def load_tuning_tab(request: Request) -> Response:
     return Response(response_validator.data)
 
 
-def has_user_selected_tuning_parameters(modules: QuerySet[CalibrationFormulation]) -> bool:
+def has_user_selected_tuning_parameters(formulation_ids: list[int]) -> bool:
     """
-    Determines if any calibration parameters were selected by the user for tuning.
+    Check whether any user-selected tuning parameters exist for the given module IDs.
+    Avoids resolving Module objects via the DB.
 
-    :param modules: QuerySet of CalibrationFormulation objects associated with the calibration run.
-    :return: True if any parameters were selected for tuning, otherwise False.
+    :param formulation_ids: List of module IDs from CalibrationFormulation.
+    :return: True if at least one user-selected parameter exists, else False.
     """
-    return modules.filter(calibrationparameter__user_selected_for_tuning=True).exists()
+
+    return CalibrationParameter.objects.filter(
+        calibration_formulation__module_id__in=formulation_ids,
+        user_selected_for_tuning=True
+    ).exists()
 
 
 def get_parameters(modules: QuerySet[CalibrationFormulation]) -> list[dict[str, str | list[dict[str, str | float | int]]]]:
     """
     Retrieves the calibration parameters for each module in the specified calibration formulation.
 
-    Uses the prefetched `CalibrationParameter` objects to avoid repeated DB hits.
+    Uses `select_related('module')` and prefetched CalibrationParameter objects to avoid DB hits.
 
-    :param modules: QuerySet of CalibrationFormulation objects.
+    :param modules: QuerySet of CalibrationFormulation objects, built with
+                    select_related('module') and Prefetch for calibrationparameter_set.
     :return: List of dicts with the module name and its parameters.
     """
     module_list: list[dict] = []
 
     # 'modules' must be built with select_related('module') and the Prefetch above.
     for formulation in modules:
-        module = get_cached_module_by_name(formulation.module.name)
-        if not module:
-            continue
+        module = formulation.module  # Already populated by select_related
 
         # Use the prefetched list (no DB hits here)
         params = [
@@ -179,48 +183,45 @@ def get_parameters(modules: QuerySet[CalibrationFormulation]) -> list[dict[str, 
         ]
 
         module_list.append({
-            'name': formulation.module.name,
+            'name': module.name,
             'parameters': params,
         })
 
     return module_list
 
 
-def get_parameters_for_export(modules: QuerySet[CalibrationFormulation]) -> list[dict[str, str | float]]:
+def get_parameters_for_export(run: CalibrationRun) -> list[dict]:
     """
-    Prepares calibration parameters for export by collecting only user-selected parameters.
+    Export calibration parameters for all modules in the given calibration run.
+    Uses cached modules to resolve names instead of hitting DB for Module.
 
-    :param modules: QuerySet of CalibrationFormulation instances associated with a calibration run.
-    :return: List of dictionaries containing selected parameter details, including module name.
+    :param run: The CalibrationRun to export parameters from.
+    :return: List of parameter dicts for export.
     """
-    # Materialize the formulation IDs once; avoids a subquery in the filter
-    formulation_ids = list(modules.values_list('id', flat=True))
-    if not formulation_ids:
-        return []
+    modules_by_id = get_cached_modules_by_id()
 
-    rows = (
+    # Query parameters linked to formulations by module_id
+    params = (
         CalibrationParameter.objects
-        .filter(calibration_formulation_id__in=formulation_ids, user_selected_for_tuning=True)
+        .filter(calibration_formulation__calibration_run=run)
         .values(
-            'name',
-            'minimum',
-            'maximum',
-            'initial_value',
-            'calibration_formulation__module__name',
+            "name", "initial_value", "minimum", "maximum",
+            "calibration_formulation__module_id"
         )
     )
 
-    parameter_list: list[dict[str, str | float]] = []
-    for r in rows:
-        parameter_list.append({
-            'name': r['name'],
-            'minimum': r['minimum'],
-            'maximum': r['maximum'],
-            'initial_value': r['initial_value'],
-            'module': r['calibration_formulation__module__name'],
+    result = []
+    for p in params:
+        module_id = p["calibration_formulation__module_id"]
+        module_name = modules_by_id[module_id].name if module_id in modules_by_id else "UNKNOWN"
+        result.append({
+            "name": p["name"],
+            "initial_value": p["initial_value"],
+            "minimum": p["minimum"],
+            "maximum": p["maximum"],
+            "model": module_name,
         })
-
-    return parameter_list
+    return result
 
 
 def compute_time_range(run: CalibrationRun) -> dict[str, datetime]:
@@ -374,8 +375,9 @@ def save_tuning_tab(request: Request) -> Response:
         return ResponseError(parameter_errors)
 
     with transaction.atomic():
-        run.save()
         save_parameters(run, parameters)
+
+    run.save()
 
     ngen_cal_input.ready_to_run(run)
 
@@ -860,7 +862,7 @@ def validate_parameters(run: CalibrationRun, parameters: list[dict[str, str | fl
         calibration_formulation__calibration_run=run
     ).select_related('calibration_formulation__module')
 
-    # Create a lookup dictionary for existing parameters by module name and parameter name
+    # Create a lookup dictionary for existing parameters by (module name, parameter name)
     parameter_lookup = {
         (param.calibration_formulation.module.name, param.name): param
         for param in existing_parameters
@@ -872,22 +874,25 @@ def validate_parameters(run: CalibrationRun, parameters: list[dict[str, str | fl
     value_out_of_bounds = []
 
     for p in parameters:
-        key = (p['module'], p['name'])
+        key = (p['model'], p['name'])
         if key not in parameter_lookup:
             # Check if module is valid
-            if get_cached_module_by_name(p['module']):
+            if get_cached_module_by_name(p['model']):
                 invalid_parameters.append(key)
             else:
                 invalid_modules.append(key)
         else:
-            min_val = p['minimum']
-            max_val = p['maximum']
-            initial = p['initial_value']
-            if not (min_val <= initial <= max_val):
-                value_out_of_bounds.append(
-                    f"Initial value {initial} for parameter '{p['name']}' in module '{p['module']}' "
-                    f"is outside the range [{min_val}, {max_val}]"
-                )
+            min_val = p.get('minimum')
+            max_val = p.get('maximum')
+            initial = p.get('initial_value')
+
+            # Only check range if all values are provided
+            if min_val is not None and max_val is not None and initial is not None:
+                if not (min_val <= initial <= max_val):
+                    value_out_of_bounds.append(
+                        f"Initial value {initial} for parameter '{p['name']}' in module '{p['model']}' "
+                        f"is outside the range [{min_val}, {max_val}]"
+                    )
 
     # Construct messages
     error_messages = []
@@ -933,7 +938,7 @@ def save_parameters(run: CalibrationRun, parameters: list[dict[str, str | float]
         return
 
     parameters_to_update = []
-    selected_for_tuning = set((p['module'], p['name']) for p in parameters)
+    selected_for_tuning = set((p['model'], p['name']) for p in parameters)
 
     # Fetch all CalibrationParameters for the given calibration run in one query
     existing_parameters = list(CalibrationParameter.objects.filter(
@@ -948,7 +953,7 @@ def save_parameters(run: CalibrationRun, parameters: list[dict[str, str | float]
 
     # Update the parameters based on the input
     for p in parameters:
-        key = (p['module'], p['name'])
+        key = (p['model'], p['name'])
         if key in parameter_lookup:
             calibration_param = parameter_lookup[key]
 

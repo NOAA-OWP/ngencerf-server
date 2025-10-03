@@ -5,17 +5,35 @@ from django.core.cache import cache
 
 from calibration.enums import PlotDefinitionsEnum
 from calibration.enums_vanilla import JobType
-from calibration.models import Module, Gage, OptimizationInput, ModuleGroup, CalibrationRun, ValidationRun, ForecastRun, CalibrationFormulation
+from calibration.models import Module, ModuleGroup, Gage, CalibrationRun, ValidationRun, ForecastRun, CalibrationFormulation, OptimizationInput
 
 
 def get_cached_module_by_name(module_name: str) -> Module | None:
     """
-    Retrieve a specific module by name from the cache.
+    Retrieve a single Module instance by name using the cached module map.
 
-    :param module_name: The name of the module.
-    :return: The cached module instance if it exists; otherwise None.
+    - Uses get_cached_modules_with_groups() internally (cached dict of name → Module).
+    - The returned Module is fully loaded with its groups and output_variables,
+      so no extra queries will be triggered when accessing those relations.
+
+    :param module_name: The name of the module to retrieve.
+    :return: The Module instance if found, otherwise None.
     """
     return get_cached_modules_with_groups().get(module_name)
+
+
+@lru_cache(maxsize=1)
+def get_cached_modules_by_id() -> dict[int, Module]:
+    """
+    Retrieve all active Module objects keyed by ID, using the cached module map.
+
+    - Each Module has groups and output_variables prefetched,
+      so no lazy lookups will trigger extra DB queries.
+    - Safe to reuse across requests within the process (also cached in Django cache).
+
+    :return: Dict mapping {module.id → Module instance}.
+    """
+    return {m.id: m for m in get_cached_modules_with_groups().values()}
 
 
 CACHED_GAGES_KEY = 'cached_gages'
@@ -23,9 +41,14 @@ CACHED_GAGES_KEY = 'cached_gages'
 
 def get_cached_gages() -> dict[str, dict[str, str | float | int | None]]:
     """
-    Retrieves all active gages from the cache or the database if not cached.
+    Retrieve all active Gages from cache, falling back to the database on cache miss.
 
-    :return: A dictionary of gages keyed by gage_id, each containing gage details plus its DB id.
+    - Cached under CACHED_GAGES_KEY in Django cache.
+    - Includes all gage attributes needed for lookups and display.
+    - Domain is normalized to 'domain' (instead of 'domain__name').
+    - Results are frozen as dicts (not ORM objects) for cheap reuse.
+
+    :return: Dict mapping {gage_id → dict of gage fields}.
     """
     # Check if the gages are already cached
 
@@ -79,6 +102,11 @@ def get_gage_by_id(gage_id: str) -> dict[str, str | float | int | None] | None:
     """
     Retrieve a single gage by gage_id from the cached gages.
 
+    - Uses get_cached_gages() internally.
+    - Returns None if gage not found or inactive.
+    - Excludes fields not needed by most consumers:
+      ['nws_id', 'domain', 'headwater_calibration', 'is_active'].
+
     :param gage_id: The gage_id to retrieve.
     :return: The gage data if found, otherwise None.
     """
@@ -95,7 +123,12 @@ def get_gage_by_id(gage_id: str) -> dict[str, str | float | int | None] | None:
 
 def get_cached_optimization_inputs(optimization_name: str) -> list[dict[str, str | int | float]]:
     """
-    Retrieve optimization inputs for a specified optimization name from cache or database.
+    Retrieve OptimizationInput rows for the given optimization.
+
+    - Cached per optimization_name (using Django cache).
+    - Only includes active inputs.
+    - Each row is returned as a plain dict with basic fields
+      (name, description, data_type, default_value, min, max, id, is_active).
 
     :param optimization_name: The name of the optimization.
     :return: A list of dictionaries with details of each optimization input (name, description, data_type, etc.).
@@ -117,15 +150,36 @@ def get_cached_optimization_inputs(optimization_name: str) -> list[dict[str, str
     return optimization_inputs
 
 
+CACHED_MODULES_KEY = "cached_modules_with_groups"
+
+
 @lru_cache(maxsize=1)
 def get_cached_modules_with_groups() -> dict[str, Module]:
     """
-    Retrieve active Module objects with prefetched groups from cache or database if not cached.
+    Retrieve all active Module ORM objects with prefetched groups/output_variables,
+    cached so that no further DB hits occur when accessing relationships.
 
-    :return: A dictionary where keys are active module names, and values are Module objects, each with prefetched groups.
+    - Cached globally in Django cache and also with lru_cache.
+    - Prefetch ensures groups and output_variables can be accessed without new queries.
+    - Fully safe to reuse for UI display, validations, or parameter resolution.
+
+    :return Returns a dict keyed by module name.
     """
-    modules = Module.objects.filter(is_active=True).prefetch_related("groups")
-    return {m.name: m for m in modules}
+    modules = cache.get(CACHED_MODULES_KEY)
+    if modules is None:
+        # Eagerly load everything needed (no lazy lookups later)
+        qs = (
+            Module.objects.filter(is_active=True)
+            .prefetch_related("groups", "output_variables")
+            .only("id", "name", "description", "is_active")
+        )
+        modules = {m.name: m for m in qs}
+        # Force evaluate groups/output_variables to avoid lazy loading
+        for m in modules.values():
+            list(m.groups.all())
+            list(m.output_variables.all())
+        cache.set(CACHED_MODULES_KEY, modules, timeout=None)
+    return modules
 
 
 MODULE_GROUPS_CACHE_KEY = 'cached_module_groups'
@@ -133,16 +187,20 @@ MODULE_GROUPS_CACHE_KEY = 'cached_module_groups'
 
 def get_cached_module_groups() -> list[str]:
     """
-    Retrieve a list of active module group names, ordered by 'order', from cache or database if not cached.
+    Retrieve a list of active module group names, ordered by 'order',
+    cached to avoid repeated queries.
 
-    :return: A list of ordered active module group names.
+    - Cached in Django cache under MODULE_GROUPS_CACHE_KEY.
+    - Ordered by the 'order' field from the DB.
+
+    :return: List of module group names (strings).
     """
     module_groups = cache.get(MODULE_GROUPS_CACHE_KEY)
-
     if module_groups is None:
-        module_groups = list(ModuleGroup.objects.filter(is_active=True).order_by('order').values_list('name', flat=True))
+        qs = ModuleGroup.objects.filter(is_active=True).order_by("order").only("id", "name", "order")
+        # Force eval to freeze them in cache
+        module_groups = [mg.name for mg in qs]
         cache.set(MODULE_GROUPS_CACHE_KEY, module_groups, None)
-
     return module_groups
 
 
@@ -151,6 +209,12 @@ def get_filtered_plot_definitions(
 ) -> list[dict] | dict | None:
     """
     Retrieve filtered plot definitions for the specified run and plot name, with a case-insensitive match.
+
+    Behavior:
+    - ForecastRun → only forecast plots.
+    - ValidationRun or CalibrationRun with automatic_validation → validation plots included.
+    - CalibrationRun with LSTM module → only plots with lstm_flag=True.
+    - Otherwise → plots must have a valid_optimizations list containing run.optimization.name.
 
     :param run: The run object, which could be a calibration, validation, or forecast run.
     :param plot_name: The name of the plot to filter by (case-insensitive), or None to retrieve all valid plots.
@@ -168,11 +232,11 @@ def get_filtered_plot_definitions(
 
     def matches_common_criteria(plot: dict) -> bool:
         return (
-            (plot_name is None or plot['name'].lower() == plot_name_lower)
-            and (
-                    plot['job_type'] == JobType.CALIBRATION.value or
-                    (include_validation_plots and plot['job_type'] == JobType.VALIDATION.value)
-            )
+                (plot_name is None or plot['name'].lower() == plot_name_lower)
+                and (
+                        plot['job_type'] == JobType.CALIBRATION.value or
+                        (include_validation_plots and plot['job_type'] == JobType.VALIDATION.value)
+                )
         )
 
     if isinstance(run, ForecastRun):
@@ -209,9 +273,21 @@ def get_filtered_plot_definitions(
     return filtered_plots[0] if first_match and filtered_plots else filtered_plots
 
 
-# Weird place for this function, but needed to be here to avoid circular imports
 def have_LSTM(run: CalibrationRun) -> bool:
-    formulations = CalibrationFormulation.objects.filter(calibration_run=run).select_related("module")
-    module_names = {formulation.module.name for formulation in formulations}
+    """
+    Check if a given calibration run includes an LSTM module.
 
-    return 'LSTM' in module_names
+    - Queries CalibrationFormulation rows (runtime data).
+    - Resolves module objects via cached module map (no extra SELECTs on Module).
+    - Returns True if any formulation’s module resolves to 'LSTM'.
+
+    :param run: The calibration run instance.
+    :return: True if the run includes the LSTM module, False otherwise.
+    """
+    # Fetch formulations for the run (runtime dynamic data)
+    formulations = CalibrationFormulation.objects.filter(
+        calibration_run=run
+    ).only("module_id")
+
+    modules_by_id = get_cached_modules_by_id()
+    return any(modules_by_id[f.module_id].name == "LSTM" for f in formulations if f.module_id in modules_by_id)

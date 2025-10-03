@@ -15,7 +15,7 @@ from calibration.enums import StatusEnum, ForcingSourceEnum, ObservationalSource
 from calibration.enums_vanilla import NgenEnvironmentEnum
 from calibration.models import CalibrationOptimizationInput, CalibrationStopCriteria, CalibrationSlothParam, \
     CalibrationParameter, CalibrationFormulation, CalibrationRun
-from calibration.util.caching import get_cached_optimization_inputs, get_cached_module_by_name, have_LSTM
+from calibration.util.caching import get_cached_optimization_inputs, have_LSTM, get_cached_modules_with_groups
 from calibration.util.file_util import get_single_file
 from calibration.util.geopkg import get_geometry_from_gpkg, normalize_gpkg
 from calibration.util.ngen_locations import CFE_LIB, TOPMD_LIB, SFT_LIB, SLOTH_LIB, SMP_LIB, LASAM_LIB, NOAH_LIB, NGEN_EXE, \
@@ -283,31 +283,33 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
             # Need to set parquet file based on domain
             datafile['attributes_file'] = os.path.join(PARQUET_DIR, f'{run.gage.domain.name.lower()}_model_attributes.parquet')
 
-        formulations = CalibrationFormulation.objects.filter(calibration_run=run)
+        formulations = CalibrationFormulation.objects.filter(calibration_run=run).only("module_id")
 
         if not is_missing(formulations, 'Modules', error_object) and not is_missing(run.user_formulation_name, 'Formulation name', error_object):
             general['formulation'] = run.user_formulation_name
 
-            module_names = {f.module.name for f in formulations}
+            # Use cached modules to resolve names
+            cached_modules = get_cached_modules_with_groups()
+            module_names = {cached_modules[f.module_id].name for f in formulations if f.module_id in cached_modules}
             general['models'] = ', '.join(module_names)
 
-            # Check fatal errors
+            # Check fatal errors using cached module names
             formulation_errors, _, _ = validate_formulation(module_names)
             for f in formulation_errors:
                 error_object.add_error(f)
 
             # See if we have at least one module in Snowmelt
             general['output_swe'] = any(
-                any(group.name == "Snowmelt" for group in get_cached_module_by_name(name).groups.all())
-                for name in module_names
+                any(group.name == "Snowmelt" for group in cached_modules[name].groups.all())
+                for name in module_names if name in cached_modules
             )
 
             if run.use_sloth:
                 general['models'] += f', {SLOTH}'
 
-            # Dynamically add keys and values directly using the formulation list
-            for f in formulations:
-                datafile[get_bmi_config_key(f.module.name)] = get_bmi_config_dir_for_module(run, f.module.name)
+            # Dynamically add BMI config paths based on cached module names
+            for name in module_names:
+                datafile[get_bmi_config_key(name)] = get_bmi_config_dir_for_module(run, name)
 
             general['is_aet_rootzone'] = run.is_aet_rootzone
 
@@ -416,12 +418,17 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
             calibration['peak_flow_threshold'] = run.peak_flow_threshold
 
         if run.use_sloth:
-            sloth_params = (CalibrationSlothParam.objects.filter(calibration_run=run)
-                            .values('param_name', 'param_count', 'param_units', 'param_location', 'param_value',
-                                    'maps_to_variable_name', module=F('maps_to_module__name')))
+            sloth_params = list(
+                CalibrationSlothParam.objects.filter(calibration_run=run)
+                .values('param_name', 'param_count', 'param_units', 'param_location',
+                        'param_value', 'maps_to_variable_name', 'maps_to_module_id')
+            )
+
+            cached_modules = get_cached_modules_with_groups()
 
             # Required fields for sloth parameters
-            required_fields = ['param_name', 'param_count', 'param_units', 'param_location', 'param_value', 'module', 'maps_to_variable_name']
+            required_fields = ['param_name', 'param_count', 'param_units', 'param_location', 'param_value', 'maps_to_module_id',
+                               'maps_to_variable_name']
 
             sloth_error = False
             sloth_lines = []
@@ -433,30 +440,33 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
                     sloth_error = True
                     error_object.add_warning(f"Missing fields {', '.join(missing_fields)} for sloth parameter '{s['param_name']}'")
                 else:
+                    module_name = cached_modules[s['maps_to_module_id']].name if s['maps_to_module_id'] in cached_modules else "UNKNOWN"
                     sloth_lines.append(
-                        line_format.format(s['param_name'], s['param_count'], s['param_units'], s['param_location'], s['param_value'], s['module'],
-                                           s['maps_to_variable_name'])
+                        line_format.format(
+                            s['param_name'], s['param_count'], s['param_units'],
+                            s['param_location'], s['param_value'],
+                            module_name, s['maps_to_variable_name']
+                        )
                     )
 
             # If no errors and build is True, write the sloth parameters to a file
             if not sloth_error and build:
                 sloth_parameter_file = os.path.join(job_data_dir, 'sloth_parameters.txt')
-
-                sloth_parameter_content = header_format.format('name', 'count', 'units', 'location', 'value ', 'maps_to_module',
-                                                               'maps_to_variable_name') + '\n'.join(
-                    line_format.format(s['param_name'], s['param_count'], s['param_units'], s['param_location'], s['param_value'], s['module'],
-                                       s['maps_to_variable_name'])
-                    for s in sloth_params
-                )
+                sloth_parameter_content = header_format.format(
+                    'name', 'count', 'units', 'location', 'value ', 'maps_to_module', 'maps_to_variable_name'
+                ) + '\n'.join(sloth_lines)
                 with open(sloth_parameter_file, 'w') as f:
                     f.write(sloth_parameter_content)
-
                 datafile['sloth_parameter_file'] = sloth_parameter_file
 
-        params = list(CalibrationParameter.objects
-                      .filter(calibration_formulation__calibration_run=run, user_selected_for_tuning=True)
-                      .select_related('calibration_formulation__module')
-                      .values('name', 'initial_value', 'minimum', 'maximum', model=F('calibration_formulation__module__name')))
+        # --- Calibration parameters (use cache) ---
+        params = list(
+            CalibrationParameter.objects
+            .filter(calibration_formulation__calibration_run=run, user_selected_for_tuning=True)
+            .values('name', 'initial_value', 'minimum', 'maximum', 'calibration_formulation__module_id')
+        )
+
+        cached_modules = get_cached_modules_with_groups()
 
         if not params and not have_LSTM_flag:
             error_object.add_warning("At least one parameter must be specified")
@@ -465,12 +475,21 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
             for p in params:
                 # Make sure everything is specified
                 if not p['name'] or p['initial_value'] is None or p['minimum'] is None or p['maximum'] is None:
+                    module_name = cached_modules.get(p['calibration_formulation__module_id']).name \
+                        if p['calibration_formulation__module_id'] in cached_modules else "UNKNOWN"
                     param_error = True
                     error_object.add_warning(
-                        f"value ({p['initial_value']}), min ({p['minimum']}) and max ({p['maximum']}) must be specified for parameter '{p['name']}'  (module {p['model']})")
+                        f"value ({p['initial_value']}), min ({p['minimum']}) and max ({p['maximum']}) "
+                        f"must be specified for parameter '{p['name']}' (module {module_name})"
+                    )
 
             if not param_error and build:
                 calibration['calib_parameter_file'] = os.path.join(job_data_dir, 'calib_parameter_dir')
+                # Swap module_id → name before writing files
+                for p in params:
+                    module_name = cached_modules[p['calibration_formulation__module_id']].name \
+                        if p['calibration_formulation__module_id'] in cached_modules else "UNKNOWN"
+                    p['model'] = module_name
                 write_parameter_files(params, calibration['calib_parameter_file'])
 
         if NGEN_ENVIRONMENT == NgenEnvironmentEnum.PARALLEL_WORKS:
@@ -499,7 +518,7 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
         run.save()
 
     # -----------------------------
-    # FILE WRITE PHASE (unchanged)
+    # FILE WRITE PHASE
     # -----------------------------
     if build and not error_object.has_errors() and not error_object.has_warnings():
         config_file = build_config(config, run.job_data_dir)

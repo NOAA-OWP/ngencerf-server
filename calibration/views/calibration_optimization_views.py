@@ -218,12 +218,13 @@ def save_optimization_tab(request) -> Response:
     run.streamflow_threshold = streamflow_threshold
     run.peak_flow_threshold = peak_flow_threshold
 
+    keep_ids = {obj.optimization_input_id for obj in prepared_inputs} if prepared_inputs else set()
     with transaction.atomic():
         if stop_criteria is not None:
             # I'm assuming for now that there is just one CalibrationStopCriteria for this run, but that might change in the future
             CalibrationStopCriteria.objects.update_or_create(calibration_run=run, defaults={"value": stop_criteria})
 
-        write_optimization_inputs(run, prepared_inputs)
+        write_optimization_inputs(run, prepared_inputs, keep_ids)
 
         run.save()
 
@@ -335,32 +336,33 @@ def validate_objective_function(run: CalibrationRun, objective_function_name: st
     return None
 
 
-def write_optimization_inputs(run: CalibrationRun, prepared_inputs: list[CalibrationOptimizationInput] | None) -> None:
+def write_optimization_inputs(run: CalibrationRun, prepared_inputs: list[CalibrationOptimizationInput] | None, keep_ids: set[int] | None = None) -> None:
     """
-    Write optimization inputs to the database for a calibration run.
+    Persist prepared optimization inputs for a calibration run.
 
-    - Updates existing rows in place (via bulk upsert) for inputs included in `prepared_inputs`.
-    - Removes any previously stored inputs for this run that are not present in `prepared_inputs`.
-    - Inserts new inputs for this run that do not already exist.
+    This function replaces any existing optimization inputs tied to the given run
+    with the provided set of prepared inputs. It performs a full overwrite:
+    - Deletes all existing `CalibrationOptimizationInput` records for the run.
+    - Inserts new rows using the validated/prepared input data.
 
-    Assumes a unique constraint on (calibration_run, optimization_input).
+    Because it modifies the database, callers are expected to wrap this function
+    inside a `transaction.atomic()` block when used alongside other updates to the run.
 
-    :param run: The CalibrationRun instance.
-    :param prepared_inputs: List of prepared CalibrationOptimizationInput objects to persist.
+    :param run: The CalibrationRun instance whose optimization inputs should be updated.
+    :param prepared_inputs: A list of validated optimization input dictionaries,
+                            typically returned by `validate_optimizations()`.
     :return: None
     """
     # If there are no inputs, this means the run should have none — delete and exit.
     if not prepared_inputs:
         CalibrationOptimizationInput.objects.filter(calibration_run=run).delete()
         return
+    keep_ids = keep_ids or {obj.optimization_input_id for obj in prepared_inputs}
 
-    # Keep only these optimization_input_ids for this run
-    keep_ids = {obj.optimization_input_id for obj in prepared_inputs}
-
-    # Remove rows that are no longer present
-    CalibrationOptimizationInput.objects.filter(calibration_run=run).exclude(
-        optimization_input_id__in=keep_ids
-    ).delete()
+    (CalibrationOptimizationInput.objects
+     .filter(calibration_run=run)
+     .exclude(optimization_input_id__in=keep_ids)
+     .delete())
 
     # Upsert the remaining/new ones in bulk:
     # - update existing rows' value

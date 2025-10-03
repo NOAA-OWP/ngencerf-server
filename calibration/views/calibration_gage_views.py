@@ -28,7 +28,7 @@ from calibration.util.ngen_locations import get_forcing_dir_for_job, get_observa
 from calibration.views import ngen_cal_input
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import get_calibration_run, ResponseError, handle_exceptions, validate_response, validate_request, \
-    png_str_to_base64_url, truncate_large_fields, get_valid_path, get_user_email, get_elapsed_str, readonly_transaction
+    png_str_to_base64_url, truncate_large_fields, get_valid_path, get_user_email, get_elapsed_str
 from calibration.views.data_services import get_geopackage_from_data_services, get_observational_data_from_data_services, \
     get_forcing_data_from_s3, DataServicesException, get_module_metadata_from_data_services, clear_times
 

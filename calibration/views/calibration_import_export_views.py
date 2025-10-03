@@ -14,7 +14,7 @@ from rest_framework.response import Response
 
 from calibration.enums import StatusEnum, ForcingSourceEnum, ObservationalSourceEnum, GeopackageSourceEnum, JobGenesis
 from calibration.models import CalibrationFormulation, CalibrationStopCriteria, Gage, CalibrationRun
-from calibration.util.caching import get_cached_module_by_name
+from calibration.util.caching import get_cached_module_by_name, get_cached_modules_by_id
 from calibration.util.calibration_validators import CalibrationRunSerializer, ExportResponseSerializer, ErrorResponseSerializer, \
     LoadCalibrationJobSerializer, LoadCalibrationRunResponseSerializer
 from calibration.util.cloud_util import path_exists
@@ -459,11 +459,15 @@ def load_calibration_run_data(run: CalibrationRun, export: bool = False, include
         serialized_time_range['end_time'] = time_range['end_time'].isoformat()
     logger.info(f"Time range computation completed in {time.time() - time_range_start:.2f}s")
 
-    module_objects = CalibrationFormulation.objects.filter(calibration_run=run)
+    # Get module IDs once for this run
+    module_ids = list(
+        CalibrationFormulation.objects
+        .filter(calibration_run=run)
+        .values_list('module_id', flat=True)
+    )
 
     geopackage_path = get_valid_path(run.geopackage_eds_file_path, lambda: get_single_file(get_geopackage_dir_for_job(run)))
-    num_catchments = len(get_geometry_from_gpkg(geopackage_path)['catchments'].keys()) if geopackage_path and os.path.exists(
-        geopackage_path) else None
+    num_catchments = len(get_geometry_from_gpkg(geopackage_path)['catchments'].keys()) if geopackage_path and os.path.exists(geopackage_path) else None
 
     #############################
     # Export or Clone Mode
@@ -483,14 +487,12 @@ def load_calibration_run_data(run: CalibrationRun, export: bool = False, include
             metadata['failure_messages'] = fm
 
         calibration_run_data['metadata'] = metadata
-
         calibration_run_data['run_after_import'] = False
-
         calibration_run_data['gage_id'] = run.gage.gage_id if run.gage else None
-
         calibration_run_data['forcing_source'] = run.forcing_source_requested.name if run.forcing_source_requested else None
 
-        calibration_run_data['parameters'] = get_parameters_for_export(module_objects)  # type: ignore
+        # Use cached modules when exporting parameters
+        calibration_run_data['parameters'] = get_parameters_for_export(run)
 
         # For export, we need these paths only for user-uploaded data, so we can copy the data to the newly imported job
 
@@ -558,7 +560,7 @@ def load_calibration_run_data(run: CalibrationRun, export: bool = False, include
         calibration_run_data['external_data_status'] = get_data_files_status(run)
         logger.info(f"Data Files status completed in {time.time() - data_files_status_start:.2f}s")
 
-        calibration_run_data['parameters_selected'] = has_user_selected_tuning_parameters(module_objects)  # type: ignore
+        calibration_run_data['parameters_selected'] = has_user_selected_tuning_parameters(module_ids)
         logger.info(f"UI display data preparation completed in {time.time() - ui_display_start:.2f}s")
 
     #############################
@@ -578,19 +580,14 @@ def load_calibration_run_data(run: CalibrationRun, export: bool = False, include
 
     calibration_run_data['formulation_name'] = run.user_formulation_name
 
-    # Extract module names
-    modules = set(
-        CalibrationFormulation.objects
-        .filter(calibration_run=run)
-        .values_list('module__name', flat=True)
-    )
-
-    calibration_run_data['modules'] = modules
-
+    # Use cache for module resolution
+    modules_by_id = get_cached_modules_by_id()
+    module_names = {modules_by_id[mid].name for mid in module_ids if mid in modules_by_id}
+    calibration_run_data['modules'] = module_names
     calibration_run_data['is_aet_rootzone'] = run.is_aet_rootzone
 
     # Validation warnings
-    formulation_errors, formulation_warnings, _ = validate_formulation(modules)
+    formulation_errors, formulation_warnings, _ = validate_formulation(module_names)
     if formulation_warnings and not export:
         calibration_run_data['formulation_warnings'] = formulation_warnings
     if formulation_errors and not export:
@@ -605,7 +602,7 @@ def load_calibration_run_data(run: CalibrationRun, export: bool = False, include
     #############################
     # Tuning Data
     #############################
-    logger.info("Processing turning data")
+    logger.info("Processing tuning data")
     tuning_start = time.time()
 
     calibration_run_data['automatic_validation'] = run.automatic_validation

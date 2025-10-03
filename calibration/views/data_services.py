@@ -9,7 +9,7 @@ from django.db.models import QuerySet
 
 from calibration.enums import ForcingSourceEnum
 from calibration.models import CalibrationParameter, CalibrationFormulation, CalibrationRun
-from calibration.util.caching import get_cached_module_by_name
+from calibration.util.caching import get_cached_module_by_name, get_cached_modules_by_id
 from calibration.util.calibration_validators import ModuleDataListSerializer, S3FileValidator
 from calibration.util.cloud_util import copy_tree, path_exists, _join_url, is_dir
 from calibration.util.ngen_locations import get_bmi_config_dir_for_module
@@ -258,9 +258,15 @@ def get_module_metadata_from_data_services(run: CalibrationRun,
     """
     gage = run.gage
 
-    # Collect module names from calibration formulations
-    my_module_names_set = list(calibration_formulations.values_list('module__name', flat=True))
-    my_module_names_set[0] = my_module_names_set[0]
+    # Use cached modules to resolve names (avoid DB hit)
+    modules_by_id = get_cached_modules_by_id()
+
+    # Only fetch module_id from the DB
+    my_module_names_set = [
+        modules_by_id[f.module_id].name
+        for f in calibration_formulations.only("module_id")
+        if f.module_id in modules_by_id
+    ]
 
     # Fetch module metadata from Data Services or use test data
     if settings.ENTERPRISE_DATA_MODULE_METADATA_ENDPOINT[0]:
@@ -297,7 +303,9 @@ def get_module_metadata_from_data_services(run: CalibrationRun,
     eds_errors = []
 
     # Preload formulations into a dict (avoid per-loop .get())
-    formulation_map = {f.module_id: f for f in calibration_formulations.select_related("module")}
+    formulation_map = {
+        f.module_id: f for f in calibration_formulations
+    }
 
     new_params: list[CalibrationParameter] = []
     to_update: list[CalibrationParameter] = []
@@ -321,9 +329,9 @@ def get_module_metadata_from_data_services(run: CalibrationRun,
                 logger.warning(f'Ignoring extra module from Data Services - {module_name}')
                 continue
 
-            # Fetch the corresponding module instance
+            # Resolve module via cache
             module_instance = get_cached_module_by_name(module_name)
-            calibration_formulation = formulation_map.get(module_instance.id)
+            calibration_formulation = formulation_map.get(module_instance.id if module_instance else None)
             if not calibration_formulation:
                 raise DataServicesException(f"No formulation found for module {module_name}")
 
