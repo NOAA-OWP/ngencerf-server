@@ -288,12 +288,25 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
         if not is_missing(formulations, 'Modules', error_object) and not is_missing(run.user_formulation_name, 'Formulation name', error_object):
             general['formulation'] = run.user_formulation_name
 
-            # Use cached modules to resolve names
-            cached_modules = get_cached_modules_with_groups()
-            module_names = {cached_modules[f.module_id].name for f in formulations if f.module_id in cached_modules}
+            # ----------------------------
+            # Module resolution and formulation validation
+            # ----------------------------
+            # Use cached modules (keyed by name) and also build an ID map
+            cached_modules = get_cached_modules_with_groups()  # {name: Module}
+            cached_modules_by_id = {m.id: m for m in cached_modules.values()}  # {id: Module}
+
+            # Resolve module names using the cache
+            module_names = set()
+            for f in formulations:
+                module = cached_modules_by_id.get(f.module_id)
+                if not module:
+                    raise ValueError(f"Unknown module ID {f.module_id} (not found in cache)")
+                module_names.add(module.name)
+
+            # Store resolved model list in 'general' for logging/display
             general['models'] = ', '.join(module_names)
 
-            # Check fatal errors using cached module names
+            # Validate formulation with proper module names
             formulation_errors, _, _ = validate_formulation(module_names)
             for f in formulation_errors:
                 error_object.add_error(f)
