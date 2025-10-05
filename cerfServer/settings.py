@@ -267,7 +267,6 @@ NGEN_CAL_VENV = os.path.join(NGEN_CAL_WORK_DIR, 'venv.cal')
 # --rm ensures containers are auto-removed after exit
 # Use {name} placeholder for the container name, which will be substituted at runtime
 CAL_MGR_DOCKER_CMD = f'docker run --rm --network host --name {{name}} -v {NGEN_CAL_MOUNT_POINT}:{NGEN_CAL_MOUNT_POINT} nwm-cal-mgr'
-NGEN_FORCING_DOCKER_CMD = f'docker run --rm --entrypoint /ngen-app/bin/run-ngen-forcing.sh --name {{name}} -v {NGEN_CAL_MOUNT_POINT}:{NGEN_CAL_MOUNT_POINT} ngen-bmi-forcing'
 NGEN_FORECAST_DOCKER_CMD = f'docker run --rm --name {{name}} -v {NGEN_CAL_MOUNT_POINT}:{NGEN_CAL_MOUNT_POINT} nwm-fcst-mgr'
 
 # Used when running in NGEN_ENVIRONMENT=LOCAL
@@ -280,7 +279,6 @@ RUNTIME_INFO = {
     ScriptEnum.VALIDATION: (CAL_MGR_DOCKER_CMD, CAL_MGR_SCRIPT),
     ScriptEnum.VALIDATION_ITERATION: (CAL_MGR_DOCKER_CMD, CAL_MGR_SCRIPT),
     ScriptEnum.FORECAST: (NGEN_FORECAST_DOCKER_CMD, NGEN_FORECAST_SCRIPT),
-    ScriptEnum.FORECAST_FORCING: (NGEN_FORCING_DOCKER_CMD, FORECAST_FORCING_SCRIPT)
 }
 
 # -----------------------------
