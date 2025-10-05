@@ -112,6 +112,9 @@ def about(output_path: str | None = None) -> int:
     Returns:
         int: Exit code (0 for success, 1 for failure).
     """
+    # Resolve and validate output path before contacting the server
+    final_path = resolve_output_path(output_path, "about_ngencerf.json")
+
     response_json, success = post_with_spinner_and_retry(
         "Sending request to server...",
         "/calibration/get_git_info/",
@@ -120,7 +123,6 @@ def about(output_path: str | None = None) -> int:
     if not success:
         return 1
 
-    final_path = resolve_output_path(output_path, "about_ngencerf.json")
     if response_json and (git_info := response_json.get("git_info")):
         with open(final_path, "w", encoding="utf-8") as f:
             json.dump(git_info, f, indent=2)
@@ -236,6 +238,9 @@ def download_zip(calibration_run_id: int, output_path: str | None = None) -> int
     """
     print(f"Downloading ZIP for calibration run: {calibration_run_id}")
 
+    # Resolve and validate path early
+    final_path = resolve_output_path(output_path, f"calibration_job_{calibration_run_id}.zip")
+
     payload = {"calibration_run_id": calibration_run_id}
     response_json, success = post_with_spinner_and_retry(
         "Downloading zip...",
@@ -246,8 +251,6 @@ def download_zip(calibration_run_id: int, output_path: str | None = None) -> int
     )
     if not success:
         return 1
-
-    final_path = resolve_output_path(output_path, f"calibration_job_{calibration_run_id}.zip")
 
     # Save actual content in a second call (streaming)
     resp = requests.post(
@@ -455,6 +458,12 @@ def list_jobs(output_path: str | None = None) -> int:
     :param output_path: Path to save the job list (optional)
     :return: 0 on success, 1 on failure
     """
+    # Resolve and validate path early
+    final_path = resolve_output_path(
+        output_path,
+        f"calibration_jobs_{datetime.now().strftime('%Y-%m-%d_%H%M')}.md"
+    )
+
     response_json, success = post_with_spinner_and_retry(
         "Fetching job list...",
         "/calibration/get_calibration_jobs/",
@@ -491,11 +500,6 @@ def list_jobs(output_path: str | None = None) -> int:
     ]
 
     markdown_table = tabulate.tabulate(rows, headers=headers, tablefmt="github")
-
-    final_path = resolve_output_path(
-        output_path,
-        f"calibration_jobs_{datetime.now().strftime('%Y-%m-%d_%H%M')}.md"
-    )
 
     with open(final_path, "w", encoding="utf-8") as f:
         f.write(markdown_table)
@@ -640,6 +644,9 @@ def handle_export_display(calibration_run_id: int, output_path: str | None = Non
     :param display: Whether to print the job to the console
     :return: 0 on success, 1 on failure
     """
+    # Resolve and validate output file early
+    final_path = resolve_output_path(output_path, f"export_{calibration_run_id}.json")
+
     payload = {"calibration_run_id": calibration_run_id}
     response_json, success = post_with_spinner_and_retry(
         "Fetching job...",
@@ -653,7 +660,6 @@ def handle_export_display(calibration_run_id: int, output_path: str | None = Non
     if display:
         _pretty_print_job(calibration_run_id, response_json)
 
-    final_path = resolve_output_path(output_path, f"export_{calibration_run_id}.json")
     with open(final_path, "w", encoding="utf-8") as f:
         json.dump(response_json, f, indent=2)
 
@@ -682,6 +688,9 @@ def generate_regionalization_files(calibration_run_ids: list[int] | str, output_
 
     print(f"Generating regionalization files for calibration run jobs {calibration_run_ids}")
     payload = {"calibration_run_ids": calibration_run_ids}
+
+    # Pre-resolve final output directory before any network calls
+    final_dir = os.path.dirname(resolve_output_path(output_path, "regionalization_files.zip"))
 
     # Create a temporary directory for downloading the ZIP
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -718,9 +727,6 @@ def generate_regionalization_files(calibration_run_ids: list[int] | str, output_
             for chunk in resp.iter_content(chunk_size=8192):
                 if chunk:
                     f.write(chunk)
-
-        # Resolve final output directory
-        final_dir = os.path.dirname(resolve_output_path(output_path, "regionalization_files.zip"))
 
         # Extract ZIP contents to output directory
         try:
@@ -798,10 +804,12 @@ def _pretty_print_job(calibration_run_id: int, data: dict) -> None:
 def resolve_output_path(output_path: str | None, default_filename: str) -> str:
     """
     Resolves the final output path for a file, handling directory, relative, and full file paths.
+    Verifies that the resulting directory is writable by the current user before returning it.
 
     :param output_path: The provided output path, which can be a directory, relative file name, or full file path.
     :param default_filename: The default filename to use if output_path is a directory or filename without a path.
     :return: The resolved full file path.
+    :raises SystemExit: If the output directory is not writable.
     """
     # Determine the base directory
     if output_path is None or output_path == "__DEFAULT__":
@@ -823,6 +831,19 @@ def resolve_output_path(output_path: str | None, default_filename: str) -> str:
             else:
                 # Ensure the directory exists for the specified file path
                 os.makedirs(dir_name, exist_ok=True)
+
+    # --- NEW: Check writability ---
+    if os.path.exists(output_path):
+        # File exists → check if user can write to it
+        if not os.access(output_path, os.W_OK):
+            print(f"Error: File '{output_path}' is not writable by the current user.")
+            sys.exit(1)
+    else:
+        # File doesn't exist → check parent directory instead
+        parent_dir = os.path.dirname(output_path) or os.getcwd()
+        if not os.access(parent_dir, os.W_OK):
+            print(f"Error: Directory '{parent_dir}' is not writable by the current user.")
+            sys.exit(1)
 
     return output_path
 
