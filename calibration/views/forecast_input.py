@@ -60,14 +60,10 @@ def create_forecast_input(run: ForecastRun | ColdStartRun) -> tuple[ErrorReport 
     forcing = config['Forcing']
 
     forcing['forecast_configuration'] = run.configuration.internal_name
-    if isinstance(run, ForecastRun):
-        forcing['cycle_datetime'] = format_datetime(run.cycle_date)
-        # forcing.pop('cold_start_datetime')
-    else:
+    forcing['cycle_datetime'] = format_datetime(run.cycle_date)
+
+    if isinstance(run, ColdStartRun):
         forcing['cold_start_datetime'] = format_datetime(run.cold_start_date)
-        # TODO Setting this temporarily to avoid parsing error
-        forcing['cycle_datetime'] = format_datetime(run.cold_start_date)
-        # forcing.pop('cycle_datetime')
 
     forcing['use_cold_start'] = isinstance(run, ColdStartRun)
 

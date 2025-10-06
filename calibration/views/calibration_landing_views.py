@@ -277,7 +277,7 @@ def create_and_run_forecast(request: Request) -> Response:
         'message': msg,
         'calibration_run_id': calibration_run.id,
         'forecast_run_id': forecast_run.id,
-        'cold_start_run_id': cold_start_run.id,
+        'cold_start_run_id': cold_start_run.id if run_cold_start else None,
         'submit_date': cold_start_run.submit_date if run_cold_start else forecast_run.submit_date
     }
 
