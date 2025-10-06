@@ -206,6 +206,10 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
 
         have_LSTM_flag = have_LSTM(run)
 
+        # --- Load cache once ---
+        cached_modules_by_name = get_cached_modules_with_groups()  # {name: Module}
+        cached_modules_by_id = {m.id: m for m in cached_modules_by_name.values()}  # {id: Module}
+
         catchments = None
         # Validate and configure the gage ID and station name
         if not is_missing(run.gage, 'gage_id', error_object):
@@ -288,20 +292,7 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
         if not is_missing(formulations, 'Modules', error_object) and not is_missing(run.user_formulation_name, 'Formulation name', error_object):
             general['formulation'] = run.user_formulation_name
 
-            # ----------------------------
-            # Module resolution and formulation validation
-            # ----------------------------
-            # Use cached modules (keyed by name) and also build an ID map
-            cached_modules = get_cached_modules_with_groups()  # {name: Module}
-            cached_modules_by_id = {m.id: m for m in cached_modules.values()}  # {id: Module}
-
-            # Resolve module names using the cache
-            module_names = set()
-            for f in formulations:
-                module = cached_modules_by_id.get(f.module_id)
-                if not module:
-                    raise ValueError(f"Unknown module ID {f.module_id} (not found in cache)")
-                module_names.add(module.name)
+            module_names = {cached_modules_by_id[f.module_id].name for f in formulations}
 
             # Store resolved model list in 'general' for logging/display
             general['models'] = ', '.join(module_names)
@@ -313,8 +304,8 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
 
             # See if we have at least one module in Snowmelt
             general['output_swe'] = any(
-                any(group.name == "Snowmelt" for group in cached_modules[name].groups.all())
-                for name in module_names if name in cached_modules
+                any(group.name == "Snowmelt" for group in cached_modules_by_name[name].groups.all())
+                for name in module_names
             )
 
             if run.use_sloth:
@@ -453,7 +444,7 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
                     sloth_error = True
                     error_object.add_warning(f"Missing fields {', '.join(missing_fields)} for sloth parameter '{s['param_name']}'")
                 else:
-                    module_name = cached_modules[s['maps_to_module_id']].name if s['maps_to_module_id'] in cached_modules else "UNKNOWN"
+                    module_name = cached_modules[s['maps_to_module_id']].name
                     sloth_lines.append(
                         line_format.format(
                             s['param_name'], s['param_count'], s['param_units'],
@@ -479,8 +470,6 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
             .values('name', 'initial_value', 'minimum', 'maximum', 'calibration_formulation__module_id')
         )
 
-        cached_modules = get_cached_modules_with_groups()
-
         if not params and not have_LSTM_flag:
             error_object.add_warning("At least one parameter must be specified")
         else:
@@ -488,8 +477,7 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
             for p in params:
                 # Make sure everything is specified
                 if not p['name'] or p['initial_value'] is None or p['minimum'] is None or p['maximum'] is None:
-                    module_name = cached_modules.get(p['calibration_formulation__module_id']).name \
-                        if p['calibration_formulation__module_id'] in cached_modules else "UNKNOWN"
+                    module_name = cached_modules_by_id[p['calibration_formulation__module_id']].name
                     param_error = True
                     error_object.add_warning(
                         f"value ({p['initial_value']}), min ({p['minimum']}) and max ({p['maximum']}) "
@@ -500,9 +488,7 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
                 calibration['calib_parameter_file'] = os.path.join(job_data_dir, 'calib_parameter_dir')
                 # Swap module_id → name before writing files
                 for p in params:
-                    module_name = cached_modules[p['calibration_formulation__module_id']].name \
-                        if p['calibration_formulation__module_id'] in cached_modules else "UNKNOWN"
-                    p['model'] = module_name
+                    p['model'] = cached_modules_by_id[p['calibration_formulation__module_id']].name
                 write_parameter_files(params, calibration['calib_parameter_file'])
 
         if NGEN_ENVIRONMENT == NgenEnvironmentEnum.PARALLEL_WORKS:
