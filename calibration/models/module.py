@@ -9,6 +9,7 @@ class Module(BaseModel):
     description = models.TextField(null=False)
     is_active = models.BooleanField(default=False)
     name = models.CharField(max_length=50, unique=True, null=False)
+    display_name = models.CharField(max_length=50, unique=True, null=False)
     groups = models.ManyToManyField(ModuleGroup, db_table='module_group_members')
     output_variables = models.ManyToManyField(OutputVariable, db_table='module_output_variables')
 

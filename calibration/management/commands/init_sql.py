@@ -151,23 +151,24 @@ class Command(BaseCommand):
                    "description": "Snow17 is a snow accumulation and melt model that has been used by the National Weather Service since the late 1970s for operational streamflow forecasting.  It is a temperature-index model",
                    "groups": ["Snowmelt"],
                    "output_variables": ["ACSNOM", "SNOWH", "SNEQV"]},
-                  {"name": "UEB", "description":
-                      "description",
+                  {"name": "UEB", "display_name": "Utah Energy Balance (UEB)",
+                   "description": "description",
                    "groups": ["Snowmelt"],
                    "output_variables": ["ACSNOM", "SNOWT_AVG", "QRAIN", "SNEQV", "QSNOW", "TRAD", "LH", "FIRA", "HFX"]},
-                  {"name": "CFE-S",
+                  {"name": "CFE-S", "display_name": "CFE-S (Schaake)",
                    "description": "The Conceptual Functional Equivalent (CFE) model to the National Water Model. The X represents the Xinanjiang function (configuration: surface_partitioning_scheme= Xinanjiang)",
                    "groups": ["Rainfall Runoff"],
                    "output_variables": ["sfcheadsubrt", "qBucket", "streamflow", "QRAIN", "SFCRNOFF"]},
-                  {"name": "CFE-X",
+                  {"name": "CFE-X", "display_name": "CFE-X (Xinanjiang)",
                    "description": "The Conceptual Functional Equivalent (CFE) model to the National Water Model. The S represents the Schaake function (configuration: surface_partitioning_scheme=Schaake)",
                    "groups": ["Rainfall Runoff"],
                    "output_variables": ["sfcheadsubrt", "qBucket", "streamflow", "QRAIN", "SFCRNOFF"]},
                   {"name": "LSTM",
                    "description": "description",
                    "groups": ["Glacier", "Snowmelt", "Evapotranspiration", "Soil Moisture", "Rainfall Runoff"]},
-                  {"name": "PET", "description":
-                      "description", "groups": ["Evapotranspiration"],
+                  {"name": "PET",
+                   "description": "description",
+                   "groups": ["Evapotranspiration"],
                    "is_active": False},
                   {"name": "TopModel",
                    "description": "A physically based, distributed watershed model that simulates hydrologic fluxes of water.",
@@ -189,16 +190,21 @@ class Command(BaseCommand):
                    "description": "The soil freeze-thaw model simulates the transport of heat in soil using a one-dimensional vertical column. The model uses a standard diffusion equation discretized using a fully-implicit scheme at the interior and a semi-implicit scheme at the top and bottom boundaries, similar to NOAH-MP. More details are provided below.",
                    "groups": ["Soil Moisture"],
                    "output_variables": ["SOILICE", "SOIL_T"]},
-                  {"name": "T-Route",
+                  {"name": "T-Route", "
                    "description": "Tree-Based Channel Routing -  a dynamic channel routing model, offers a comprehensive solution for river network routing problems. Provides a series lateral inflows for each node in a channel network and computes the resulting streamflows.",
                    "groups": ["Routing"],
                    "output_variables": ["inflow", "outflow", "reservoir_assimilated_value", "water_sfc_elev", "nudge", "streamflow", "velocity", ""]}
                   ]
 
         for v in values:
-            module_instance, _ = Module.objects.update_or_create(name=v['name'], defaults={"is_active": v.get('is_active', True),
-                                                                                           "description": v['description'],
-                                                                                           "created_by": self.user})
+            module_instance, _ = Module.objects.update_or_create(
+                name=v['name'], defaults={
+                    "display_name": v.get('display_name', v['name']),
+                    "is_active": v.get('is_active', True),
+                    "description": v['description'],
+                    "created_by": self.user
+                }
+            )
 
             group_names = v['groups'] if 'groups' in v else []
             groups = ModuleGroup.objects.filter(name__in=group_names)
