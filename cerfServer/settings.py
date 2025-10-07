@@ -306,7 +306,7 @@ except KeyError:
 SLURM_URL = os.getenv("SLURM_URL")
 SLURM_SUBMIT_CALIBRATION_JOB_ENDPOINT = 'submit-calibration-job'
 SLURM_SUBMIT_VALIDATION_JOB_ENDPOINT = 'submit-validation-job'
-SLURM_SUBMIT_COLD_START_JOB_ENDPOINT = 'submit-cold_start-job'
+SLURM_SUBMIT_COLD_START_JOB_ENDPOINT = 'submit-cold-start-job'
 SLURM_SUBMIT_FORECAST_JOB_ENDPOINT = 'submit-forecast-job'
 SLURM_JOB_STATUS_ENDPOINT = 'job-status'
 SLURM_CANCEL_JOB_ENDPOINT = 'cancel-job'

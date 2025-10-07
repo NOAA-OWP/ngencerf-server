@@ -6,7 +6,8 @@ from calibration.models.base_run import BaseRun
 class ColdStartRun(BaseRun):
     calibration_run = models.ForeignKey('CalibrationRun', null=False, related_name="forecasts", on_delete=models.CASCADE, db_index=True)
     configuration = models.ForeignKey("ForecastConfiguration", null=False, on_delete=models.RESTRICT)
-    cold_start_date = models.DateTimeField(null=True)
+    cold_start_date = models.DateTimeField(null=False)
+    cycle_date = models.DateTimeField(null=False)
 
     class Meta:
         db_table = 'cold_start_run'

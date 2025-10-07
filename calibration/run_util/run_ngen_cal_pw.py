@@ -54,7 +54,6 @@ def submit_job_to_slurm(run: BaseRun, owner: User, arguments: dict[str, str], st
             'worker_name': (None, arguments.get('worker_name')),
             'iteration': (None, arguments.get('iteration_num'))
         }
-    # TODO Have Alvaro remove Forecast Download
     elif isinstance(run, ColdStartRun):
         url_endpoint = settings.SLURM_SUBMIT_COLD_START_JOB_ENDPOINT
         payload = {

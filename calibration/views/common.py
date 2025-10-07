@@ -292,6 +292,7 @@ def create_cold_start_run_internal(
         calibration_run: CalibrationRun,
         configuration: ForecastConfiguration,
         cold_start_date: datetime,
+        cycle_date: datetime
 ) -> ColdStartRun:
     """
     Create a new ColdStartRun object for the given CalibrationRun.
@@ -299,13 +300,15 @@ def create_cold_start_run_internal(
     :param calibration_run: The calibration run that this forecast run is associated with.
     :param configuration: The configuration for this forecast
     :param cold_start_date: An optional date to cold start the forecast before the cycle date
+    :param cycle_date: The date to start the cycle
     :return: The newly created ColdStartRun instance.
     """
 
     cold_start_run = ColdStartRun.objects.create(status=StatusEnum.SAVED.db_instance,
                                                  calibration_run=calibration_run,
                                                  configuration=configuration,
-                                                 cold_start_date=cold_start_date)
+                                                 cold_start_date=cold_start_date,
+                                                 cycle_date=cycle_date)
     os.makedirs(get_cold_start_dir(cold_start_run))
     logger.info(f"Creating {get_job_description(cold_start_run)}")
 
