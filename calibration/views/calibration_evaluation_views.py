@@ -89,7 +89,12 @@ def get_calibration_data_by_iteration(request: Request) -> Response:
 
     # Prefetch validation runs for all iterations
     validation_runs = ValidationRun.objects.filter(
-        iteration__in=iterations
+        iteration__in=iterations,
+        status__in=[
+            StatusEnum.DONE.db_instance,
+            StatusEnum.RUNNING.db_instance,
+            StatusEnum.SUBMITTED.db_instance,
+        ],
     ).select_related('calibration_run')
 
     validation_runs_by_iteration = {vr.iteration_id: vr for vr in validation_runs}
