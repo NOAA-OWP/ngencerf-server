@@ -10,6 +10,11 @@ class ColdStartRun(BaseRun):
 
     class Meta:
         db_table = 'cold_start_run'
+        indexes = [
+            models.Index(fields=['calibration_run'], name='idx_coldstart_calibration_run'),
+            models.Index(fields=['status'], name='idx_coldstart_status'),
+            models.Index(fields=['cold_start_date'], name='idx_coldstart_date'),
+        ]
 
     def __str__(self):
         return (

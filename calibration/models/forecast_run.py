@@ -11,6 +11,12 @@ class ForecastRun(BaseRun):
 
     class Meta:
         db_table = 'forecast_run'
+        indexes = [
+            models.Index(fields=['calibration_run'], name='idx_forecast_calibration_run'),
+            models.Index(fields=['cold_start_run'], name='idx_forecast_cold_start_run'),
+            models.Index(fields=['status'], name='idx_forecast_status'),
+            models.Index(fields=['cycle_date'], name='idx_forecast_cycle_date'),
+        ]
 
     def __str__(self):
         return (

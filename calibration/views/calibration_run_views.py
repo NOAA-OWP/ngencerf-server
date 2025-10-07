@@ -105,41 +105,23 @@ def get_status(request: Request) -> Response:
             else None
         )
 
-        # Retrieve validation runs with related PerformanceMetrics data
-        validation_runs = ValidationRun.objects.filter(
-            calibration_run=calibration_run
-        ).select_related("performance_metrics").only(
-            "id", "status__name", "failure_messages", "validation_type", "submit_date",
-            "performance_metrics__elapsed_time", "performance_metrics__num_cpus",
-            "performance_metrics__cpu_time", "performance_metrics__max_rss",
-            "performance_metrics__max_disk_read", "performance_metrics__max_disk_write",
-            "performance_metrics__reserved_time"
+        # --- Validation runs ---
+        validation_runs = (
+            ValidationRun.objects
+            .filter(calibration_run=calibration_run)
+            .select_related("status")
+            .prefetch_related("performance_metrics")
         )
 
-        # Retrieve forecast runs with related PerformanceMetrics data
-        forecast_runs = ForecastRun.objects.filter(calibration_run=calibration_run).select_related(
-            "performance_metrics",
-            "cold_start_run__performance_metrics",
-            "cold_start_run__status",
-        ).only(
-            "id", "status__name", "failure_messages", "submit_date",
-            "performance_metrics__elapsed_time", "performance_metrics__num_cpus",
-            "performance_metrics__cpu_time", "performance_metrics__max_rss",
-            "performance_metrics__max_disk_read", "performance_metrics__max_disk_write",
-            "performance_metrics__reserved_time",
-            "cold_start_run__id",
-            "cold_start_run__status__name",
-            "cold_start_run__failure_messages",
-            "cold_start_run__performance_metrics__elapsed_time",
-            "cold_start_run__performance_metrics__num_cpus",
-            "cold_start_run__performance_metrics__cpu_time",
-            "cold_start_run__performance_metrics__max_rss",
-            "cold_start_run__performance_metrics__max_disk_read",
-            "cold_start_run__performance_metrics__max_disk_write",
-            "cold_start_run__performance_metrics__reserved_time"
+        # --- Forecast runs ---
+        forecast_runs = (
+            ForecastRun.objects
+            .filter(calibration_run=calibration_run)
+            .select_related("status", "configuration", "cold_start_run__status")
+            .prefetch_related("performance_metrics", "cold_start_run__performance_metrics")
         )
 
-    # Construct validation response with performance metrics as needed
+    # --- Validation responses ---
     validation_response = []
     for run in validation_runs:
         validation_data = {
@@ -153,45 +135,49 @@ def get_status(request: Request) -> Response:
         }
 
         fm = parse_failure_messages(run.failure_messages)
-        if fm is not None:
+        if fm:
             validation_data['failure_messages'] = fm
 
         if run.performance_metrics:
             validation_data['elapsed_time'] = run.performance_metrics.elapsed_time
+        elif run.run_start and run.run_end:
+            validation_data['elapsed_time'] = run.run_end - run.run_start
         else:
-            validation_data['elapsed_time'] = run.run_end - run.run_start if run.run_end and run.run_start else None
+            validation_data['elapsed_time'] = None
 
         if should_include_metrics(run.status, include_performance_metrics):
             validation_data['performance_metrics'] = get_performance_metrics(run.performance_metrics)
 
         validation_response.append(validation_data)
 
-    # Construct validation response with performance metrics as needed
+    # --- Forecast responses ---
     forecast_response = []
     for run in forecast_runs:
         forecast_data = {
             'forecast_run_id': run.id,
             'status': run.status.name,
             'configuration': run.configuration.name,
-            'cycle_date': run.cycle_date,  # ← add this
+            'cycle_date': run.cycle_date,
             'submit_date': run.submit_date,
             'run_start': run.run_start,
             'run_end': run.run_end
         }
 
         fm = parse_failure_messages(run.failure_messages)
-        if fm is not None:
+        if fm:
             forecast_data['failure_messages'] = fm
 
         if run.performance_metrics:
             forecast_data['elapsed_time'] = run.performance_metrics.elapsed_time
+        elif run.run_start and run.run_end:
+            forecast_data['elapsed_time'] = run.run_end - run.run_start
         else:
-            forecast_data['elapsed_time'] = run.run_end - run.run_start if run.run_end and run.run_start else None
+            forecast_data['elapsed_time'] = None
 
         if should_include_metrics(run.status, include_performance_metrics):
             forecast_data['performance_metrics'] = get_performance_metrics(run.performance_metrics)
 
-        # Cold start run
+        # --- Cold start ---
         cold_start_run = getattr(run, "cold_start_run", None)
         if cold_start_run:
             cold_start_data = {
@@ -203,16 +189,15 @@ def get_status(request: Request) -> Response:
             }
 
             fm_cs = parse_failure_messages(cold_start_run.failure_messages)
-            if fm_cs is not None:
+            if fm_cs:
                 cold_start_data['failure_messages'] = fm_cs
 
             if cold_start_run.performance_metrics:
                 cold_start_data['elapsed_time'] = cold_start_run.performance_metrics.elapsed_time
+            elif cold_start_run.run_start and cold_start_run.run_end:
+                cold_start_data['elapsed_time'] = cold_start_run.run_end - cold_start_run.run_start
             else:
-                cold_start_data['elapsed_time'] = (
-                    cold_start_run.run_end - cold_start_run.run_start
-                    if cold_start_run.run_end and cold_start_run.run_start else None
-                )
+                cold_start_data['elapsed_time'] = None
 
             if should_include_metrics(cold_start_run.status, include_performance_metrics):
                 cold_start_data['performance_metrics'] = get_performance_metrics(cold_start_run.performance_metrics)
@@ -221,7 +206,7 @@ def get_status(request: Request) -> Response:
 
         forecast_response.append(forecast_data)
 
-    # Prepare the main response without calibration performance metrics if not requested
+    # --- Main response ---
     response = {
         'message': f'Calibration Job {calibration_run.id}, status is {calibration_run.status.name}',
         'calibration_run_id': calibration_run.id,
@@ -234,17 +219,15 @@ def get_status(request: Request) -> Response:
     }
 
     fm_cal = parse_failure_messages(calibration_run.failure_messages)
-    if fm_cal is not None:
+    if fm_cal:
         response['failure_messages'] = fm_cal
 
-    # if performance metrics are unavailable, find the difference between start and end time as a fallback
     if calibration_run.performance_metrics:
         response['elapsed_time'] = calibration_run.performance_metrics.elapsed_time
+    elif calibration_run.run_start and calibration_run.run_end:
+        response['elapsed_time'] = calibration_run.run_end - calibration_run.run_start
     else:
-        response['elapsed_time'] = (
-            calibration_run.run_end - calibration_run.run_start
-            if calibration_run.run_end and calibration_run.run_start else None
-        )
+        response['elapsed_time'] = None
 
     # Conditionally add calibration run performance metrics to response if requested and status is DONE or FAIL
     if calibration_metrics:

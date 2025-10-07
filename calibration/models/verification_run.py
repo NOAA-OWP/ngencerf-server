@@ -13,6 +13,11 @@ class VerificationRun(BaseRun):
 
     class Meta:
         db_table = 'verification_run'
+        indexes = [
+            models.Index(fields=['forecast_run'], name='idx_verif_forecast_run'),
+            models.Index(fields=['owner'], name='idx_verif_owner'),
+            models.Index(fields=['status'], name='idx_verif_status'),
+        ]
 
     def __str__(self):
         return (

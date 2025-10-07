@@ -13,6 +13,8 @@ class ValidationRun(BaseRun):
         db_table = 'validation_run'
         indexes = [
             models.Index(fields=['calibration_run', 'validation_type'], name='idx_validationrun_run_type'),
+            models.Index(fields=['calibration_run'], name='idx_validation_calibration_run'),
+            models.Index(fields=['status'], name='idx_validation_status'),
         ]
 
     @property
