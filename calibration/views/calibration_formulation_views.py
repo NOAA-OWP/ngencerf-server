@@ -60,6 +60,7 @@ def get_modules(request) -> Response:
     module_groups_list = [
         {
             "name": module.name,
+            "description": module.description,
             "is_active": module.is_active,
             "groups": sorted([g.name for g in module.groups.all()], key=lambda n: n)
 
@@ -487,7 +488,7 @@ def validate_formulation(module_names: set[str]) -> tuple[list[str], list[str], 
             must_have_modules = rules.get("must_have", [])
             # Check if any of the required modules are present
             if not any(m in module_names for m in must_have_modules):
-                msg = f"{excluded_module} module cannot exist without one of: {', '.join(must_have_modules)}"
+                msg = f"{excluded_module} module cannot exist without one of: {', '.join(must_have_modules)}"  # type: ignore[arg-type]
                 logger.warning(msg)
                 if rules.get("fatal", True):
                     fatal_errors.append(msg)

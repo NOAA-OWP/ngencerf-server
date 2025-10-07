@@ -11,7 +11,7 @@ from calibration.enums import ForcingSourceEnum
 from calibration.models import CalibrationParameter, CalibrationFormulation, CalibrationRun
 from calibration.util.caching import get_cached_module_by_name, get_cached_modules_by_id
 from calibration.util.calibration_validators import ModuleDataListSerializer, S3FileValidator
-from calibration.util.cloud_util import copy_tree, path_exists, _join_url, is_dir
+from calibration.util.cloud_util import copy_tree, path_exists, join_url, is_dir
 from calibration.util.ngen_locations import get_bmi_config_dir_for_module
 from calibration.views.common import validate_response_data
 from data_services_test_data import data_services_test_data
@@ -116,11 +116,6 @@ class DataServicesException(Exception):
         self.status_code = status_code
 
 
-def get_and_set_geopackage_from_data_services(run: CalibrationRun):
-    # placeholder
-    pass
-
-
 def get_geopackage_from_data_services(run: CalibrationRun):
     """
     Retrieves GeoPackage data from Data Services and updates the CalibrationRun instance.
@@ -220,7 +215,7 @@ def get_forcing_data_from_s3(run: CalibrationRun, forcing_source_name: str):
 
     for src_key, s3_uri in forcing_containers.items():
         # <prefix>/<domain>/Gage_<gage_id>
-        forcing_dir = _join_url(s3_uri, run.gage.domain.name, f"Gage_{run.gage.gage_id}")
+        forcing_dir = join_url(s3_uri, run.gage.domain.name, f"Gage_{run.gage.gage_id}")
 
         if is_dir(forcing_dir):
             logger.info(f"Found forcing directory {forcing_dir}")

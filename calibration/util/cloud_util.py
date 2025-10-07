@@ -198,7 +198,7 @@ def normalize_url(p: str) -> str:
     return p
 
 
-def _join_url(base: str, *parts: str) -> str:
+def join_url(base: str, *parts: str) -> str:
     """
     Join a URL base and path parts with single slashes, preserving scheme form.
     - If base ends with '://', do not strip slashes (keeps 'file://' intact).
@@ -285,7 +285,7 @@ def copy_tree(src_url: str,
             relative = src_path[len(src_root):].lstrip("/")
         else:
             relative = os.path.basename(src_path)
-        return _join_url(dst_base, dst_prefix, relative)
+        return join_url(dst_base, dst_prefix, relative)
 
     def _copy_one(src_path: str) -> tuple[str, float, int]:
         """
@@ -300,7 +300,7 @@ def copy_tree(src_url: str,
 
         parent = os.path.dirname(urlparse(out_path).path).lstrip("/")
         try:
-            fs_dst.mkdirs(_join_url(dst_base, parent), exist_ok=True)
+            fs_dst.mkdirs(join_url(dst_base, parent), exist_ok=True)
         except Exception:
             pass
 
