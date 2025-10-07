@@ -428,23 +428,24 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
                         'param_value', 'maps_to_variable_name', 'maps_to_module_id')
             )
 
-            cached_modules = get_cached_modules_with_groups()
-
             # Required fields for sloth parameters
-            required_fields = ['param_name', 'param_count', 'param_units', 'param_location', 'param_value', 'maps_to_module_id',
-                               'maps_to_variable_name']
+            required_fields = [
+                'param_name', 'param_count', 'param_units', 'param_location',
+                'param_value', 'maps_to_module_id', 'maps_to_variable_name'
+            ]
 
             sloth_error = False
             sloth_lines = []
             header_format = '{:30s} {:>10s} {:8s} {:8s} {:>10s} {:15s} {:30s}\n'
             line_format = '{:30s} {:10d} {:8s} {:8s} {:10.5g} {:15s} {:30s}\n'
+
             for s in sloth_params:
                 missing_fields = [field for field in required_fields if s.get(field) is None]
                 if missing_fields:
                     sloth_error = True
                     error_object.add_warning(f"Missing fields {', '.join(missing_fields)} for sloth parameter '{s['param_name']}'")
                 else:
-                    module_name = cached_modules[s['maps_to_module_id']].name
+                    module_name = cached_modules_by_id[s['maps_to_module_id']].name
                     sloth_lines.append(
                         line_format.format(
                             s['param_name'], s['param_count'], s['param_units'],
