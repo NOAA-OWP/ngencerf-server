@@ -89,7 +89,7 @@ def get_calibration_data_by_iteration(request: Request) -> Response:
 
     # Prefetch validation runs for all iterations
     validation_runs = ValidationRun.objects.filter(
-        iteration__in=iterations, status=StatusEnum.DONE.db_instance
+        iteration__in=iterations
     ).select_related('calibration_run')
 
     validation_runs_by_iteration = {vr.iteration_id: vr for vr in validation_runs}
@@ -251,7 +251,8 @@ def get_log_names(request: Request) -> Response:
     if error_response:
         return error_response
 
-    logger.debug(f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
+    logger.debug(
+        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
     return Response(response_validator.data)
 
 
@@ -404,7 +405,8 @@ def get_log(request: Request) -> Response:
     if error_response:
         return error_response
 
-    logger.debug(f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
+    logger.debug(
+        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
     return Response(response_validator.data)
 
 
@@ -483,7 +485,8 @@ def get_log_status(request: Request) -> Response:
     if error_response:
         return error_response
 
-    logger.debug(f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
+    logger.debug(
+        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
     return Response(response_validator.data)
 
 
@@ -553,7 +556,7 @@ def get_global_log(run: CalibrationRun | ValidationRun, log_name: LogName) -> st
     """
     if log_name == LogName.NGEN:
         return get_ngen_log_path(run if isinstance(run, CalibrationRun) else run.calibration_run)
-    
+
     raise CerfException(f'Invalid log name: {log_name}')
 
 
@@ -583,7 +586,7 @@ def find_ngen_stdout_log(run: CalibrationRun | ValidationRun) -> str | None:
 
     if not ngen_log_path:
         raise CerfException('Could not find ngen log in worker directory')
- 
+
     return ngen_log_path
 
 
@@ -734,7 +737,8 @@ def start_zip_for_calibration_job(request: Request) -> Response:
     if error_response:
         return error_response
 
-    logger.debug(f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
+    logger.debug(
+        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
     return Response(response_validator.data)
 
 
@@ -893,7 +897,8 @@ def download_calibration_zip(request: Request) -> FileResponse | Response:
         response.close = (lambda original_close=response.close:
                           lambda: (cleanup(), original_close())[1])()
 
-        logger.debug(f'Returning zip for Calibration Job {calibration_run_id} to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)}')
+        logger.debug(
+            f'Returning zip for Calibration Job {calibration_run_id} to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)}')
         return response
 
     except IOError as e:
