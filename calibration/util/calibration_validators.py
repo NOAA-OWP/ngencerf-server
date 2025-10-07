@@ -960,18 +960,22 @@ class GetStatusValidationsResponseSerializer(CommonStatusFieldsMixin, Validation
     iteration_num = serializers.IntegerField(allow_null=True)
 
 
-# class GetStatusForcingDownloadSerializer(BaseSerializer):
-#     forcing_download_run_id = serializers.IntegerField(required=True)
-#     status = serializers.CharField(required=True)
-#     elapsed_time = serializers.DurationField(required=False, allow_null=True)
-#     performance_metrics = PerformanceMetricsSerializer(required=False)
+class GetStatusColdStartSerializer(BaseSerializer):
+    cold_start_run_id = serializers.IntegerField(required=True)
+    status = serializers.CharField(required=True)
+    submit_date = serializers.DateTimeField(required=False, allow_null=True)
+    run_start = serializers.DateTimeField(required=False, allow_null=True)
+    run_end = serializers.DateTimeField(required=False, allow_null=True)
+    elapsed_time = serializers.DurationField(required=False, allow_null=True)
+    failure_messages = serializers.DictField(required=False, allow_null=True)
+    performance_metrics = PerformanceMetricsSerializer(required=False)
 
 
 class GetStatusForecastsResponseSerializer(CommonStatusFieldsMixin, ForecastRunSerializer):
     configuration = serializers.CharField(required=True, validators=[enum_validator(ForecastConfigEnum)])
     cycle_date = serializers.DateTimeField(required=True, allow_null=False)
     cold_start_date = serializers.DateTimeField(required=False, allow_null=True)
-    # forcing_download = GetStatusForcingDownloadSerializer(required=False, allow_null=True)
+    cold_start_run = GetStatusColdStartSerializer(required=False, allow_null=True)
 
 
 class GetStatusResponseSerializer(GenericResponseSerializer):
