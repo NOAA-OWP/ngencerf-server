@@ -247,7 +247,7 @@ os.makedirs(NGEN_LOGGING_DIR, exist_ok=True)
 
 NGEN_STATIC_DIR = os.path.join(NGEN_CAL_MOUNT_POINT, 'ngen-static-files')
 NGEN_CAL_WORK_DIR = os.path.join(NGEN_CAL_MOUNT_POINT, 'ngen-cal-work')
-NGEN_FORCING_WORK_DIR = os.path.join(NGEN_CAL_MOUNT_POINT, 'forecast_work')
+NGEN_FORECAST_WORK_DIR = os.path.join(NGEN_CAL_MOUNT_POINT, 'forecast_work')
 
 # -----------------------------
 # Forcing environments
@@ -278,6 +278,7 @@ RUNTIME_INFO = {
     ScriptEnum.CALIBRATION: (CAL_MGR_DOCKER_CMD, CAL_MGR_SCRIPT),
     ScriptEnum.VALIDATION: (CAL_MGR_DOCKER_CMD, CAL_MGR_SCRIPT),
     ScriptEnum.VALIDATION_ITERATION: (CAL_MGR_DOCKER_CMD, CAL_MGR_SCRIPT),
+    ScriptEnum.COLD_START: (NGEN_FORECAST_DOCKER_CMD, NGEN_COLD_START_SCRIPT),
     ScriptEnum.FORECAST: (NGEN_FORECAST_DOCKER_CMD, NGEN_FORECAST_SCRIPT),
 }
 

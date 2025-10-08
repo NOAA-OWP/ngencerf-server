@@ -72,6 +72,7 @@ def create_forecast_input(run: ForecastRun | ColdStartRun) -> tuple[ErrorReport 
     # -----------------------------
     config_location = get_forecast_dir(run) if isinstance(run, ForecastRun) else get_cold_start_dir(run)
     if not error_object.has_errors() and not error_object.has_warnings():
-        config_file = build_config(config, config_location, 'forecast-input.config')
+        config_name = 'forecast-input.config' if isinstance(run, ForecastRun) else 'cold-start-input.config'
+        config_file = build_config(config, config_location, config_name)
 
     return error_object, config_file

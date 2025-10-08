@@ -42,8 +42,8 @@ forecast_forcing_scripts = [
 ]
 
 forecast_work_directories = [
-    FORCING_RAW_INPUT := os.path.join(settings.NGEN_FORCING_WORK_DIR, 'raw_input'),
-    FORCING_ESMF_MESH := os.path.join(settings.NGEN_FORCING_WORK_DIR, 'esmf_mesh'),
+    FORCING_RAW_INPUT := os.path.join(settings.NGEN_FORECAST_WORK_DIR, 'raw_input'),
+    FORCING_ESMF_MESH := os.path.join(settings.NGEN_FORECAST_WORK_DIR, 'esmf_mesh'),
     FORCING_HRRR := os.path.join(FORCING_RAW_INPUT, 'HRRR'),
     FORCING_RAP := os.path.join(FORCING_RAW_INPUT, 'RAP'),
 ]
