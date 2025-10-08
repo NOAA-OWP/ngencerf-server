@@ -1,10 +1,10 @@
-Django~=5.2.6
+Django~=5.2.7
 djangorestframework~=3.16.1
 djangorestframework-simplejwt~=5.5.1
 geopandas~=1.1.1
 matplotlib~=3.10.6
 fiona~=1.10.1
-shapely~=2.1.1
+shapely~=2.1.2
 toml~=0.10.2
 DateTimeRange~=2.3.1
 python-dotenv~=1.1.1
@@ -13,7 +13,7 @@ psycopg~=3.2.10
 django_dbconn_retry~=0.1.9
 djoser~=2.3.3
 pyjwt~=2.10.1
-PyYAML~=6.0.2
+PyYAML~=6.0.3
 drf_spectacular~=0.28.0
 django-cors-headers~=4.9.0
 requests~=2.32.5
@@ -30,7 +30,7 @@ s3fs~=2025.3.0
 
 # Use the same versions as mswm
 numpy < 2.0, >= 1.23
-pandas~=2.3.2
+pandas~=2.3.3
 
 
 # There is also a dependancy on these 2 entries
