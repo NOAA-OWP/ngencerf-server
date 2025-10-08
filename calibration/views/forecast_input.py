@@ -7,6 +7,7 @@ from calibration.util.ngen_locations import get_forecast_dir, FORECAST_FORCING_T
 from calibration.views.called_from import called_from
 from calibration.views.common import format_datetime, join_with_or, ErrorReport, readonly_transaction
 from calibration.views.ngen_cal_input import build_config
+from cerfServer.settings import NGEN_FORECAST_WORK_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -16,10 +17,10 @@ CONFIG_TEMPLATE = {
 
     "Forcing": {
         "forcing_provider": "bmi",
+        "root_dir": NGEN_FORECAST_WORK_DIR,
         "forecast_configuration": "",
         "cycle_datetime": None,
         "forcing_template_dir": FORECAST_FORCING_TEMPLATES,
-        "use_cold_start": False,
         "cold_start_datetime": None
     }
 
@@ -65,7 +66,6 @@ def create_forecast_input(run: ForecastRun | ColdStartRun) -> tuple[ErrorReport 
     if isinstance(run, ColdStartRun):
         forcing['cold_start_datetime'] = format_datetime(run.cold_start_date)
 
-    forcing['use_cold_start'] = isinstance(run, ColdStartRun)
 
     # -----------------------------
     # FILE WRITE PHASE

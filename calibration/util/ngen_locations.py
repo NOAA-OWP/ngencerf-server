@@ -41,18 +41,6 @@ forecast_forcing_scripts = [
     FORCING_BMI_SCRIPT_PATH := os.path.join(settings.NGEN_FORCING_REPO_ROOT, 'NextGen_Forcings_Engine_BMI', 'run_bmi_model.py')
 ]
 
-forecast_work_directories = [
-    FORCING_RAW_INPUT := os.path.join(settings.NGEN_FORECAST_WORK_DIR, 'raw_input'),
-    FORCING_ESMF_MESH := os.path.join(settings.NGEN_FORECAST_WORK_DIR, 'esmf_mesh'),
-    FORCING_HRRR := os.path.join(FORCING_RAW_INPUT, 'HRRR'),
-    FORCING_RAP := os.path.join(FORCING_RAW_INPUT, 'RAP'),
-]
-
-for f in forecast_work_directories:
-    os.makedirs(f, exist_ok=True)
-    # On PW, the server runs as root, but the Slurm jobs do not, so we need to adjust the permissions
-    os.chmod(f, 0o777)
-
 
 def check_files():
     # If we are running locally,then ngen and ngen-cal files must be on our machine
@@ -277,7 +265,7 @@ def get_validation_iteration_stdout_file(run: CalibrationRun, worker_name: str, 
 
 
 def get_cold_start_dir(cold_start_run: ColdStartRun) -> str:
-    return os.path.join(get_output_cold_start_run_dir(cold_start_run.calibration_run), f'forecast_{cold_start_run.id}')
+    return os.path.join(get_output_cold_start_run_dir(cold_start_run.calibration_run), f'cold_start_{cold_start_run.id}')
 
 
 def get_forecast_dir(forecast_run: ForecastRun) -> str:
@@ -324,15 +312,6 @@ def get_cold_start_realization_file(cold_start_run: ColdStartRun) -> str:
     return os.path.join(get_cold_start_dir(cold_start_run), f'{cold_start_run.calibration_run.gage.gage_id}_realization_config_bmi_cold_start.json')
 
 
-# TODO Do we still need this?
-def get_forecast_temp_dir(forecast_run: ForecastRun) -> str:
-    # TODO Need Kyle to create the directory, so we can use /tmp and not create it ourselves
-    # temp_dir = os.path.join('/tmp', f'forcing_workdir_Calibration_{forecast_run.calibration_run.id}_Forecast_{forecast_run.id}')
-    temp_dir = os.path.join(get_forecast_dir(forecast_run), 'scratch_dir')
-    os.mkdir(temp_dir)
-    return temp_dir
-
-
 def get_validation_performance_file(run: CalibrationRun, worker_name: str, iteration_num: int) -> str:
     return os.path.join(get_output_validation_run_dir(run), f"ngen-cal_validation_{worker_name}_iter{iteration_num}_performance.log")
 
@@ -357,11 +336,6 @@ def get_validation_special_git_info_file(run: ValidationRun) -> str:
 
 def get_validation_iteration_git_info_file(run: ValidationRun, worker_name: str, iteration_num: int):
     return os.path.join(get_output_validation_run_dir(run.calibration_run), f"git_info_{worker_name}_iter{iteration_num}.json")
-
-
-#
-# def get_forecast_download_git_info_file(forecast_forcing_download_run: ForecastForcingDownloadRun) -> str:
-#     return os.path.join(get_forecast_dir(forecast_forcing_download_run.forecast_run), "git_info_forecast_download.json")
 
 
 def get_forecast_git_info_file(forecast_run: ForecastRun) -> str:

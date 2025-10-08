@@ -243,7 +243,7 @@ def create_and_run_forecast(request: Request) -> Response:
 
     # If a cold start date is provided, validate its position relative to cycle date
     if run_cold_start:
-        if cold_start_date > cycle_date:
+        if cold_start_date >= cycle_date:
             forecast_errors.append("Cold start date must be earlier than cycle date")
         if cold_start_date < min_cycle_date:
             forecast_errors.append(f"Cold start cannot be before {format_datetime(min_cycle_date)}")
