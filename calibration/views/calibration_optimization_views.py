@@ -338,19 +338,22 @@ def validate_objective_function(run: CalibrationRun, objective_function_name: st
 
 def write_optimization_inputs(run: CalibrationRun, prepared_inputs: list[CalibrationOptimizationInput] | None, keep_ids: set[int] | None = None) -> None:
     """
-    Persist prepared optimization inputs for a calibration run.
+    Write or update optimization input records for a calibration run.
 
-    This function replaces any existing optimization inputs tied to the given run
-    with the provided set of prepared inputs. It performs a full overwrite:
-    - Deletes all existing `CalibrationOptimizationInput` records for the run.
-    - Inserts new rows using the validated/prepared input data.
+    This function synchronizes the database state of `CalibrationOptimizationInput`
+    entries for the given run with the provided validated inputs:
+      - Deletes any existing inputs not present in `keep_ids`.
+      - Inserts or updates the provided inputs
+      - If `prepared_inputs` is empty or None, removes all existing inputs for the run.
 
-    Because it modifies the database, callers are expected to wrap this function
-    inside a `transaction.atomic()` block when used alongside other updates to the run.
+    This function does not manage transactions; callers modifying multiple related
+    models should wrap the operation inside a `transaction.atomic()` block.
 
-    :param run: The CalibrationRun instance whose optimization inputs should be updated.
-    :param prepared_inputs: A list of validated optimization input dictionaries,
-                            typically returned by `validate_optimizations()`.
+    :param run: The CalibrationRun instance whose optimization inputs are being updated.
+    :param prepared_inputs: A list of prepared `CalibrationOptimizationInput` objects,
+                            typically produced by `validate_optimizations()`.
+    :param keep_ids: Optional set of optimization_input IDs to retain. If not provided,
+                     inferred from `prepared_inputs`.
     :return: None
     """
     # If there are no inputs, this means the run should have none — delete and exit.
@@ -368,7 +371,6 @@ def write_optimization_inputs(run: CalibrationRun, prepared_inputs: list[Calibra
     # - update existing rows' value
     # - insert new rows
     #
-    # NOTE: Requires Django 5.0+ and Postgres for update_conflicts support.
     CalibrationOptimizationInput.objects.bulk_create(
         prepared_inputs,
         update_conflicts=True,
