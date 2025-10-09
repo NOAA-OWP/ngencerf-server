@@ -6,7 +6,8 @@ import calibration.views.calibration_landing_views
 import calibration.views.get_jobs_views
 from calibration.views import calibration_formulation_views, calibration_tuning_views, calibration_gage_views, \
     calibration_optimization_views, calibration_run_views, calibration_plot_views, calibration_import_export_views, calibration_landing_views, \
-    calibration_evaluation_views, calibration_forecast_views, calibration_swe_views, calibration_regionalization_views
+    calibration_evaluation_views, calibration_forecast_views, calibration_regionalization_views, calibration_secondary_data_views
+
 urlpatterns = [
     ##################################
     # Landing page
@@ -108,8 +109,10 @@ urlpatterns = [
     ##################################
     # SWE
     ##################################
-    path('calibration/get_swe_images_by_date/', calibration_swe_views.get_swe_images_by_date, name="getSweImagesByDate"),
-    path('calibration/get_swe_timeseries_data/', calibration_swe_views.get_swe_timeseries_data, name="getSweTimeseriesData"),
+    path('calibration/get_swe_images_by_date/', calibration_secondary_data_views.get_swe_images_by_date, name="getSweImagesByDate"),
+    path('calibration/get_swe_timeseries_data/', calibration_secondary_data_views.get_swe_timeseries_data, name="getSweTimeseriesData"),
+    path('calibration/get_soil_moisture_images_by_date/', calibration_secondary_data_views.get_soil_moisture_images_by_date, name="getSoilMoistureImagesByDate"),
+    path('calibration/get_soil_moisture_timeseries_data/', calibration_secondary_data_views.get_soil_moisture_timeseries_data, name="getSoilMoistureTimeseriesData"),
 
     ##################################
     # Import/Export

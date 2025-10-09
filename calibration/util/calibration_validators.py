@@ -1329,21 +1329,21 @@ class GetLogStatusResponseSerializer(GenericMessageResponseSerializer):
 
 
 ##################################
-# Snowdas/SWE
+# Snowdas/SWE/Soil Moisture
 ##################################
-class GetSnodasImagesRequestSerializer(ValidationRunSerializer):
+class GetImagesByDateRequestSerializer(ValidationRunSerializer):
     date = serializers.DateField(required=True, allow_null=False)
 
 
-class GetSWEImagesResponseSerializer(GenericMessageResponseSerializer):
+class GetImagesByDateResponseSerializer(GenericMessageResponseSerializer):
     lumped_map = serializers.CharField(required=True, allow_null=False)
     raw_map = serializers.CharField(required=True, allow_null=False)
     sim_map = serializers.CharField(required=True, allow_null=False)
 
 
-class GetSWETimeseriesDataResponseSerializer(GenericMessageResponseSerializer):
-    swe_timeseries_image = serializers.CharField(required=True, allow_null=False)
-    swe_timeseries_data = serializers.JSONField(required=True, allow_null=False)
+class GetTimeseriesDataResponseSerializer(GenericMessageResponseSerializer):
+    timeseries_image = serializers.CharField(required=True, allow_null=False)
+    timeseries_data = serializers.JSONField(required=True, allow_null=False)
 
 
 ##################################

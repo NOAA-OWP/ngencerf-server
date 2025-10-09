@@ -22,9 +22,9 @@ from calibration.util.ngen_locations import get_realization_file_path, get_metri
     get_objective_log_best_file, get_calibration_worker_path, get_global_best_params_file, get_validation_metrics_valid_control_file, \
     get_validation_metrics_valid_best_file, get_validation_metrics_valid_iteration_file, \
     get_validation_performance_file, get_calibration_performance_file, get_validation_metrics_nwm_retrospective_file, get_output_iteration_csv, \
-    get_validation_special_performance_file, \
-    get_forecast_performance_file, get_params_iteration_file, get_cold_start_performance_file
-from calibration.views.calibration_swe_views import generate_swe_ts_data
+    get_validation_special_performance_file, get_forecast_forcing_download_performance_file, \
+    get_forecast_performance_file, get_params_iteration_file
+from calibration.views.calibration_secondary_data_views import generate_swe_ts_data, generate_soil_moisture_ts_data
 from calibration.views.common import CerfException, get_job_description, find_validation_worker_with_matching_id
 
 logger = logging.getLogger(__name__)
@@ -188,10 +188,11 @@ def process_validation_metrics(run: ValidationRun | CalibrationRun, metrics_file
     # Loop over each row in the metrics file
     for _, row in metrics_df.iterrows():
         # Extract the run type and period fields
-        run_type = row['run']
+        run_type = str(row['run']).strip()
         if run_type != expected_run_type:
             logger.info(f'Unexpected run_type in {metrics_file} - {run_type}')
-        period = row['period']
+
+        period = str(row['period']).strip()
         if period not in ValidationMetricPeriod.get_names():
             logger.info(f'Unexpected period in {metrics_file} - {period}')
 
@@ -280,8 +281,14 @@ def process_validation_for_validation_run(validation_run: ValidationRun) -> None
         logger.error(f'Failed to generate SWE timeseries data: {e}')
         traceback.print_exc()
 
+    logger.info('Generating Soil Moisture timeseries data')
+    try:
+        generate_soil_moisture_ts_data(validation_run)
+    except Exception as e:
+        logger.error(f'Failed to generate Soil Moisture timeseries data: {e}')
+        traceback.print_exc()
 
-# Function to process iterations for all workers in a run
+
 def process_iterations_for_all_workers(calibration_run: CalibrationRun) -> None:
     """
     Process all Iteration objects for the workers of a given CalibrationRun.
@@ -331,7 +338,7 @@ def process_iterations_for_a_worker(calibration_run: CalibrationRun, worker_name
                         Need to prefix with ngen_ and suffix with _worker.
     :param iterations: A list of Iteration objects for the worker.
     :param best_params_dict: Precomputed dictionary of best parameters for comparison.
-    :param have_LSTM_flag: Flag to indicate whether or not this job has LSTM
+    :param have_LSTM_flag: Flag to indicate whether this job has LSTM
     """
     logger.info(f"Processing iterations for {worker_name} for Calibration Job {calibration_run.id}")
 

@@ -27,7 +27,7 @@ from calibration.util.calibration_validators import CalibrationRunSerializer, Ge
     GenericResponseSerializerWithValidator, RunCalibrationJob, MPINodesRulesSerializer, MPINodesRulesResponseSerializer, \
     ColdStartJobSlurmCallbackRequestSerializer
 from calibration.views import ngen_cal_input
-from calibration.views.calibration_swe_views import generate_swe_ts_data
+from calibration.views.calibration_secondary_data_views import generate_swe_ts_data
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import ResponseError, get_calibration_run, handle_exceptions, validate_response, validate_request, \
     generate_custom_token, TOKEN_SLURM_SCOPE, get_validation_run, get_forecast_run, get_user_email, \

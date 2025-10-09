@@ -313,6 +313,10 @@ def get_swe_netcdf_file(run: CalibrationRun) -> str:
     return os.path.join(get_output_validation_run_dir(run), f"{run.gage.gage_id}_swe.nc")
 
 
+def get_soil_moisture_netcdf_file(run: CalibrationRun) -> str:
+    return os.path.join(get_output_validation_run_dir(run), f"{run.gage.gage_id}_soil_moisture.nc")
+
+
 def get_validation_special_performance_file(run: CalibrationRun,
                                             validation_type: Literal[ValidationType.VALID_BEST, ValidationType.VALID_CONTROL]) -> str:
     validation_type_str = validation_type.value.split('_')[1].lower()
@@ -368,3 +372,63 @@ def get_ngen_logging_file(run: CalibrationRun | ValidationRun, import_flag: bool
     job_type = run.__class__.__name__.removesuffix('Run').lower()
     file_name = f"{get_ngen_logging_basename()}_{job_type}_{run.id}{'_import' if import_flag else ''}.json"
     return os.path.join(calibration_run.job_data_dir, file_name)
+
+
+def get_swe_timeseries_png_filename(validation_run: ValidationRun) -> str:
+    """
+    Returns the full file path for the SWE timeseries PNG image.
+
+    :param validation_run: The ValidationRun object.
+    :return: A string representing the path to the PNG file.
+    """
+    return os.path.join(get_swe_plot_dir(validation_run), 'swe_timeseries.png')
+
+
+def get_swe_timeseries_data_filename(validation_run: ValidationRun) -> str:
+    """
+    Returns the full file path for the SWE timeseries CSV data file.
+
+    :param validation_run: The ValidationRun object.
+    :return: A string representing the path to the CSV file.
+    """
+    filename = (
+        'swe_timeseries_best.csv'
+        if validation_run.validation_type == ValidationType.VALID_BEST.value
+        else f'swe_timeseries_{validation_run.worker_name}_iter{validation_run.iteration_num}'
+    )
+    return os.path.join(get_output_validation_run_dir(validation_run.calibration_run), filename)
+
+
+def get_soil_moisture_timeseries_png_filename(validation_run: ValidationRun) -> str:
+    return os.path.join(get_soil_moisture_plot_dir(validation_run), 'soil_moisture_timeseries.png')
+
+
+def get_soil_moisture_timeseries_data_filename(validation_run: ValidationRun) -> str:
+    filename = (
+        'swe_timeseries_best.csv'
+        if validation_run.validation_type == ValidationType.VALID_BEST.value
+        else f'soil_moisture_timeseries_{validation_run.worker_name}_iter{validation_run.iteration_num}'
+    )
+    return os.path.join(get_output_validation_run_dir(validation_run.calibration_run), filename)
+
+
+def get_swe_plot_dir(run: ValidationRun) -> str:
+    return _get_plot_dir(run, 'SWE')
+
+
+def get_soil_moisture_plot_dir(run: ValidationRun) -> str:
+    return _get_plot_dir(run, 'Soil_Moisture')
+
+
+def _get_plot_dir(run: ValidationRun, data_type: Literal['SWE', 'Soil_Moisture']) -> str:
+    """
+    Determines and returns the appropriate plot directory for a given validation run.
+    """
+    if run.validation_type == ValidationType.VALID_ITERATION.value:
+        plot_dir_parent = os.path.join(get_output_validation_iteration_plot_dir(run.calibration_run, run.iteration_num, run.worker_name))
+    else:
+        plot_dir_parent = os.path.join(get_output_validation_plot_dir(run.calibration_run))
+
+    plot_dir = os.path.join(plot_dir_parent, data_type)
+    os.makedirs(plot_dir, exist_ok=True)
+    return plot_dir
