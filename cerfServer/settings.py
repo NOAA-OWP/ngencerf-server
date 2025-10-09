@@ -248,6 +248,9 @@ os.makedirs(NGEN_LOGGING_DIR, exist_ok=True)
 NGEN_STATIC_DIR = os.path.join(NGEN_CAL_MOUNT_POINT, 'ngen-static-files')
 NGEN_CAL_WORK_DIR = os.path.join(NGEN_CAL_MOUNT_POINT, 'ngen-cal-work')
 NGEN_FORECAST_WORK_DIR = os.path.join(NGEN_CAL_MOUNT_POINT, 'forecast_work')
+os.makedirs(NGEN_FORECAST_WORK_DIR, exist_ok=True)
+# On PW, the server runs as root, but the Slurm jobs do not, so we need to adjust the permissions
+os.chmod(NGEN_FORECAST_WORK_DIR, 0o777)
 
 # -----------------------------
 # Forcing environments

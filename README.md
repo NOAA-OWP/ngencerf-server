@@ -106,17 +106,17 @@ that is dependent on `s3fs`.  All that matters is that the bucket is mounted as 
 There are some static files that are required for Ngen to run.  They should be in a directory under the data directory at `/ngencerf/data` called `ngen-static-files`.  
 
 The data for the `ngen-static-files` directory is in 2 locations.  Copy everything from  `s3://ngwpc-dev/ngen-static-files/` to
-`/ngencerf/data/ngen-static-files`
+`/ngencerf/data/ngen-static-files` or `/ngencerf-app/data/ngen-cal-data/ngen-static-files`
 ```
 aws s3 cp --recursive s3://ngwpc-dev/ngen-static-files /ngencerf/data/ngen-static-files
 ```
 
 In addition, copy the directory `module_parameter_files` and all its contents from 
 https://github.com/NGWPC/nwm-cal-mgr/tree/development/module_parameter_files to the `/ngencerf/data/ngen-static-files` directory.
-GitHub does not provided an easy way to just download a single directory, but here is a command to do it
+GitHub does not provide an easy way to just download a single directory, but here is a command to do it
 
 ```
-cd /ngencerf/data/ngen-static-files
+cd /ngencerf/data/ngen-static-files (for PW, use /ngencerf-app/data/ngen-cal-data/ngen-static-files)
 rm -rf module_parameter_files
 git clone --depth 1 --filter=blob:none --sparse -b development https://github.com/NGWPC/nwm-cal-mgr.git tmp-nwm-cal-mgr && \
 cd tmp-nwm-cal-mgr && \
@@ -125,13 +125,13 @@ mv module_parameter_files ../ && \
 cd .. && rm -rf tmp-nwm-cal-mgr
 ```
 
-Copy the directory `https://github.com/NGWPC/ngen-forcing/tree/forecast_validation/NextGen_Forcings_Engine_BMI/BMI_NextGen_Configs/config_templates` 
+Copy the directory `https://github.com/NGWPC/ngen-forcing/tree/forecast_validation_root_dir/NextGen_Forcings_Engine_BMI/BMI_NextGen_Configs/config_templates` 
 to the `/ngencerf/data/ngen-static-files` directory
 
 ```
-cd /ngencerf/data/ngen-static-files
+cd /ngencerf/data/ngen-static-files (for PW, use /ngencerf-app/data/ngen-cal-data/ngen-static-files)
 rm -rf forecast_forcing_templates
-git clone --depth 1 --filter=blob:none --sparse -b development https://github.com/NGWPC/ngen-forcing.git tmp-ngen-forcing && \
+git clone --depth 1 --filter=blob:none --sparse -b forecast_validation_root_dir https://github.com/NGWPC/ngen-forcing.git tmp-ngen-forcing && \
 cd tmp-ngen-forcing && \
 git sparse-checkout set NextGen_Forcings_Engine_BMI/BMI_NextGen_Configs/config_templates && \
 mv NextGen_Forcings_Engine_BMI/BMI_NextGen_Configs/config_templates ../forecast_forcing_templates && \
@@ -143,6 +143,7 @@ When done, your `ngen-static-files` directory should look something like this
 
 
 ngen-static-files/
+├── forecast_forcing_templates
 ├── module_parameter_files
 │  ├── lasam
 │  ├── noah-owp-modular
