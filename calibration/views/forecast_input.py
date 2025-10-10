@@ -66,7 +66,6 @@ def create_forecast_input(run: ForecastRun | ColdStartRun) -> tuple[ErrorReport 
     if isinstance(run, ColdStartRun):
         forcing['cold_start_datetime'] = format_datetime(run.cold_start_date)
 
-
     # -----------------------------
     # FILE WRITE PHASE
     # -----------------------------

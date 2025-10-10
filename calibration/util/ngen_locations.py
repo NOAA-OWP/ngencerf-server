@@ -34,13 +34,6 @@ files = [
     UEB_LIB := os.path.join(settings.NGEN_REPO_ROOT, 'extern', 'ueb-bmi', 'cmake_build', 'src', 'libbmiuebcxx.so')
 ]
 
-forecast_forcing_scripts = [
-    FORCING_MESH_SCRIPT_PATH := os.path.join(settings.NGEN_FORCING_REPO_ROOT, 'ESMF_Mesh_Domain_Configuration_Production',
-                                             'NextGen_hyfab_to_ESMF_Mesh.py'),
-    FORCING_EXTRACTION_SCRIPT_PATH := os.path.join(settings.NGEN_FORCING_REPO_ROOT, 'Forcing_Extraction_Scripts'),
-    FORCING_BMI_SCRIPT_PATH := os.path.join(settings.NGEN_FORCING_REPO_ROOT, 'NextGen_Forcings_Engine_BMI', 'run_bmi_model.py')
-]
-
 
 def check_files():
     # If we are running locally,then ngen and ngen-cal files must be on our machine
