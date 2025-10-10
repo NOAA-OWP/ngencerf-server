@@ -7,7 +7,6 @@ for managing calibration jobs via a REST API.
 """
 
 import argparse
-import os
 import sys
 
 from ngencerf.cli_functions import (
