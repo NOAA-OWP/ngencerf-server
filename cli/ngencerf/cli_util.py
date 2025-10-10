@@ -7,16 +7,27 @@ def check_http_error(http_status: int, response: str, content_type: str | None =
     Handles HTTP errors, returning the parsed response for 200 status codes,
     and printing appropriate error messages for other status codes.
 
-    If a 401 Unauthorized is received:
-      - Attempt refresh
-      - If refresh fails, fall back to full login
-      - If either succeeds and retry_func is provided, retry the original request once
+    - For 200 responses: parses and returns JSON if applicable.
+    - For 401 Unauthorized: attempts token refresh or re-login.
+      If either succeeds and `retry_func` is provided, re-executes the original request once.
+    - For 400 Bad Request and other errors: prints structured error messages.
 
     :param http_status: The HTTP status code returned by the server.
     :param http_status: The HTTP status code returned by the server.
     :param response: The raw response text from the server.
     :param content_type: Optional content type string for handling non-JSON responses.
-    :return: A tuple containing the parsed JSON response (or None) and a boolean indicating success.
+    :param retry_func: Optional callable that performs the original request again after
+        reauthentication succeeds.
+        - Should take no arguments and return a response-like object with:
+            - `status_code` (int)
+            - `text` (str)
+            - `json()` (callable returning parsed JSON)
+        - Example:
+              def retry_func():
+                  return requests.get(url, headers=new_headers)
+    :return: A tuple of (parsed_response, success_flag)
+             - parsed_response: dict or None
+             - success_flag: True if request succeeded or was retried successfully; False otherwise.
     """
     try:
         # If it's a binary response (e.g., ZIP file), don't try to parse it as JSON
