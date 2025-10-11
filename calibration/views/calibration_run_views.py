@@ -1039,14 +1039,15 @@ def handle_slurm_callback(request: Request, serializer_class, get_run_fn, job_en
     if error_return:
         return error_return
 
+    job_description = f"{get_job_description(run)} (Slurm id: {run.slurm_id})"
     if slurm_status == SlurmStatusEnum.STARTING:
-        logger.info(f'{get_job_description(run)} is starting')
+        logger.info(f'{job_description} is starting')
         run.status = StatusEnum.RUNNING.db_instance
         run.run_start = datetime.now(timezone.utc)
         run.save(update_fields=["status", "run_start"])
     else:
         # Job has ended
-        logger.info(f'{get_job_description(run)} is ending')
+        logger.info(f'{job_description} is ending')
         job_end_callback_fn(run, slurm_status)
 
     logger.debug(f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)}')
