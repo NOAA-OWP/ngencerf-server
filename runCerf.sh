@@ -73,12 +73,19 @@ ensure_virtualenv() {
 #=======================================================================
 run_manage_command() {
     echo "Running manage.py $*"
-    # Restore original fds
+
+    # Temporarily restore original stdout/stderr
     exec 1>&3 2>&4
     python "$SCRIPT_DIR/manage.py" "$@"
+    local status=$?   # Capture the Python exit code
 
-    # Re-redirect to logfile
+    # Re-redirect to the logfile
     exec > >(tee -a "$LOGFILE_DEV") 2>&1
+
+    if [ $status -ne 0 ]; then
+        echo "manage.py $* failed with exit code $status"
+    fi
+    return $status
 }
 
 #=======================================================================
@@ -186,10 +193,17 @@ store_gages_fingerprint() {
 #=======================================================================
 run_init_gages_and_store() {
     local fp="$1"
-    if ! run_manage_command init_gages; then
-        echo "init_gages failed"
-        exit 1
+
+    echo "Running init_gages..."
+    run_manage_command init_gages
+    local status=$?
+
+    if [ $status -ne 0 ]; then
+        echo "init_gages failed with exit code $status"
+        return $status   # propagate the exact failure code upward
     fi
+
+    # If init_gages succeeded, store or recompute fingerprint
     if [ -n "$fp" ]; then
         store_gages_fingerprint "$fp"
     else
@@ -199,6 +213,8 @@ run_init_gages_and_store() {
             echo "Warning: could not compute fingerprint after init_gages"
         fi
     fi
+
+    return 0
 }
 
 #=======================================================================
@@ -272,7 +288,36 @@ ensure_superuser() {
     DJANGO_SUPERUSER_EMAIL="$email" \
     DJANGO_SUPERUSER_PASSWORD="$password" \
     python "$SCRIPT_DIR/manage.py" createsuperuser --noinput
+    local status=$?
+    if [ $status -ne 0 ]; then
+        echo "createsuperuser failed with exit code $status"
+        return $status
+    fi
+
 }
+
+#=======================================================================
+# Function: run_migrate_with_showmigrations
+#   - Always runs 'showmigrations' immediately after 'migrate'.
+#   - If 'migrate' fails, still shows migrations, then exits with failure.
+#   - If 'migrate' succeeds, execution continues normally.
+#=======================================================================
+run_migrate_with_showmigrations() {
+    echo
+    echo --------------------------------------------------------
+    run_manage_command migrate
+    local status=$?
+
+    echo
+    echo --------------------------------------------------------
+    run_manage_command showmigrations calibration || true
+
+    if [ $status -ne 0 ]; then
+        echo "migrate failed"
+        exit $status
+    fi
+}
+
 
 #=======================================================================
 # Non-Docker environment setup (packages, deps, git info)
@@ -342,7 +387,12 @@ if [ "${CERF_VENV}" != "Docker" ]; then
         echo "0 10,22 * * * /usr/sbin/logrotate -f $DEV_LOGROTATE_CONF" >> /tmp/mycron
 
         crontab /tmp/mycron
+        status=$?
         rm /tmp/mycron
+
+        if [ $status -ne 0 ]; then
+            echo "Warning: could not install cron job (exit $status)"
+        fi
 
         echo "Current crontab:"
         crontab -l
@@ -355,12 +405,7 @@ fi
 #=======================================================================
 # Run migrations, always ensure superuser, then run init_sql once
 #=======================================================================
-echo
-echo --------------------------------------------------------
-if ! run_manage_command migrate; then
-    echo "migrate failed"
-    exit 1
-fi
+run_migrate_with_showmigrations
 
 echo
 echo --------------------------------------------------------
@@ -369,9 +414,13 @@ echo
 
 echo
 echo --------------------------------------------------------
-if ! run_manage_command init_sql; then
-    echo "init_sql failed"
-    exit 1
+set +x
+run_manage_command init_sql
+status=$?
+
+if [ $status -ne 0 ]; then
+    echo "init_sql failed with exit code $status"
+    exit $status
 fi
 
 #=======================================================================
@@ -391,6 +440,12 @@ if [ "$LOAD_GAGE_DATA" = true ] || [ ! -f "$GAGE_DATA_FLAG_FILE" ]; then
     echo --------------------------------------------------------
     # Unconditional run in this branch
     run_init_gages_and_store ""
+    status=$?
+
+    if [ $status -ne 0 ]; then
+        echo "init_gages failed with exit code $status"
+        exit $status
+    fi
 
     touch "$GAGE_DATA_FLAG_FILE"
 else
@@ -401,11 +456,23 @@ else
         if [ ! -f "$CERF_GAGES_FPRINT" ]; then
             echo "No prior gage fingerprint found; running init_gages..."
             run_init_gages_and_store "$FP_NOW"
+            status=$?
+            if [ $status -ne 0 ]; then
+                echo "init_gages failed with exit code $status"
+                exit $status
+            fi
+
         else
             read -r FP_OLD < "$CERF_GAGES_FPRINT" || FP_OLD=""
             if [ "$FP_NOW" != "$FP_OLD" ]; then
                 echo "Gage inputs changed; running init_gages..."
                 run_init_gages_and_store "$FP_NOW"
+                status=$?
+                if [ $status -ne 0 ]; then
+                    echo "init_gages failed with exit code $status"
+                    exit $status
+                fi
+
             else
                 echo "Gage inputs unchanged; skipping init_gages."
             fi
@@ -413,6 +480,12 @@ else
     else
         echo "Fingerprinting failed. Running init_gages to be safe…"
         run_init_gages_and_store ""
+        status=$?
+        if [ $status -ne 0 ]; then
+            echo "init_gages failed with exit code $status"
+            exit $status
+        fi
+
     fi
 fi
 
@@ -420,9 +493,12 @@ fi
 # Pre-start hook and start server
 #=======================================================================
 echo
-if ! run_manage_command pre_start; then
-    echo "pre_start failed"
-    exit 1
+run_manage_command pre_start
+status=$?
+
+if [ $status -ne 0 ]; then
+    echo "pre_start failed with exit code $status"
+    exit $status
 fi
 
 echo

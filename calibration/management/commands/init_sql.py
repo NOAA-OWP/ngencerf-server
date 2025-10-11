@@ -4,7 +4,7 @@ from typing import cast
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ObjectDoesNotExist
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 
 from calibration.enums import DataTypeEnum
 from calibration.enums_vanilla import JobType
@@ -40,6 +40,7 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         logger.info('Initializing static tables')
+
         try:
             # need to get a user that is guaranteed to be there, such as admin
             self.user = get_user_model().objects.get(email='admin@nextgenwaterprediction.com')
@@ -47,24 +48,39 @@ class Command(BaseCommand):
             logger.error('********************************')
             logger.error('** Admin user does not exist. **')
             logger.error('********************************')
-
             sys.exit(1)
 
         logger.info(f"In init_sql: email: {cast(CustomUser, self.user).email}")
 
-        self.define_module_groups()
-        self.define_output_variables()
-        self.define_modules()
-        self.define_domains()
-        self.define_rfc()
-        self.define_forcing_source()
-        self.define_observational_source()
-        self.define_geopackage_source()
-        self.define_forecast_cycle()
-        self.define_optimization()
-        self.define_metric()
-        self.define_status()
-        self.define_plot_definitions()
+        # List of all initialization functions to run in sequence
+        steps = [
+            self.define_module_groups,
+            self.define_output_variables,
+            self.define_modules,
+            self.define_domains,
+            self.define_rfc,
+            self.define_forcing_source,
+            self.define_observational_source,
+            self.define_geopackage_source,
+            self.define_forecast_cycle,
+            self.define_optimization,
+            self.define_metric,
+            self.define_status,
+            self.define_plot_definitions,
+        ]
+
+        for func in steps:
+            name = func.__name__
+            logger.info(f"Running {name}()")
+            try:
+                func()
+            except Exception as e:
+                logger.exception(f"Error during {name}: {e}")
+                # Django respects CommandError and propagates a non-zero exit status
+                raise CommandError(f"init_sql failed in {name}: {e}")
+
+        logger.info("Static table initialization completed successfully.")
+
 
     def define_module_groups(self):
         if self.DELETE_FLAG:
