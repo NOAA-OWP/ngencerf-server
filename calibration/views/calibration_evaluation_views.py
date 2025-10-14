@@ -8,6 +8,7 @@ import zipfile
 from datetime import datetime
 
 from django.conf import settings
+from django.core.cache import cache
 from django.db.models import F, QuerySet
 from django.http import HttpResponse, StreamingHttpResponse, FileResponse, JsonResponse
 from django.views.decorators.http import require_GET
@@ -595,6 +596,14 @@ def find_ngen_stdout_log(run: CalibrationRun | ValidationRun) -> str | None:
     return ngen_log_path
 
 
+def get_zip_cache_key(calibration_run_id: int) -> str:
+    """
+    Returns the standardized cache key used to track zip job status.
+    This ensures consistent key usage across all endpoints.
+    """
+    return f'zip_status_{calibration_run_id}'
+
+
 downloadable_statuses = [s for s in StatusEnum if s not in {StatusEnum.READY, StatusEnum.SAVED}]
 
 
@@ -643,10 +652,6 @@ def get_calibration_job_zip(request: Request) -> HttpResponse:
     return response
 
 
-# Track zip status and paths in memory (can also use DB or cache if needed)
-zip_status_map = {}  # calibration_run_id -> {"status": "pending|done|error", "path": "zipfile.zip"}
-
-
 @extend_schema(
     request=CalibrationRunSerializer,
     responses={
@@ -677,25 +682,27 @@ def start_zip_for_calibration_job(request: Request) -> Response:
         return error_return
 
     calibration_run_id = validator.get('calibration_run_id')
+    cache_key = get_zip_cache_key(calibration_run_id)
 
     run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=downloadable_statuses)
     if error_return:
         return error_return
 
-    existing_status = zip_status_map.get(calibration_run_id)
-    if existing_status and existing_status["status"] == "pending":
+    zip_status = cache.get(cache_key)
+    if zip_status and zip_status.get('status') == 'pending':
         logger.info(f"Zip job already in progress for Calibration Job {calibration_run_id}")
         return Response({
             "message": "Zip job already in progress",
-            "status": existing_status["status"],
+            "status": zip_status["status"],
             "calibration_run_id": calibration_run_id
         })
-    # Mark status as pending
-    zip_status_map[calibration_run_id] = {
+
+    # Mark status as pending (shared across workers)
+    cache.set(cache_key, {
         "status": "pending",
         "path": None,
         "started_at": datetime.now().isoformat()
-    }
+    }, timeout=None)
 
     # Launch zip process in background
     def zip_job():
@@ -703,7 +710,7 @@ def start_zip_for_calibration_job(request: Request) -> Response:
         try:
             job_data_dir = run.job_data_dir
             zip_name = f"{os.path.basename(job_data_dir)}_{run.user_formulation_name}"
-            zip_path = f"/tmp/{zip_name}.zip"
+            zip_path = os.path.join(settings.CACHE_DIRECTORY, f'{zip_name}.zip')
 
             with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zip_file:
                 for root, _, files in os.walk(job_data_dir):
@@ -716,25 +723,25 @@ def start_zip_for_calibration_job(request: Request) -> Response:
                             logger.warning(f"File not found during zipping: {arc_name}")
 
             # Mark the zip job as complete
-            zip_status_map[calibration_run_id] = {
-                "status": "done",
-                "path": zip_path,
-                "started_at": zip_status_map[calibration_run_id]["started_at"]
-            }
+            cache.set(cache_key, {
+                'status': 'done',
+                'path': zip_path,
+                'started_at': cache.get(cache_key).get('started_at')
+            }, timeout=None)
 
             duration = datetime.now() - start_time
             logger.info(f"Zip job completed for Calibration Job {run.id} in {duration.total_seconds():.2f} seconds")
 
         except Exception as e:
-            zip_status_map[calibration_run_id] = {
-                "status": "error",
-                "path": None,
-                "started_at": zip_status_map[calibration_run_id].get("started_at")
-            }
+            cache.set(cache_key, {
+                'status': 'error',
+                'path': None,
+                'started_at': cache.get(cache_key).get('started_at')
+            }, timeout=None)
             duration = datetime.now() - start_time
             logger.exception(f"Failed to zip Calibration Job {run.id} after {duration.total_seconds():.2f} seconds: {e}")
 
-    threading.Thread(target=zip_job).start()
+    threading.Thread(target=zip_job, daemon=True).start()
 
     response = ({"message": "Zip job started", "calibration_run_id": calibration_run_id})
 
@@ -783,8 +790,9 @@ def get_zip_status(request: Request, calibration_run_id: int) -> StreamingHttpRe
     :param calibration_run_id: The ID of the calibration job being zipped.
     :return: StreamingHttpResponse with real-time status updates, or JsonResponse if the job is not found.
     """
-
-    if calibration_run_id not in zip_status_map:
+    cache_key = get_zip_cache_key(calibration_run_id)
+    zip_status = cache.get(cache_key)
+    if not zip_status:
         logger.info(f"get_zip_status called for Calibration Job {calibration_run_id} but no zip job found")
         return JsonResponse(
             {
@@ -802,17 +810,17 @@ def get_zip_status(request: Request, calibration_run_id: int) -> StreamingHttpRe
             # Stream loop: keep checking the job status until it is "done" or "error"
             while True:
                 # Retrieve the current zip status from in-memory map
-                status_info = zip_status_map.get(calibration_run_id, {"status": "not_found"})
+                zip_status = cache.get(cache_key, {"status": "not_found"})
 
                 # Format the status as an SSE-compatible message
-                yield f"data: {json.dumps(status_info)}\n\n"
+                yield f"data: {json.dumps(zip_status)}\n\n"
 
                 # If job has finished or failed, stop the stream (connection closes)
-                if status_info["status"] in ["done", "error"]:
+                if zip_status["status"] in ["done", "error"]:
                     duration = datetime.now() - start_time
                     logger.debug(
                         f'{get_caller_name()}() streaming complete for {get_user_email(request)} - '
-                        f'calibration_run_id={calibration_run_id} - status={status_info["status"]} - '
+                        f'calibration_run_id={calibration_run_id} - status={zip_status["status"]} - '
                         f'duration={duration.total_seconds():.2f}s'
                     )
                     break
@@ -873,15 +881,16 @@ def download_calibration_zip(request: Request) -> FileResponse | Response:
         return error_response
 
     calibration_run_id = validator.get("calibration_run_id")
+    cache_key = get_zip_cache_key(calibration_run_id)
+    zip_status = cache.get(cache_key)
 
-    status_info = zip_status_map.get(calibration_run_id)
-    if not status_info:
+    if not zip_status:
         return ResponseError(f"Zip job not found for Calibration Job {calibration_run_id}", http_status=status.HTTP_404_NOT_FOUND)
 
-    if status_info["status"] != "done":
+    if zip_status["status"] != "done":
         return ResponseError(f"Zip file for Calibration Job {calibration_run_id} is not ready yet")
 
-    zip_path = status_info.get("path")
+    zip_path = zip_status.get("path")
     if not zip_path or not os.path.exists(zip_path):
         return ResponseError(f"Zip file is missing for Calibration Job {calibration_run_id}")
 
@@ -896,11 +905,21 @@ def download_calibration_zip(request: Request) -> FileResponse | Response:
                 logger.info(f"Deleted zip file after download: {zip_path}")
             except Exception as ex:
                 logger.warning(f"Failed to delete zip file {zip_path}: {ex}")
-            zip_status_map.pop(calibration_run_id, None)
+            cache.delete(cache_key)
 
-        # Hook into response close for cleanup
-        response.close = (lambda original_close=response.close:
-                          lambda: (cleanup(), original_close())[1])()
+        # ------------------------------------------------------------------
+        # Wrap the original response.close() method so cleanup() runs first.
+        # This ensures the file and cache entry are removed immediately
+        # after the response is finished sending to the client.
+        # ------------------------------------------------------------------
+        original_close = response.close
+
+        def wrapped_close():
+            cleanup()
+            return original_close()
+
+        response.close = wrapped_close
+        # ------------------------------------------------------------------
 
         logger.debug(
             f'Returning zip for Calibration Job {calibration_run_id} to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)}')
