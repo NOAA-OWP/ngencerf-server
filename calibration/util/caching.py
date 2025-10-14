@@ -1,3 +1,45 @@
+"""
+caching.py
+
+Centralized caching utilities for static model data (Modules, Gages, OptimizationInputs, etc.)
+used throughout calibration, validation, and forecast processes.
+
+Caching Strategy
+----------------
+All data loaded here is static for the lifetime of the server process. To minimize
+database access and redundant serialization across Gunicorn workers, we use a two-layer
+approach:
+
+1. **@lru_cache (in-memory per worker)**
+   - Keeps frequently accessed data resident in each worker’s memory.
+   - Prevents repeated lookups in the Django cache layer.
+   - Ideal for static data since it never changes during runtime.
+
+2. **Django file-based cache (shared across workers)**
+   - Configured in `settings.py` using:
+         CACHES = {
+             "default": {
+                 "BACKEND": "django.core.cache.backends.filebased.FileBasedCache",
+                 "LOCATION": "/tmp/django_cache",
+             }
+         }
+   - Stores serialized cache entries on disk so all Gunicorn workers share the same
+     underlying data without re-querying the database.
+   - Provides consistency across workers with negligible overhead.
+
+Behavior Summary
+----------------
+- On first access, the function checks the Django file-based cache.
+- If no entry exists, it queries the database and writes the result to disk.
+- The @lru_cache layer keeps that data in RAM for subsequent access in the same worker.
+- Because the data is static for the life of the process, no invalidation logic is needed.
+
+This pattern ensures:
+- Shared cache state across Gunicorn workers
+- In-memory speed after the first lookup
+- No external dependencies (no Redis or Memcached required)
+"""
+
 import json
 from functools import lru_cache
 

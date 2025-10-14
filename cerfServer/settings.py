@@ -126,6 +126,16 @@ AUTHENTICATION_BACKENDS = [
     "django.contrib.auth.backends.ModelBackend",
 ]
 
+CACHE_DIRECTORY = "/tmp/django_cache"
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.filebased.FileBasedCache",
+        "LOCATION": CACHE_DIRECTORY,  # any directory writable by Gunicorn
+    }
+}
+os.makedirs(CACHE_DIRECTORY, exist_ok=True)
+os.chmod(CACHE_DIRECTORY, 0o777)
+
 AUTH_USER_MODEL = 'calibration.CustomUser'
 
 DJOSER = {

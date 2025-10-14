@@ -4,6 +4,7 @@ import sys
 
 from django.apps import AppConfig
 from django.conf import settings
+from django.core.cache import caches
 
 from calibration.util.db_diagnostics import patch_ensure_connection_with_diagnostics
 from calibration.util.git_util import print_git_info_all
@@ -73,6 +74,23 @@ class CalibrationConfig(AppConfig):
         logger.info(f'Environment: {settings.NGEN_ENVIRONMENT_STR}')
         log_worker_info()
         if running_server:
+            # ------------------------------------------------------------------
+            # Clear Django file-based cache at startup (runs once per worker)
+            #
+            # Note:
+            #   This is technically overkill since all workers share the same
+            #   file-based cache directory, but Gunicorn doesn’t provide an
+            #   easy way to execute initialization logic just once at master
+            #   startup. Clearing here is harmless and ensures a clean cache.
+            # -------------------------------------------------------------
+            try:
+                cache = caches['default']
+                cache.clear()
+                logger.info(f'Cleared Django file-based cache at {settings.CACHE_DIRECTORY}')
+            except Exception as e:
+                logger.warning(f'Failed to clear Django cache: {e}')
+            # -------------------------------------------------------------
+
             logger.info('')
             print_git_info_all()
 
