@@ -113,7 +113,6 @@ aws s3 cp --recursive s3://ngwpc-dev/ngen-static-files /ngencerf/data/ngen-stati
 
 In addition, copy the directory `module_parameter_files` and all its contents from 
 https://github.com/NGWPC/nwm-cal-mgr/tree/development/module_parameter_files to the `/ngencerf/data/ngen-static-files` directory.
-GitHub does not provide an easy way to just download a single directory, but here is a command to do it
 
 ```
 cd /ngencerf/data/ngen-static-files (for PW, use /ngencerf-app/data/ngen-cal-data/ngen-static-files)
@@ -126,7 +125,8 @@ cd .. && rm -rf tmp-nwm-cal-mgr
 ```
 
 Copy the directory `https://github.com/NGWPC/ngen-forcing/tree/forecast_validation_root_dir/NextGen_Forcings_Engine_BMI/BMI_NextGen_Configs/config_templates` 
-to the `/ngencerf/data/ngen-static-files` directory
+and all its contents 
+to the `/ngencerf/data/ngen-static-files` directory as `forecast_forcing_templates`
 
 ```
 cd /ngencerf/data/ngen-static-files (for PW, use /ngencerf-app/data/ngen-cal-data/ngen-static-files)
