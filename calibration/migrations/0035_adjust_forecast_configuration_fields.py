@@ -18,7 +18,7 @@ class Migration(migrations.Migration):
     atomic = False
 
     dependencies = [
-        ('calibration', '0034_rename_forecastcycle_to_forecastconfiguration'),
+        ('calibration', '0034b_fill_forecast_configuration_defaults'),
     ]
 
     operations = [
