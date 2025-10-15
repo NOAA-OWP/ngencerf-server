@@ -1,0 +1,117 @@
+{
+    "metadata": {
+        "source_calibration_run_id": 330,
+        "source_status": "Failed",
+        "time_range": {
+            "start_time": "2017-01-01T05:00:00+00:00",
+            "end_time": "2022-12-31T23:00:00+00:00"
+        },
+        "job_data_dir": "/ngencerf/data/ngen-cal-work/run_calib/330_peter",
+        "num_catchments": 7
+    },
+    "run_after_import": false,
+    "gage_id": "01123000",
+    "forcing_source": "AORC",
+    "observational_source": "Historical",
+    "geopackage_source": "Hydrofabric",
+    "modules": [
+        "Noah-OWP-Modular",
+        "CFE-S",
+        "SMP",
+        "SFT",
+        "T-Route"
+    ],
+    "formulation_name": "my-cfe-noah",
+    "use_sloth": true,
+    "sloth_parameters": [
+        {
+            "param_name": "sloth_ice_fraction_schaake",
+            "param_count": 1,
+            "param_type": "double",
+            "param_units": "m",
+            "param_location": "node",
+            "param_value": 1.2,
+            "maps_to_module": "CFE-S",
+            "maps_to_variable_name": "ice_fraction_schaake"
+        },
+        {
+            "param_name": "sloth_ice_fraction_xiananjiang",
+            "param_count": 1,
+            "param_type": "double",
+            "param_units": "none",
+            "param_location": "node",
+            "param_value": 0.0,
+            "maps_to_module": "CFE-S",
+            "maps_to_variable_name": "ice_fraction_soil_fraction_xiananjiang"
+        },
+        {
+            "param_name": "sloth_smp",
+            "param_count": 1,
+            "param_type": "double",
+            "param_units": "none",
+            "param_location": "node",
+            "param_value": 0.0,
+            "maps_to_module": "CFE-S",
+            "maps_to_variable_name": "soil_moisture_profile"
+        }
+    ],
+    "automatic_validation": true,
+
+    "calibration_times": {
+        "calibration_start_time": "2014-10-01T00:00:00Z",
+        "calibration_end_time": "2015-09-30T23:00:00Z",
+        "simulation_start_time": "2014-10-01T00:00:00Z",
+        "simulation_end_time": "2016-05-18T23:00:00Z"
+    },
+    "validation_times": {
+        "validation_start_time": "2015-10-01T00:00:00Z",
+        "validation_end_time": "2016-05-18T23:00:00Z",
+        "simulation_start_time": "2014-10-01T00:00:00Z",
+        "simulation_end_time": "2016-05-18T23:00:00Z"
+    },
+    "streamflow_threshold": 1.0,
+    "peak_flow_threshold": 2.0,
+    "parameters": [
+        {
+            "name": "MFSNO",
+            "minimum": 1.234e-07,
+            "maximum": 1.2545678912345,
+            "initial_value": 1.24,
+            "module": "Noah-OWP-Modular"
+        },
+        {
+            "name": "VCMX25",
+            "minimum": 120.1234,
+            "maximum": 123.2345678912345,
+            "initial_value": 123.1233,
+            "module": "Noah-OWP-Modular"
+        },
+        {
+            "name": "b",
+            "minimum": 5,
+            "maximum": 10,
+            "initial_value": 7,
+            "module": "CFE-S"
+        }
+    ],
+    "objective_function": "KGE",
+    "optimization_inputs": [
+        {
+            "name": "r",
+            "value": 0.2
+        }
+    ],
+    "optimization": "DDS",
+    "save_plot_iteration_frequency": 2,
+    "save_output_iteration": false,
+    "stop_criteria": 2,
+    "logging_config": {
+        "logging_enabled": true,
+        "modules": {
+            "noah-owp-modular": "info",
+            "cfe-s": "info",
+            "ngen": "info",
+            "t-route": "info"
+        }
+    }
+}
