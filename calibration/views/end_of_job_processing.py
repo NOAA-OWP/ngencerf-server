@@ -14,6 +14,7 @@ from django.db import transaction
 from django.utils.timezone import now
 
 from calibration.enums import OptimizationEnum, ValidationMetricPeriod, ValidationType, MetricEnum
+from calibration.enums_vanilla import SecondaryDataEnum
 from calibration.models import Iteration, CalibrationRun, IterationMetric, IterationParameter, CalibrationParameter, ValidationRun, \
     PerformanceMetrics, ValidationMetrics, NWMRetrospectiveMetrics, IterationResult, ForecastRun, ColdStartRun
 from calibration.models.base_run import BaseRun
@@ -24,7 +25,7 @@ from calibration.util.ngen_locations import get_realization_file_path, get_metri
     get_validation_performance_file, get_calibration_performance_file, get_validation_metrics_nwm_retrospective_file, get_output_iteration_csv, \
     get_validation_special_performance_file, get_forecast_forcing_download_performance_file, \
     get_forecast_performance_file, get_params_iteration_file
-from calibration.views.calibration_secondary_data_views import generate_swe_ts_data, generate_soil_moisture_ts_data
+from calibration.views.calibration_secondary_data_views import generate_secondary_ts_data
 from calibration.views.common import CerfException, get_job_description, find_validation_worker_with_matching_id
 
 logger = logging.getLogger(__name__)
@@ -276,14 +277,14 @@ def process_validation_for_validation_run(validation_run: ValidationRun) -> None
 
     logger.info('Generating SWE timeseries data')
     try:
-        generate_swe_ts_data(validation_run)
+        generate_secondary_ts_data(validation_run, SecondaryDataEnum.SWE)
     except Exception as e:
         logger.error(f'Failed to generate SWE timeseries data: {e}')
         traceback.print_exc()
 
     logger.info('Generating Soil Moisture timeseries data')
     try:
-        generate_soil_moisture_ts_data(validation_run)
+        generate_secondary_ts_data(validation_run, SecondaryDataEnum.SOIL_MOISTURE)
     except Exception as e:
         logger.error(f'Failed to generate Soil Moisture timeseries data: {e}')
         traceback.print_exc()

@@ -23,3 +23,8 @@ class JobType(StrEnum):
     COLD_START = 'cold_start'
     FORECAST = 'forecast'
     COMPARISON = 'comparison'
+
+
+class SecondaryDataEnum(StrEnum):
+    SWE = 'SWE'
+    SOIL_MOISTURE = 'Soil Moisture'

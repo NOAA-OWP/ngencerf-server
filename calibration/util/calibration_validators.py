@@ -1331,8 +1331,12 @@ class GetLogStatusResponseSerializer(GenericMessageResponseSerializer):
 ##################################
 # Snowdas/SWE/Soil Moisture
 ##################################
-class GetImagesByDateRequestSerializer(ValidationRunSerializer):
+class GetSWEImagesByDateRequestSerializer(ValidationRunSerializer):
     date = serializers.DateField(required=True, allow_null=False)
+
+
+class GetSoilMoistureImagesByDateRequestSerializer(ValidationRunSerializer):
+    datetime = serializers.DateTimeField(required=True, allow_null=False)
 
 
 class GetImagesByDateResponseSerializer(GenericMessageResponseSerializer):

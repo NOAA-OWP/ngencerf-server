@@ -5,7 +5,8 @@ from typing import Literal
 from django.conf import settings
 
 from calibration.enums import ValidationType
-from calibration.models import CalibrationRun, ForecastRun, ValidationRun, ColdStartRun
+from calibration.enums_vanilla import SecondaryDataEnum
+from calibration.models import CalibrationRun, ForecastRun, ValidationRun, ForecastForcingDownloadRun
 from cerfServer.settings import NGEN_ENVIRONMENT
 
 logger = logging.getLogger(__name__)
@@ -381,7 +382,7 @@ def get_swe_timeseries_png_filename(validation_run: ValidationRun) -> str:
     :param validation_run: The ValidationRun object.
     :return: A string representing the path to the PNG file.
     """
-    return os.path.join(get_swe_plot_dir(validation_run), 'swe_timeseries.png')
+    return os.path.join(get_secondary_plot_dir(validation_run, SecondaryDataEnum.SWE), 'swe_timeseries.png')
 
 
 def get_swe_timeseries_data_filename(validation_run: ValidationRun) -> str:
@@ -400,7 +401,7 @@ def get_swe_timeseries_data_filename(validation_run: ValidationRun) -> str:
 
 
 def get_soil_moisture_timeseries_png_filename(validation_run: ValidationRun) -> str:
-    return os.path.join(get_soil_moisture_plot_dir(validation_run), 'soil_moisture_timeseries.png')
+    return os.path.join(get_secondary_plot_dir(validation_run, SecondaryDataEnum.SOIL_MOISTURE), 'soil_moisture_timeseries.png')
 
 
 def get_soil_moisture_timeseries_data_filename(validation_run: ValidationRun) -> str:
@@ -412,23 +413,15 @@ def get_soil_moisture_timeseries_data_filename(validation_run: ValidationRun) ->
     return os.path.join(get_output_validation_run_dir(validation_run.calibration_run), filename)
 
 
-def get_swe_plot_dir(run: ValidationRun) -> str:
-    return _get_plot_dir(run, 'SWE')
-
-
-def get_soil_moisture_plot_dir(run: ValidationRun) -> str:
-    return _get_plot_dir(run, 'Soil_Moisture')
-
-
-def _get_plot_dir(run: ValidationRun, data_type: Literal['SWE', 'Soil_Moisture']) -> str:
+def get_secondary_plot_dir(run: ValidationRun, data_type: SecondaryDataEnum) -> str:
     """
     Determines and returns the appropriate plot directory for a given validation run.
     """
     if run.validation_type == ValidationType.VALID_ITERATION.value:
-        plot_dir_parent = os.path.join(get_output_validation_iteration_plot_dir(run.calibration_run, run.iteration_num, run.worker_name))
+        plot_dir_parent = os.path.dirname(get_output_validation_iteration_plot_dir(run.calibration_run, run.iteration_num, run.worker_name))
     else:
-        plot_dir_parent = os.path.join(get_output_validation_plot_dir(run.calibration_run))
+        plot_dir_parent = os.path.dirname(get_output_validation_plot_dir(run.calibration_run))
 
-    plot_dir = os.path.join(plot_dir_parent, data_type)
+    plot_dir = os.path.join(plot_dir_parent, str(data_type.value))
     os.makedirs(plot_dir, exist_ok=True)
     return plot_dir

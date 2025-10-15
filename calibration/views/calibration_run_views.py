@@ -14,8 +14,8 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 
 from calibration.enums import StatusEnum
-from calibration.enums_vanilla import JobType
-from calibration.models import Iteration, ValidationRun, ForecastRun, CalibrationRun, Status
+from calibration.enums_vanilla import JobType, SecondaryDataEnum
+from calibration.models import Iteration, ValidationRun, ForecastRun, ForecastForcingDownloadRun, CalibrationRun, Status
 from calibration.run_util.run_common import cancel_job_common, submit_job
 from calibration.run_util.run_ngen_cal_pw import SlurmStatusEnum, run_calibration_job_callback_pw, run_validation_job_callback_pw, \
     run_forecast_job_callback_pw, run_cold_start_job_callback_pw
@@ -27,7 +27,7 @@ from calibration.util.calibration_validators import CalibrationRunSerializer, Ge
     GenericResponseSerializerWithValidator, RunCalibrationJob, MPINodesRulesSerializer, MPINodesRulesResponseSerializer, \
     ColdStartJobSlurmCallbackRequestSerializer
 from calibration.views import ngen_cal_input
-from calibration.views.calibration_secondary_data_views import generate_swe_ts_data
+from calibration.views.calibration_secondary_data_views import generate_secondary_ts_data
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import ResponseError, get_calibration_run, handle_exceptions, validate_response, validate_request, \
     generate_custom_token, TOKEN_SLURM_SCOPE, get_validation_run, get_forecast_run, get_user_email, \
@@ -519,7 +519,7 @@ def process_calibration_output(request):
 def process_swe_timeseries(request: Request) -> Response:
     """
     This endpoint is mostly for testing, to kick off the processing of the SWE timeseries for a  completed job.
-    Normally generate_swe_ts_data() is called automatically when a job completes.
+    Normally generate_secondary_ts_data() is called automatically when a job completes.
     """
     data = request.data if request.method == 'POST' else request.query_params.dict()
 
@@ -535,7 +535,7 @@ def process_swe_timeseries(request: Request) -> Response:
     if error_return:
         return error_return
 
-    generate_swe_ts_data(run)
+    generate_secondary_ts_data(run, SecondaryDataEnum.SWE)
 
     response = {'message': f"SWE Timeseries processing completed for Validation Job {run.id}",
                 'validation_run_id': run.id,
