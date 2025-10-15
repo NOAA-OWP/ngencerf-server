@@ -467,7 +467,7 @@ def get_forecast_jobs_internal(
     :return: List[dict] shaped for GetForecastJobsResponseSerializer.
              Includes forecast_run_id, configuration, domain_name,
              gage_id, forecast_status, submit_date, cycle_date,
-             and cold_start_date.
+             cold_start_date, and cold_start_status.
     """
     query = Q(calibration_run__owner=user)
 
@@ -488,6 +488,7 @@ def get_forecast_jobs_internal(
                 'calibration_run__gage__gage_id',
                 'status__name',
                 'cold_start_run__cold_start_date',
+                'cold_start_run__status__name',
             )
         )
 
@@ -499,6 +500,7 @@ def get_forecast_jobs_internal(
         f['gage_id'] = f.pop('calibration_run__gage__gage_id')
         f['forecast_status'] = f.pop('status__name')
         f['cold_start_date'] = f.pop('cold_start_run__cold_start_date')
+        f['cold_start_status'] = f.pop('cold_start_run__status__name')
 
     return rows
 

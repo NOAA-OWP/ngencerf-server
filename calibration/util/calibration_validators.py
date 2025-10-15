@@ -1113,6 +1113,7 @@ class ForecastJobsResponseSerializer(BaseSerializer):
     cold_start_date = serializers.DateTimeField(required=True, allow_null=True)
     gage_id = serializers.CharField(required=True)
     forecast_status = serializers.CharField(required=True, validators=[enum_validator(StatusEnum)])
+    cold_start_status = serializers.CharField(required=False, allow_null=True, validators=[enum_validator(StatusEnum)])
     submit_date = serializers.DateTimeField(required=True, allow_null=True)
 
 
