@@ -337,26 +337,27 @@ if [ "${CERF_VENV}" != "Docker" ]; then
         # Doing a pip install with requirements.txt does not reliably pick up changes to the other repos, so we have to force a re-install every time
         #MSWM_BRANCH='jwade_NGWPC-7589_add_aet_rootzone'
         MSWM_BRANCH='development'
-        NGEN_FORCING_BRANCH='development'
+        DATA_ASSIMILATION_BRANCH='development'
 
         echo
         echo "Installing mswm"
         if pip show "mswm" > /dev/null 2>&1; then
             # Package is installed, reinstall without dependencies
-            pip install --force-reinstall --no-deps --no-cache-dir "git+https://github.com/NGWPC/nwm-msw-mgr.git@${MSWM_BRANCH}#egg=mswm"
+            pip install --force-reinstall --no-deps --no-cache-dir "git+https://github.com/NGWPC/nwm-msw-mgr.git@${MSWM_BRANCH}"
         else
             # Package is not installed, install with dependencies
-            pip install "git+https://github.com/NGWPC/nwm-msw-mgr.git@${MSWM_BRANCH}#egg=mswm"
+            pip install "git+https://github.com/NGWPC/nwm-msw-mgr.git@${MSWM_BRANCH}"
         fi
 
         echo
-        echo "Installing swe_mapping"
-        if pip show "swe_mapping" > /dev/null 2>&1; then
+        echo "Installing data_assimilation"
+        if pip show "data_assimilation" > /dev/null 2>&1; then
             # Package is installed, reinstall without dependencies
-            pip install --force-reinstall --no-deps --no-cache-dir "git+https://github.com/NGWPC/ngen-forcing.git@${NGEN_FORCING_BRANCH}#egg=swe_processing&subdirectory=swe_processing"
+            pip install --force-reinstall --no-deps --no-cache-dir "git+https://github.com/NGWPC/data-assimilation-engine.git@${DATA_ASSIMILATION_BRANCH}"
         else
             # Package is not installed, install with dependencies
-            pip install "git+https://github.com/NGWPC/ngen-forcing.git@${NGEN_FORCING_BRANCH}#egg=swe_processing&subdirectory=swe_processing"
+            pip install "git+https://github.com/NGWPC/data-assimilation-engine.git@${DATA_ASSIMILATION_BRANCH}"
+
         fi
 
         generate_git_info
