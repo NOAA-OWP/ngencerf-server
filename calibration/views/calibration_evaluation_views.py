@@ -810,17 +810,17 @@ def get_zip_status(request: Request, calibration_run_id: int) -> StreamingHttpRe
             # Stream loop: keep checking the job status until it is "done" or "error"
             while True:
                 # Retrieve the current zip status from in-memory map
-                zip_status = cache.get(cache_key, {"status": "not_found"})
+                current_zip_status = cache.get(cache_key, {"status": "not_found"})
 
                 # Format the status as an SSE-compatible message
-                yield f"data: {json.dumps(zip_status)}\n\n"
+                yield f"data: {json.dumps(current_zip_status)}\n\n"
 
                 # If job has finished or failed, stop the stream (connection closes)
-                if zip_status["status"] in ["done", "error"]:
+                if current_zip_status["status"] in ["done", "error"]:
                     duration = datetime.now() - start_time
                     logger.debug(
                         f'{get_caller_name()}() streaming complete for {get_user_email(request)} - '
-                        f'calibration_run_id={calibration_run_id} - status={zip_status["status"]} - '
+                        f'calibration_run_id={calibration_run_id} - status={current_zip_status["status"]} - '
                         f'duration={duration.total_seconds():.2f}s'
                     )
                     break
