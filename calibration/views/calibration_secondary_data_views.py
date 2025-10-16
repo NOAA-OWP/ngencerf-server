@@ -403,7 +403,7 @@ def _get_secondary_timeseries_data(
         return ResponseError(f"Failed to read {label} timeseries data file - {e}")
 
     response = {
-        "message": f"Retrieved {label} timeseries data for Validation Run {run.id}",
+        "message": f"Retrieved {label} timeseries data for {get_job_description(run)}",
         "timeseries_image": png_to_base64_url(cfg["png_func"](run)),
         "timeseries_data": ts_data,
     }
@@ -412,14 +412,14 @@ def _get_secondary_timeseries_data(
         GetTimeseriesDataResponseSerializer,
         response,
         fields_to_truncate=["timeseries_image", "timeseries_data"],
-        max_length=50,
+        max_length=10,
     )
     if error_response:
         return error_response
 
     logger.debug(
         f"Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - "
-        f"{json.dumps(truncate_large_fields(response_validator.data, fields_to_truncate=['timeseries_image', 'timeseries_data'], max_length=50))}"
+        f"{json.dumps(truncate_large_fields(response_validator.data, fields_to_truncate=['timeseries_image', 'timeseries_data'], max_length=10))}"
     )
 
     return Response(response)

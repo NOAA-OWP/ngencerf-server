@@ -6,7 +6,7 @@ from django.conf import settings
 
 from calibration.enums import ValidationType
 from calibration.enums_vanilla import SecondaryDataEnum
-from calibration.models import CalibrationRun, ForecastRun, ValidationRun, ForecastForcingDownloadRun
+from calibration.models import CalibrationRun, ForecastRun, ValidationRun, ColdStartRun
 from cerfServer.settings import NGEN_ENVIRONMENT
 
 logger = logging.getLogger(__name__)
@@ -406,7 +406,7 @@ def get_soil_moisture_timeseries_png_filename(validation_run: ValidationRun) -> 
 
 def get_soil_moisture_timeseries_data_filename(validation_run: ValidationRun) -> str:
     filename = (
-        'swe_timeseries_best.csv'
+        'soil_moisture_timeseries_best.csv'
         if validation_run.validation_type == ValidationType.VALID_BEST.value
         else f'soil_moisture_timeseries_{validation_run.worker_name}_iter{validation_run.iteration_num}'
     )

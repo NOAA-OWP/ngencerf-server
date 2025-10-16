@@ -1338,6 +1338,17 @@ class GetSWEImagesByDateRequestSerializer(ValidationRunSerializer):
 class GetSoilMoistureImagesByDateRequestSerializer(ValidationRunSerializer):
     datetime = serializers.DateTimeField(required=True, allow_null=False)
 
+    def validate_datetime(self, value):
+        """
+        Ensure that the datetime is at hour precision (minutes and seconds are zero).
+        Example of valid value: 2025-10-01T12:00:00
+        """
+        if value.minute != 0 or value.second != 0 or value.microsecond != 0:
+            raise serializers.ValidationError(
+                "Datetime must be at the top of the hour (e.g., 2025-10-01T12:00:00)."
+            )
+        return value
+
 
 class GetImagesByDateResponseSerializer(GenericMessageResponseSerializer):
     lumped_map = serializers.CharField(required=True, allow_null=False)

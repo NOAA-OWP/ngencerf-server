@@ -15,7 +15,7 @@ from rest_framework.response import Response
 
 from calibration.enums import StatusEnum
 from calibration.enums_vanilla import JobType, SecondaryDataEnum
-from calibration.models import Iteration, ValidationRun, ForecastRun, ForecastForcingDownloadRun, CalibrationRun, Status
+from calibration.models import Iteration, ValidationRun, ForecastRun, CalibrationRun, Status
 from calibration.run_util.run_common import cancel_job_common, submit_job
 from calibration.run_util.run_ngen_cal_pw import SlurmStatusEnum, run_calibration_job_callback_pw, run_validation_job_callback_pw, \
     run_forecast_job_callback_pw, run_cold_start_job_callback_pw

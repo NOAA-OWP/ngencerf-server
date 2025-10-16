@@ -81,7 +81,6 @@ class Command(BaseCommand):
 
         logger.info("Static table initialization completed successfully.")
 
-
     def define_module_groups(self):
         if self.DELETE_FLAG:
             ModuleGroup.objects.all().delete()
@@ -532,17 +531,17 @@ class Command(BaseCommand):
         for v in values:
             ForecastConfiguration.objects.update_or_create(name=v['name'],
                                                            defaults={"is_active": v.get('is_active', True),
-                                                             "internal_name": v['internal_name'],
-                                                             "data_sources": v['data_sources'],
-                                                             "time_range": v['time_range'],
-                                                             "domain": v['domain'],
-                                                             "availability_lag": v['availability_lag'],
-                                                             "cycle_start": v['cycle_start'],
-                                                             "cycle_end": v['cycle_end'],
-                                                             "cycle_freq": v['cycle_freq'],
-                                                             "fcst_win": v['fcst_win'],
-                                                             "fcst_timestep": v['fcst_timestep'],
-                                                             "created_by": self.user})
+                                                                     "internal_name": v['internal_name'],
+                                                                     "data_sources": v['data_sources'],
+                                                                     "time_range": v['time_range'],
+                                                                     "domain": v['domain'],
+                                                                     "availability_lag": v['availability_lag'],
+                                                                     "cycle_start": v['cycle_start'],
+                                                                     "cycle_end": v['cycle_end'],
+                                                                     "cycle_freq": v['cycle_freq'],
+                                                                     "fcst_win": v['fcst_win'],
+                                                                     "fcst_timestep": v['fcst_timestep'],
+                                                                     "created_by": self.user})
 
     def define_optimization(self):
         if self.DELETE_FLAG:

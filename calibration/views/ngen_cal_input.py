@@ -44,8 +44,10 @@ CONFIG_TEMPLATE = {
         "main_dir": "",
         # Snow Water equivalent output - Only True for snow models
         "output_swe": False,
-        # Soil Moisture output - always True
-        "output_sm": True,
+        # Soil Moisture output - Only True for soil moisture modules
+        "output_sm": False,
+        "sm_profile_depth": 1,
+        "sm_frac_depth": 0.4
     },
 
     "Calibration": {
@@ -303,6 +305,11 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
             # See if we have at least one module in Snowmelt
             general['output_swe'] = any(
                 any(group.name == "Snowmelt" for group in cached_modules_by_name[name].groups.all())
+                for name in module_names
+            )
+            # See if we have SMP
+            general['output_sm'] = any(
+                cached_modules_by_name[name].name == "SMP"
                 for name in module_names
             )
 
