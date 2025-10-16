@@ -84,7 +84,7 @@ def ngen_login() -> bool:
     # Case 2: Access token exists but no refresh token → treat as expired
     if access_token and not refresh_token:
         print("[DEBUG] ACCESS_TOKEN found but no REFRESH_TOKEN. Treating as expired → full login required.")
-        return _perform_full_login()
+        return perform_full_login()
 
     # Case 3: No access token, but refresh token exists → try refresh
     if refresh_token:
@@ -94,31 +94,65 @@ def ngen_login() -> bool:
             return True
         else:
             print("[DEBUG] Refresh failed. Falling back to full login...")
-            return _perform_full_login()
+            return perform_full_login()
 
     # Case 4: Neither token exists → full login
     print("[DEBUG] No tokens found. Performing full login.")
-    return _perform_full_login()
+    return perform_full_login()
 
 
-def _perform_full_login() -> bool:
+def perform_full_login(_retry=False) -> bool:
+    """
+    Perform a full login using stored or prompted credentials.
+    Will re-prompt once on failure (but never loops indefinitely).
+    """
     print("[DEBUG] Performing full login with email/password.")
+
+    # Always get latest email, but don't reload the password file on retry
     email = os.environ.get("NGEN_EMAIL") or os.environ.get("NGEN_USERNAME")
     if not email:
         email = input("ngenCerf email: ")
+    else:
+        # Prompt showing default email in brackets
+        entered = input(f"ngenCerf email [{email}]: ").strip()
+        if entered:
+            email = entered
 
-    password = os.environ.get("NGEN_PASSWORD")
-    if not password:
+    # If we're retrying, force password prompt (don't trust any saved value)
+    if _retry:
+        # On retry, always force prompt for new password
+        os.environ.pop("NGEN_PASSWORD", None)
         password = getpass.getpass("ngenCerf password: ")
+    else:
+        # Use stored password or prompt if missing
+        password = os.environ.get("NGEN_PASSWORD")
+        if not password:
+            password = getpass.getpass("ngenCerf password: ")
 
+    # Attempt login
     payload = {"email": email, "password": password}
     response = requests.post(LOGIN_ENDPOINT, json=payload)
 
+    # Handle failed login attempts
     if response.status_code != 200:
-        # Log detailed error output
-        check_http_error(response.status_code, response.text)
-        return False
+        if response.status_code == 401:
+            print("Login failed — incorrect email or password.")
+        else:
+            check_http_error(response.status_code, response.text)
+            print(f"Login failed with HTTP {response.status_code}. Please try again.")
 
+        # Clear stored password for retry
+        _clear_saved_password()
+        os.environ.pop("NGEN_PASSWORD", None)
+
+        if not _retry:
+            print("[DEBUG] Saved password failed. Prompting for new credentials...")
+            return perform_full_login(_retry=True)
+        else:
+            print("[DEBUG] Second login attempt failed. Aborting.")
+            return False
+
+    # Success case
     response_json = response.json()
     access_token = response_json.get("access")
     refresh_token = response_json.get("refresh")
@@ -137,6 +171,41 @@ def _perform_full_login() -> bool:
     else:
         print("Login succeeded, but access token missing.")
         return False
+
+
+def _clear_saved_password():
+    """Remove only the saved password so user is reprompted."""
+    os.environ.pop("NGEN_PASSWORD", None)
+    if not os.path.exists(ENV_FILE):
+        return
+    try:
+        with open(ENV_FILE, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        with open(ENV_FILE, "w", encoding="utf-8") as f:
+            for line in lines:
+                if not line.startswith("NGEN_PASSWORD="):
+                    f.write(line)
+        print("[DEBUG] Cleared invalid saved password from .ngencerf_env.")
+    except Exception as e:
+        print(f"[DEBUG] Failed to clear password: {e}")
+
+
+def _clear_auth_state():
+    """Remove tokens and stored password to ensure a clean retry."""
+    for key in ("ACCESS_TOKEN", "REFRESH_TOKEN", "NGEN_PASSWORD"):
+        os.environ.pop(key, None)
+    if not os.path.exists(ENV_FILE):
+        return
+    try:
+        with open(ENV_FILE, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        with open(ENV_FILE, "w", encoding="utf-8") as f:
+            for line in lines:
+                if not line.startswith(("ACCESS_TOKEN=", "REFRESH_TOKEN=", "NGEN_PASSWORD=")):
+                    f.write(line)
+        print("[DEBUG] Cleared invalid tokens and password from .ngencerf_env.")
+    except Exception as e:
+        print(f"[DEBUG] Failed to clean invalid credentials: {e}")
 
 
 def refresh_access_token() -> bool:

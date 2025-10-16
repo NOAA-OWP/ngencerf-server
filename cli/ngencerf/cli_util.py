@@ -46,7 +46,7 @@ def check_http_error(http_status: int, response: str, content_type: str | None =
         if http_status == 401:
             print("Unauthorized (401): Access token may have expired. Attempting refresh...")
 
-            from ngencerf.cli_user import refresh_access_token, _perform_full_login
+            from ngencerf.cli_user import refresh_access_token, perform_full_login
 
             token_fixed = False
             if refresh_access_token():
@@ -54,7 +54,7 @@ def check_http_error(http_status: int, response: str, content_type: str | None =
                 token_fixed = True
             else:
                 print("[DEBUG] Refresh failed. Prompting for full login...")
-                if _perform_full_login():
+                if perform_full_login():
                     token_fixed = True
 
             if token_fixed and retry_func:
