@@ -60,6 +60,7 @@ def get_modules(request) -> Response:
     module_groups_list = [
         {
             "name": module.name,
+            "display_name": module.display_name,
             "description": module.description,
             "is_active": module.is_active,
             "groups": sorted([g.name for g in module.groups.all()], key=lambda n: n)

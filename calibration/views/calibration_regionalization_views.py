@@ -398,6 +398,7 @@ def _build_params_csv_bytes(
         }
         params = row["_params"]  # type: ignore[assignment]
         for name in param_cols:
+            # noinspection PyUnresolvedReferences
             out_row[name] = params.get(name, "")
         writer.writerow(out_row)
 

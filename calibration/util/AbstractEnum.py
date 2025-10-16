@@ -79,6 +79,7 @@ class AbstractEnum(Generic[T], Enum):
 
         # Database-synced enum: return names from cached items
         items = cls._get_cached_items()
+        # noinspection PyUnresolvedReferences
         return [item.name for item in items.values()] if items else []
 
     @classmethod
@@ -126,6 +127,7 @@ class AbstractEnum(Generic[T], Enum):
 
             # Query the model using the filter criteria and build a dictionary of items keyed by name
             items = model.objects.filter(**filter_criteria)
+            # noinspection PyUnresolvedReferences
             item_dict = {item.name: item for item in items}
 
             # Store the item dictionary in cache

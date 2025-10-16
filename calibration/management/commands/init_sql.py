@@ -190,7 +190,7 @@ class Command(BaseCommand):
                    "description": "The soil freeze-thaw model simulates the transport of heat in soil using a one-dimensional vertical column. The model uses a standard diffusion equation discretized using a fully-implicit scheme at the interior and a semi-implicit scheme at the top and bottom boundaries, similar to NOAH-MP. More details are provided below.",
                    "groups": ["Soil Moisture"],
                    "output_variables": ["SOILICE", "SOIL_T"]},
-                  {"name": "T-Route", "
+                  {"name": "T-Route",
                    "description": "Tree-Based Channel Routing -  a dynamic channel routing model, offers a comprehensive solution for river network routing problems. Provides a series lateral inflows for each node in a channel network and computes the resulting streamflows.",
                    "groups": ["Routing"],
                    "output_variables": ["inflow", "outflow", "reservoir_assimilated_value", "water_sfc_elev", "nudge", "streamflow", "velocity", ""]}
@@ -212,7 +212,9 @@ class Command(BaseCommand):
             output_variable_names = v['output_variables'] if 'output_variables' in v else []
             output_variables = OutputVariable.objects.filter(name__in=output_variable_names)
 
+            # noinspection PyUnresolvedReferences
             module_instance.groups.set(groups)
+            # noinspection PyUnresolvedReferences
             module_instance.output_variables.set(output_variables)
             module_instance.save()
 
@@ -593,34 +595,62 @@ class Command(BaseCommand):
         if self.DELETE_FLAG:
             Metric.objects.all().delete()
 
-        values = [{"name": "Corr", "description": "Pearson Correlation"},
-                  {"name": "MAE", "description": "Mean Absolute Error"},
-                  {"name": "RMSE", "description": "Root Mean Square Error"},
-                  {"name": "RSR", "description": "Ratio of RMSE to standard deviation of observation"},
-                  {"name": "PBIAS", "description": "Percent Bias"},
-                  {"name": "KGE", "description": "Kling-Gupta Efficiency"},
-                  {"name": "NSE", "description": "Nash-Sutcliffe-Efficiency"},
-                  {"name": "NSELog", "description": "NSE of Logarithmic values"},
-                  {"name": "NNSE", "description": "Normalized NSE"},
-                  {"name": "POD", "description": "Probability of Detection", "categorical": True},
-                  {"name": "CSI", "description": "Critical Success Index", "categorical": True},
-                  {"name": "FAR", "description": "False Alarm Ratio", "categorical": True},
-                  {"name": "HSEG_FDC", "description": "Percent bias of high flow segment of flow duration curve"},
-                  {"name": "LSEG_FDC", "description": "Percent bias of low flow segment of flow duration curve"},
-                  {"name": "PKBIAS", "description": "Absolute Peak Flow Bias", "event_based": True},
-                  {"name": "PKTE", "description": "Peak Flow Timing Error", "event_based": True},
-                  {"name": "EVBIAS", "description": "Event Volume Bias", "event_based": True},
-                  {"name": "FBIAS", "description": "Frequency Bias", "categorical": True, "objective_function": False},
-                  {"name": "MSEG_FDC", "description": "Percent bias of middle flow segment of flow duration curve", "objective_function": False},
-                  {"name": "NSEWt", "description": "Weighted NSE and NSELog", "objective_function": False},
+        values = [{"name": "Corr",
+                   "display_name": "Pearson Correlation (Cor)"},
+                  {"name": "MAE",
+                   "display_name": "Mean Absolute Error (MAE)"},
+                  {"name": "RMSE",
+                   "display_name": "Root Mean Square Error (RMSE)"},
+                  {"name": "RSR",
+                   "display_name": "Ratio of RMSE to standard deviation of observation (RSR)"},
+                  {"name": "PBIAS",
+                   "display_name": "Percent Bias (PBIAS)"},
+                  {"name": "KGE",
+                   "display_name": "Kling-Gupta Efficiency (KGE)"},
+                  {"name": "NSE",
+                   "display_name": "Nash-Sutcliffe-Efficiency (NSE)"},
+                  {"name": "NSELog",
+                   "display_name": "NSE of Logarithmic values (LogNSE)"},  # Check with Yuqiong
+                  {"name": "NNSE",
+                   "display_name": "Normalized NSE (NNSE)"},
+                  {"name": "POD",
+                   "display_name": "Probability of Detection (POD)",
+                   "categorical": True},
+                  {"name": "CSI",
+                   "display_name": "Critical Success Index (CSI)",
+                   "categorical": True},
+                  {"name": "FAR",
+                   "display_name": "False Alarm Ratio (FAR)",
+                   "categorical": True},
+                  {"name": "HSEG_FDC",
+                   "display_name": "Percent bias of high flow segment of flow duration curve (HFDC)"},
+                  {"name": "LSEG_FDC",
+                   "display_name": "Percent bias of low flow segment of flow duration curve (LFDC)"},
+                  {"name": "PKBIAS",
+                   "display_name": "Absolute Peak Flow Bias",
+                   "event_based": True},
+                  {"name": "PKTE",
+                   "display_name": "Peak Flow Timing Error",
+                   "event_based": True},
+                  {"name": "EVBIAS",
+                   "display_name": "Event Volume Bias",
+                   "event_based": True},
+                  {"name": "FBIAS",
+                   "display_name": "Frequency Bias",
+                   "categorical": True, "objective_function": False},
+                  {"name": "MSEG_FDC",
+                   "display_name": "Percent bias of middle flow segment of flow duration curve",
+                   "objective_function": False},
+                  {"name": "NSEWt",
+                   "display_name": "Weighted NSE and NSELog",
+                   "objective_function": False},
                   ]
 
         for v in values:
             Metric.objects.update_or_create(name=v['name'], defaults={"is_active": v.get('is_active', True),
-                                                                      "description": v['description'],
+                                                                      "display_name": v['display_name'],
                                                                       "categorical": v.get('categorical', False),
                                                                       "event_based": v.get('event_based', False),
-                                                                      "objective_function": v.get('objective_function', True),
                                                                       "created_by": self.user})
 
     def define_status(self):

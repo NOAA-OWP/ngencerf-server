@@ -809,6 +809,7 @@ class SaveFormulationResponseSerializer(GenericResponseSerializer):
 
 class ModuleStaticSerializer(BaseSerializer):
     name = serializers.CharField(required=True, allow_blank=False)
+    display_name = serializers.CharField(required=True, allow_blank=False)
     description = serializers.CharField(required=True, allow_blank=False)
     groups = serializers.ListField(child=serializers.CharField(required=True))
     is_active = serializers.BooleanField(required=True)

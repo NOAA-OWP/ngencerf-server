@@ -213,7 +213,7 @@ def get_cached_modules_with_groups() -> dict[str, Module]:
         qs = (
             Module.objects.filter(is_active=True)
             .prefetch_related("groups", "output_variables")
-            .only("id", "name", "description", "is_active")
+            .only("id", "name", "display_name", "description", "is_active")
         )
         modules = {m.name: m for m in qs}
         # Force evaluate groups/output_variables to avoid lazy loading

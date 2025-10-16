@@ -4,12 +4,12 @@ from calibration.models.base_model import BaseModel
 
 
 class Metric(BaseModel):
-    description = models.TextField(null=False)
     is_active = models.BooleanField(null=False, default=True)
-    name = models.CharField(max_length=255, unique=True, null=False)
+    name = models.CharField(max_length=50, unique=True, null=False)
+    display_name = models.TextField( null=False)
     categorical = models.BooleanField(null=False, default=False)
     event_based = models.BooleanField(null=False, default=False)
-    objective_function = models.BooleanField(null=False, default=False)
+    # objective_function = models.BooleanField(null=False, default=False)
 
     class Meta:
         db_table = 'metric'
