@@ -50,7 +50,7 @@ class Command(BaseCommand):
             logger.error('********************************')
             sys.exit(1)
 
-        logger.info(f"In init_sql: email: {cast(Cust            omUser, self.user).email}")
+        logger.info(f"In init_sql: email: {cast(CustomUser, self.user).email}")
 
         # List of all initialization functions to run in sequence
         steps = [
@@ -62,7 +62,7 @@ class Command(BaseCommand):
             self.define_forcing_source,
             self.define_observational_source,
             self.define_geopackage_source,
-            self.define_forecast_cycle,
+            self.define_forecast_configuration,
             self.define_optimization,
             self.define_metric,
             self.define_status,
