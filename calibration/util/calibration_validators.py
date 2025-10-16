@@ -184,7 +184,7 @@ class CreateColdStartRequestSerializer(CalibrationRunSerializer):
 class CreateForecastRequestSerializer(CalibrationRunSerializer):
     configuration_name = serializers.CharField(required=True, validators=[enum_validator(ForecastConfigEnum)])
     cycle_date = serializers.DateTimeField(required=True, allow_null=False)
-    cold_start_date = serializers.DateTimeField(required=False, allow_null=False)
+    cold_start_date = serializers.DateTimeField(required=False, allow_null=True)
 
 
 ##################################
