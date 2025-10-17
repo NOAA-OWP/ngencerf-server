@@ -66,7 +66,7 @@ def load_optimization_tab(request) -> Response:
     if error_return:
         return error_return
 
-    metrics = MetricEnum.get_choices_with_fields(fields=['name', 'description', 'categorical', 'event_based'],
+    metrics = MetricEnum.get_choices_with_fields(fields=['name', 'display_name', 'categorical', 'event_based'],
                                                  extra_filter={'objective_function': True})
 
     optimization_list = get_static_optimizations()

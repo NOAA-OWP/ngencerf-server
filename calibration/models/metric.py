@@ -9,7 +9,7 @@ class Metric(BaseModel):
     display_name = models.TextField( null=False)
     categorical = models.BooleanField(null=False, default=False)
     event_based = models.BooleanField(null=False, default=False)
-    # objective_function = models.BooleanField(null=False, default=False)
+    objective_function = models.BooleanField(null=False, default=False)
 
     class Meta:
         db_table = 'metric'

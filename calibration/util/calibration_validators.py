@@ -915,7 +915,7 @@ class OptimizationInputsUserSerializer(serializers.Serializer):
 
 class MetricSerializer(serializers.Serializer):
     name = serializers.CharField()
-    description = serializers.CharField()
+    display_name = serializers.CharField()
     categorical = serializers.BooleanField()
     event_based = serializers.BooleanField()
 

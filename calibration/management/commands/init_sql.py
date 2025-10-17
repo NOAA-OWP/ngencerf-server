@@ -651,6 +651,7 @@ class Command(BaseCommand):
                                                                       "display_name": v['display_name'],
                                                                       "categorical": v.get('categorical', False),
                                                                       "event_based": v.get('event_based', False),
+                                                                      "objective_function": v.get('objective_function', True),
                                                                       "created_by": self.user})
 
     def define_status(self):
