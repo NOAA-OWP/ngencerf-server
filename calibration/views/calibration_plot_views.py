@@ -20,23 +20,24 @@ from calibration.util.caching import get_filtered_plot_definitions
 from calibration.util.calibration_validators import EmptySerializer, GetPlotNamesResponseSerializer, \
     GetPlotNamesForComparisonResponseSerializer, ErrorResponseSerializer, GetPlotRequestSerializer, \
     GetPlotResponseSerializer, GetPlotsForComparisonRequestSerializer, GetPlotsForComparisonResponseSerializer, \
-    CalibrationOrValidationOrForecastRunSerializer
+    CalibrationOrValidationRunSerializer
 from calibration.util.ngen_locations import get_output_calibration_run_dir, get_output_validation_plot_dir, get_output_iteration_file, \
     get_output_last_iteration_file, get_output_best_iteration_file, get_observational_file_for_job, get_cost_hist_file, \
     NWM_RETROSPECTIVE_DIR, get_output_valid_control_file, get_output_valid_best_file, get_output_validation_iteration_plot_dir, \
-    get_output_valid_iteration_file, get_forecast_output_dir, get_forecast_output_file
+    get_output_valid_iteration_file, get_forecast_output_dir
 from calibration.views.calibration_evaluation_views import get_iterations_for_calibration_job
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import get_calibration_run, handle_exceptions, validate_response, validate_request, CerfException, \
     ResponseError, truncate_large_fields, get_validation_run, get_job_description, \
-    get_forecast_run, replace_nan_and_inf_with_none, png_to_base64_url, process_worker_dirs, get_user_email, get_elapsed_str
+    replace_nan_and_inf_with_none, png_to_base64_url, \
+    process_worker_dirs, get_user_email, get_elapsed_str
 from calibration.views.get_jobs_views import get_validation_jobs_internal
 
 logger = logging.getLogger(__name__)
 
 
 @extend_schema(
-    request=CalibrationOrValidationOrForecastRunSerializer,
+    request=CalibrationOrValidationRunSerializer,
     responses={
         200: GetPlotNamesResponseSerializer,
         400: OpenApiResponse(
@@ -54,21 +55,21 @@ logger = logging.getLogger(__name__)
 @handle_exceptions
 def get_plot_names(request: Request) -> Response:
     """
-    Retrieves the list of plot names and descriptions for a calibration run, filtered by applicable optimizations.
+    Retrieves the list of plot names and descriptions for a run, filtered by applicable optimizations.
 
     :param request: The request containing either POST data or query parameters.
-    :return: A JSON response with the calibration run ID, list of plot names and descriptions, and run status.
+    :return: A JSON response with the run ID, list of plot names and descriptions, and run status.
     """
     data = request.data if request.method == 'POST' else request.query_params.dict()
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
 
-    validator, error_return = validate_request(CalibrationOrValidationOrForecastRunSerializer, data)
+    validator, error_return = validate_request(CalibrationOrValidationRunSerializer, data)
     if error_return:
         return error_return
 
     calibration_run_id = validator.get('calibration_run_id')
     validation_run_id = validator.get('validation_run_id')
-    forecast_run_id = validator.get('forecast_run_id')
+    #forecast_run_id = validator.get('forecast_run_id')
 
     # Determine job type and retrieve the appropriate run instance
     if calibration_run_id:
@@ -79,21 +80,23 @@ def get_plot_names(request: Request) -> Response:
         run_func = get_validation_run
         run_id = validation_run_id
         run_type = JobType.VALIDATION.value.capitalize()
+    # elif forecast_run_id:
+    #     run_func = get_forecast_run
+    #     run_id = forecast_run_id
+    #     run_type = JobType.FORECAST.value.capitalize()
     else:
-        run_func = get_forecast_run
-        run_id = forecast_run_id
-        run_type = JobType.FORECAST.value.capitalize()
+        message = f"Invalid job type sent to {get_caller_name()}"
+        logger.exception(message)
+        return ResponseError(message, response_type='error')
     run, error_return = run_func(run_id, request.user,
                                  run_status=[StatusEnum.RUNNING, StatusEnum.DONE, StatusEnum.CANCELLED, StatusEnum.FAILED, StatusEnum.SERVER_ERROR])
     if error_return:
         return error_return
 
-    # Get filtered plot definitions for the run
-    filtered_plot_definitions = get_filtered_plot_definitions(run)
-
     fields = ['name', 'display_name', 'description', 'timeseries_available']
     plot_names = []
 
+    filtered_plot_definitions = get_filtered_plot_definitions(run)
     for plot in filtered_plot_definitions:
         try:
             plot_file_path = plot_exists(run, plot)
@@ -208,8 +211,7 @@ def get_plot(request: Request) -> Response:
 
     If a calibration_run_id is given, then we can retrieve plots for the calibration run or the validation best run.
     If a validation_run_id is given, then we can retrieve plots for that specific validation run as well as the calibration run.
-    If a forecast_run_id is given, then we can retrieve plots for that specific forecast run as well as the calibration run.
-
+    
     :param request: The request containing plot name and options.
     :return: A JSON response with plot details, or an error if the plot is not found.
     :raises ResponseError: If the plot cannot be found or an error occurs.
@@ -223,7 +225,7 @@ def get_plot(request: Request) -> Response:
 
     calibration_run_id = validator.get('calibration_run_id')
     validation_run_id = validator.get('validation_run_id')
-    forecast_run_id = validator.get('forecast_run_id')
+    #forecast_run_id = validator.get('forecast_run_id')
 
     plot_name = validator.get('plot_name')
     include_data = validator.get('include_data')
@@ -250,10 +252,14 @@ def get_plot(request: Request) -> Response:
         run_func = get_validation_run
         run_id = validation_run_id
         run_type = JobType.VALIDATION.value.capitalize()
+    # elif forecast_run_id:
+    #     run_func = get_forecast_run
+    #     run_id = forecast_run_id
+    #     run_type = JobType.FORECAST.value.capitalize()
     else:
-        run_func = get_forecast_run
-        run_id = forecast_run_id
-        run_type = JobType.FORECAST.value.capitalize()
+        message = f"Invalid job type sent to {get_caller_name()}"
+        logger.exception(message)
+        return ResponseError(message, response_type='error')
 
     run, error_return = run_func(run_id, request.user,
                                  run_status=[StatusEnum.RUNNING, StatusEnum.DONE, StatusEnum.CANCELLED, StatusEnum.FAILED, StatusEnum.SERVER_ERROR])
@@ -323,8 +329,8 @@ def get_plot(request: Request) -> Response:
 
     if validation_run_id:
         response['validation_run_id'] = validation_run_id
-    if forecast_run_id:
-        response['forecast_run_id'] = forecast_run_id
+    # if forecast_run_id:
+    #     response['forecast_run_id'] = forecast_run_id
     if include_data:
         response['plot_data'] = plot_data
         if pagination_metadata:
@@ -575,11 +581,11 @@ def determine_plot_location(run: CalibrationRun | ValidationRun | ForecastRun, p
             raise CerfException(f"Unknown location '{plot_definition['location']}' in PlotDefinitions")
 
 
-def get_plot_data(run: CalibrationRun | ValidationRun | ForecastRun, plot_definition: dict[str, Any], start: int, limit: int) -> dict[str, Any]:
+def get_plot_data(run: CalibrationRun | ValidationRun, plot_definition: dict[str, Any], start: int, limit: int) -> dict[str, Any]:
     """
     Retrieves data for a specific plot based on its definition and includes the total count of rows.
 
-    :param run: The run object, either a calibration, validation, or forecast run
+    :param run: The run object, either a calibration or validation run
     :param plot_definition: Dictionary containing plot specifications.
     :param start: The starting index for pagination.
     :param limit: The maximum number of items to retrieve.
@@ -592,28 +598,28 @@ def get_plot_data(run: CalibrationRun | ValidationRun | ForecastRun, plot_defini
     calibration_run = None
 
     # Ensure ForecastRun only processes FORECAST_HYDROGRAPH
-    if isinstance(run, ForecastRun):
-        if plot_enum != PlotDefinitionsEnum.FORECAST_HYDROGRAPH:
-            raise CerfException(f"Invalid plot type '{plot_enum}' requested for ForecastRun {run.id}.")
-    else:
-        if not isinstance(run, (CalibrationRun, ValidationRun)):
-            raise CerfException(f"Invalid plot type '{plot_enum}' requested for {type(run).__name__} {run.id}.")
-        calibration_run = run.calibration_run if isinstance(run, ValidationRun) else run
+    # if isinstance(run, ForecastRun):
+    #     if plot_enum != PlotDefinitionsEnum.FORECAST_HYDROGRAPH:
+    #         raise CerfException(f"Invalid plot type '{plot_enum}' requested for ForecastRun {run.id}.")
+    # else:
+    if not isinstance(run, (CalibrationRun, ValidationRun)):
+        raise CerfException(f"Invalid plot type '{plot_enum}' requested for {type(run).__name__} {run.id}.")
+    calibration_run = run.calibration_run if isinstance(run, ValidationRun) else run
 
     worker_dir = None  # Cache worker directory to avoid multiple lookups
 
     match plot_enum:
-        case PlotDefinitionsEnum.FORECAST_HYDROGRAPH:
-            # Ensure only ForecastRun can access this plot type
-            if not isinstance(run, ForecastRun):
-                raise CerfException(f"'{plot_enum}' is only valid for ForecastRun.")
+        # case PlotDefinitionsEnum.FORECAST_HYDROGRAPH:
+        #     # Ensure only ForecastRun can access this plot type
+        #     if not isinstance(run, ForecastRun):
+        #         raise CerfException(f"'{plot_enum}' is only valid for ForecastRun.")
 
-            # Read the forecast output data from a file and paginate the result
-            forecast_output = get_forecast_output_file(run)
-            if not os.path.exists(forecast_output):
-                raise FileNotFoundError(f"File not found: {forecast_output}")
-            data, total_count = count_and_read_file_in_chunks(forecast_output, start, limit)
-            return {'data': data, 'total_count': total_count}
+        #     # Read the forecast output data from file and paginate the result
+        #     forecast_output = get_forecast_output_file(run)
+        #     if not os.path.exists(forecast_output):
+        #         raise FileNotFoundError(f"File not found: {forecast_output}")
+        #     data, total_count = count_and_read_file_in_chunks(forecast_output, start, limit)
+        #     return {'data': data, 'total_count': total_count}
 
         case PlotDefinitionsEnum.OBJECTIVE_FUNCTION_EVOLUTION:
             # Only get iterations for a specific worker
@@ -889,43 +895,50 @@ def read_and_prepare_hydrograph_files(file_path: str, column_mapping: dict[str, 
     return df
 
 
-def count_and_read_file_in_chunks(file_path: str, start: int, limit: int) -> tuple[list[dict[str, Any]], int]:
+def count_and_read_file_in_chunks(
+    file_path: str,
+    start: int | None = None,
+    limit: int | None = None
+) -> tuple[list[dict[str, Any]], int]:
     """
-    Counts the total number of rows (excluding the header) in a file and retrieves a specific slice of rows efficiently.
-
+    Counts the total number of rows (excluding the header) in a file and retrieves
+    a specific slice of rows efficiently. If `start` and `limit` are not provided,
+    reads the entire file.
     :param file_path: Path to the CSV file to be read.
     :param start: Starting index for pagination (0-based, excluding the header).
     :param limit: Maximum number of rows to retrieve.
-    :return: A tuple containing the paginated rows and total row count (excluding the header).
+    :return: A tuple containing the retrieved rows and total row count (excluding the header).
     :raises CerfException: If the file cannot be read due to an error.
     """
     try:
         # Read only the header to get column names
         with open(file_path, 'r') as file:
             header = next(file).strip().split(",")
-
         # Count total rows efficiently (excluding header)
         with open(file_path, 'r') as file:
-            total_count = sum(1 for _ in file) - 1  # Subtract 1 for the header row
-
-        # Ensure start is within valid range
-        if start >= total_count:
-            return [], total_count  # No data to return
-
-        # Read only the required rows using pandas
-        df = pd.read_csv(file_path, skiprows=list(range(1, start + 1)), nrows=limit, names=header, header=0)
-
-        # Convert the "time" column to datetime format, handling errors
+            total_count = sum(1 for _ in file) - 1  # Subtract 1 for header
+        # If no pagination, read entire file
+        if start is None and limit is None:
+            df = pd.read_csv(file_path)
+        else:
+            # Normalize start
+            start = start or 0
+            if start >= total_count:
+                return [], total_count  # Nothing to return
+            df = pd.read_csv(
+                file_path,
+                skiprows=list(range(1, start + 1)),
+                nrows=limit,
+                names=header,
+                header=0
+            )
+        # Convert "time" column to datetime format if present
         if "time" in df.columns:
             df["time"] = pd.to_datetime(df["time"], errors="coerce")
             df = df.dropna(subset=["time"])  # Drop rows with invalid timestamps
-
         # Convert DataFrame to a list of dictionaries
-        raw_data = df.to_dict(orient="records")
-        # Cast to avoid Pycharm warning
-        data = cast(list[dict[str, Any]], raw_data)
+        data = cast(list[dict[str, Any]], df.to_dict(orient="records"))
         return data, total_count
-
     except Exception as e:
         logger.error(f"Error reading file: {e}")
         raise CerfException(f"Failed to read file: {file_path}")

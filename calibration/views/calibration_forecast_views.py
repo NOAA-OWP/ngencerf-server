@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import shutil
 
 from django.db import transaction
@@ -11,8 +12,10 @@ from rest_framework.response import Response
 from calibration.enums import ForecastConfigEnum, StatusEnum
 from calibration.run_util.run_common import submit_job
 from calibration.util.calibration_validators import ErrorResponseSerializer, LoadForecastTabResponseSerializer, \
-    ForecastRunSerializer, CreateAndRunForecastResponseSerializer, DeleteForecastRunResponseSerializer, CalibrationRunSerializer
-from calibration.util.ngen_locations import get_forecast_dir
+    ForecastRunSerializer, CreateAndRunForecastResponseSerializer, DeleteForecastRunResponseSerializer, CalibrationRunSerializer, \
+    ForecastRunDataResponseSerializer
+from calibration.util.ngen_locations import get_forecast_dir, get_forecast_output_file, get_cold_start_output_file
+from calibration.views.calibration_secondary_data_views import read_csv_as_json
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import handle_exceptions, validate_response, validate_request, get_forecast_run, create_forecast_run_internal, \
     ResponseError, get_user_email, get_elapsed_str, readonly_transaction, get_calibration_run, truncate_large_fields
@@ -63,7 +66,7 @@ def load_forecast_tab(request: Request) -> Response:
         return error_return
 
     with readonly_transaction():
-        # TODO This will only return activate configurations.  Do we want to return everything and let the UI filter?
+        # TODO This will only return active configurations.  Do we want to return everything and let the UI filter?
         configuration_values = ForecastConfigEnum.get_choices_with_fields(
             fields=['name', 'data_sources', 'time_range', 'is_active',
                     'cycle_start', 'cycle_end', 'cycle_freq', 'fcst_win', 'fcst_timestep', 'availability_lag'
@@ -146,6 +149,99 @@ def clone_and_run_forecast_job(request: Request) -> Response:
 @extend_schema(
     request=ForecastRunSerializer,
     responses={
+        200: ForecastRunDataResponseSerializer,
+        400: OpenApiResponse(
+            response=ErrorResponseSerializer,
+            description="Validation error or parsing error"
+        ),
+        500: OpenApiResponse(
+            response=ErrorResponseSerializer,
+            description="Internal server error"
+        )
+    },
+    description="Delete a forecast job"
+)
+@api_view(['POST', 'GET'])
+@handle_exceptions
+def get_forecast_data(request: Request) -> Response:
+    """
+    Load results for a forecast job (and related cold start job).
+
+    :param request: HTTP request containing forecast_run_id
+    :return: JSON response with forecast cycle values.
+    """
+    data = request.data if request.method == 'POST' else request.query_params.dict()
+    logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
+
+    validator, error_return = validate_request(ForecastRunSerializer, data)
+    if error_return:
+        return error_return
+
+    forecast_run_id = validator.get('forecast_run_id')
+
+    run, error_return = get_forecast_run(forecast_run_id, request.user, run_status=list(StatusEnum))
+    if error_return:
+        return error_return
+
+    # Read the output data from forecast (and possibly cold start)
+    forecast_output = get_forecast_output_file(run)
+    if not os.path.exists(forecast_output):
+        raise FileNotFoundError(f"File not found: {forecast_output}")
+
+    # Explicitly enforce the exact keys we want instead of inheriting CSV header
+    forecast_data = read_csv_as_json(forecast_output, keys=["Time", "sim_flow"])
+
+    cold_start_output = get_cold_start_output_file(run)
+    if cold_start_output and os.path.exists(cold_start_output):
+        cold_start_data = read_csv_as_json(cold_start_output, keys=["Time", "cold_start_flow"])
+
+        data = []
+        # Append all cold start rows first (cold_start_flow populated, sim_flow None),
+        # then append all forecast rows (sim_flow populated, cold_start_flow None).
+        for row in cold_start_data:
+            data.append({
+                "time": row["Time"],
+                "cold_start_flow": row["cold_start_flow"],
+                "sim_flow": None
+            })
+        for row in forecast_data:
+            data.append({
+                "time": row["Time"],
+                "cold_start_flow": None,
+                "sim_flow": row["sim_flow"]
+            })
+
+    else:
+        # No cold start — forecast only
+        data = [
+            {"time": row["Time"], "cold_start_flow": None, "sim_flow": row["sim_flow"]}
+            for row in forecast_data
+        ]
+
+    response = {
+        'forecast_run_id': forecast_run_id,
+        'plot_data': data,
+        'total_count': len(data)  # since using full file read
+    }
+    # Validate and return response
+    response_validator, error_response = validate_response(
+        ForecastRunDataResponseSerializer, response,
+        fields_to_truncate=['plot_data'], max_length=10
+    )
+    if error_response:
+        return error_response
+
+    logger.debug(
+        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - '
+        f'{json.dumps(truncate_large_fields(response_validator.data, fields_to_truncate=["plot_data"], max_length=10))}'
+    )
+
+    return Response(response_validator.data)
+
+
+@extend_schema(
+    request=ForecastRunSerializer,
+    responses={
         200: DeleteForecastRunResponseSerializer,
         400: OpenApiResponse(
             response=ErrorResponseSerializer,
@@ -163,7 +259,7 @@ def clone_and_run_forecast_job(request: Request) -> Response:
 def delete_forecast_job(request: Request) -> Response:
     """
     Delete a forecast job along with the associated cold start job. 
-    In the future, we shouldn't delete the cold start job with the forecast.  It should be treated independantly
+    In the future, we shouldn't delete the cold start job with the forecast.  It should be treated independently
 
     :param request: The HTTP request object.
     :return: A Response object with the deletion confirmation.

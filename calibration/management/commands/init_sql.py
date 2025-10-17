@@ -401,7 +401,8 @@ class Command(BaseCommand):
             },
             {
                 "name": "Medium Range MEM4", "internal_name": "medium_range_mem4", "data_sources": "tbd",
-                "time_range": "Latest forecast cycle - 240 hours", "domain": conus_domain,
+                "time_range": "Latest forecast cycle - 240 hours",
+                "domain": conus_domain,
                 "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 240, "fcst_timestep": 1,
                 "availability_lag": 6,
                 "is_active": False

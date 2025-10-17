@@ -701,7 +701,7 @@ class PlotListStaticSerializer(BaseSerializer):
     timeseries_available = serializers.BooleanField(required=True, allow_null=False)
 
 
-class GetPlotNamesResponseSerializer(CalibrationOrValidationOrForecastRunSerializer):
+class GetPlotNamesResponseSerializer(CalibrationOrValidationRunSerializer):
     plot_names = PlotListStaticSerializer(many=True)
     status = serializers.CharField(required=True, validators=[enum_validator(StatusEnum)])
 
@@ -710,7 +710,7 @@ class GetPlotNamesForComparisonResponseSerializer(BaseSerializer):
     plot_names = PlotListStaticSerializer(many=True)
 
 
-class GetPlotRequestSerializer(CalibrationOrValidationOrForecastRunSerializer):
+class GetPlotRequestSerializer(CalibrationOrValidationRunSerializer):
     plot_name = serializers.CharField(required=True, allow_null=False, validators=[enum_validator(PlotDefinitionsEnum)])
     include_data = serializers.BooleanField(required=False, default=False)
     force_include_plot = serializers.BooleanField(required=False, default=False)
@@ -739,6 +739,12 @@ class GetPlotResponseSerializer(CalibrationRunSerializer):
     plot_url = serializers.CharField(required=False, allow_null=False)
     plot_data = serializers.JSONField(required=False)
     pagination_metadata = PaginationMetadataSerializer(required=False)
+
+
+class ForecastRunDataResponseSerializer(BaseSerializer):
+    forecast_run_id = serializers.IntegerField(required=True)
+    plot_data = serializers.JSONField(required=True)
+    total_count = serializers.IntegerField(required=True)
 
 
 class GetPlotErrorResponseSerializer(BaseSerializer):
