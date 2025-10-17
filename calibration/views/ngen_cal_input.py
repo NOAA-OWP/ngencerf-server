@@ -24,6 +24,7 @@ from calibration.util.ngen_locations import CFE_LIB, TOPMD_LIB, SFT_LIB, SLOTH_L
     PET_LIB, SNOW17_LIB, SAC_LIB, NWM_RETROSPECTIVE_DIR, get_bmi_config_dir_for_module, get_bmi_config_key, UEB_LIB, NGEN_MODULE_PARAMETERS, \
     PARALLEL_NGEN_EXE, PARTITION_GENERATOR_EXE
 from calibration.views.calibration_formulation_views import validate_formulation
+from calibration.views.calibration_secondary_data_views import should_generate_swe, should_generate_soil_moisture
 from calibration.views.calibration_tuning_views import get_full_evaluation_date_range, validate_time_range_against_data
 from calibration.views.called_from import called_from
 from calibration.views.common import TOKEN_NGEN_SCOPE, generate_custom_token, SLOTH, format_datetime, join_with_or, ErrorReport, readonly_transaction
@@ -302,16 +303,8 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
             for f in formulation_errors:
                 error_object.add_error(f)
 
-            # See if we have at least one module in Snowmelt
-            general['output_swe'] = any(
-                any(group.name == "Snowmelt" for group in cached_modules_by_name[name].groups.all())
-                for name in module_names
-            )
-            # See if we have SMP
-            general['output_sm'] = any(
-                cached_modules_by_name[name].name == "SMP"
-                for name in module_names
-            )
+            general['output_swe'] = should_generate_swe(module_names, cached_modules_by_name)
+            general['output_sm'] = should_generate_soil_moisture(module_names, cached_modules_by_name)
 
             if run.use_sloth:
                 general['models'] += f', {SLOTH}'

@@ -488,3 +488,25 @@ def read_csv_as_json(csv_filepath: str) -> list[dict[str, str]]:
     """
     with open(csv_filepath, newline='') as csvfile:
         return list(csv.DictReader(csvfile))
+
+
+def should_generate_swe(module_names: set[str], cached_modules_by_name: dict) -> bool:
+    """
+    Determine whether SWE timeseries data should be generated.
+    Returns True if at least one module belongs to the 'Snowmelt' group.
+    """
+    return any(
+        any(group.name == "Snowmelt" for group in cached_modules_by_name[name].groups.all())
+        for name in module_names
+    )
+
+
+def should_generate_soil_moisture(module_names: set[str], cached_modules_by_name: dict) -> bool:
+    """
+    Determine whether Soil Moisture timeseries data should be generated.
+    Returns True if an SMP module is present.
+    """
+    return any(
+        cached_modules_by_name[name].name == "SMP"
+        for name in module_names
+    )
