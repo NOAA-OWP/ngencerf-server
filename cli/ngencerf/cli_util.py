@@ -50,7 +50,7 @@ def check_http_error(http_status: int, response: str, content_type: str | None =
 
             token_fixed = False
             if refresh_access_token():
-                print("[DEBUG] Refresh succeeded.")
+                print("Access token refreshed.\n")
                 token_fixed = True
             else:
                 print("[DEBUG] Refresh failed. Prompting for full login...")
@@ -60,13 +60,14 @@ def check_http_error(http_status: int, response: str, content_type: str | None =
             if token_fixed and retry_func:
                 print("[DEBUG] Retrying request with new token...")
                 new_response = retry_func()
-                if new_response.status_code == 200:
-                    try:
-                        return new_response.json(), True
-                    except Exception:
-                        return None, True
-                else:
-                    return new_response.text, False
+
+                # Re-evaluate the new response recursively (no infinite retry)
+                return check_http_error(
+                    new_response.status_code,
+                    new_response.text,
+                    new_response.headers.get("Content-Type"),
+                    retry_func=None
+                )
 
             return {"detail": "Token fixed, but no retry performed."}, token_fixed
 
