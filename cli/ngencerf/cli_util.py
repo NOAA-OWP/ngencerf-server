@@ -50,7 +50,6 @@ def check_http_error(http_status: int, response: str, content_type: str | None =
 
             token_fixed = False
             if refresh_access_token():
-                print("Access token refreshed.\n")
                 token_fixed = True
             else:
                 print("[DEBUG] Refresh failed. Prompting for full login...")

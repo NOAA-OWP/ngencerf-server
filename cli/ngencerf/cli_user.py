@@ -142,11 +142,11 @@ def perform_full_login(_retry=False) -> bool:
             print(f"Login failed with HTTP {response.status_code}. Please try again.")
 
         # Clear stored password for retry
+        print("[DEBUG] Saved password failed. Prompting for new credentials...")
         _clear_saved_password()
         os.environ.pop("NGEN_PASSWORD", None)
 
         if not _retry:
-            print("[DEBUG] Saved password failed. Prompting for new credentials...")
             return perform_full_login(_retry=True)
         else:
             print("[DEBUG] Second login attempt failed. Aborting.")
@@ -175,9 +175,12 @@ def perform_full_login(_retry=False) -> bool:
 
 def _clear_saved_password():
     """Remove only the saved password so user is reprompted."""
+    print("[DEBUG] Clearing invalid saved password from .ngencerf_env...")
     os.environ.pop("NGEN_PASSWORD", None)
+
     if not os.path.exists(ENV_FILE):
         return
+
     try:
         with open(ENV_FILE, "r", encoding="utf-8") as f:
             lines = f.readlines()
@@ -185,7 +188,6 @@ def _clear_saved_password():
             for line in lines:
                 if not line.startswith("NGEN_PASSWORD="):
                     f.write(line)
-        print("[DEBUG] Cleared invalid saved password from .ngencerf_env.")
     except Exception as e:
         print(f"[DEBUG] Failed to clear password: {e}")
 
