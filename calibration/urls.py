@@ -104,7 +104,7 @@ urlpatterns = [
     path('calibration/get_forecast_jobs/', calibration.views.get_jobs_views.get_forecast_jobs, name="getForecastJobs"),
     path('calibration/get_forecast_jobs_for_verification/', calibration.views.get_jobs_views.get_forecast_jobs_for_verification, name="getForecastJobsForVerification"),
     path('calibration/clone_and_run_forecast/', calibration_forecast_views.clone_and_run_forecast_job, name="cloneAndRunForecastJob"),
-    path('calibration/get_forecast_data/', calibration_forecast_views.get_forecast_data, name="getForecastData"),
+    path('calibration/get_forecast_timeseries_data/', calibration_forecast_views.get_forecast_timeseries_data, name="getForecastTimeseriesData"),
     path('calibration/delete_forecast_job/', calibration_forecast_views.delete_forecast_job, name="deleteForecastJob"),
 
     ##################################

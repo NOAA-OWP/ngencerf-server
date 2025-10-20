@@ -743,8 +743,7 @@ class GetPlotResponseSerializer(CalibrationRunSerializer):
 
 class ForecastRunDataResponseSerializer(BaseSerializer):
     forecast_run_id = serializers.IntegerField(required=True)
-    plot_data = serializers.JSONField(required=True)
-    total_count = serializers.IntegerField(required=True)
+    timeseries_data = serializers.JSONField(required=True)
 
 
 class GetPlotErrorResponseSerializer(BaseSerializer):

@@ -163,7 +163,7 @@ def clone_and_run_forecast_job(request: Request) -> Response:
 )
 @api_view(['POST', 'GET'])
 @handle_exceptions
-def get_forecast_data(request: Request) -> Response:
+def get_forecast_timeseries_data(request: Request) -> Response:
     """
     Load results for a forecast job (and related cold start job).
 
@@ -220,20 +220,19 @@ def get_forecast_data(request: Request) -> Response:
 
     response = {
         'forecast_run_id': forecast_run_id,
-        'plot_data': data,
-        'total_count': len(data)  # since using full file read
+        'timeseries_data': data,
     }
     # Validate and return response
     response_validator, error_response = validate_response(
         ForecastRunDataResponseSerializer, response,
-        fields_to_truncate=['plot_data'], max_length=10
+        fields_to_truncate=['timeseries_data'], max_length=10
     )
     if error_response:
         return error_response
 
     logger.debug(
         f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - '
-        f'{json.dumps(truncate_large_fields(response_validator.data, fields_to_truncate=["plot_data"], max_length=10))}'
+        f'{json.dumps(truncate_large_fields(response_validator.data, fields_to_truncate=["timeseries_data"], max_length=10))}'
     )
 
     return Response(response_validator.data)
