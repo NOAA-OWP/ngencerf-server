@@ -1242,6 +1242,7 @@ class ParameterDataByIteration(BaseSerializer):
 
 class MetricDataByIteration(BaseSerializer):
     metric_name = serializers.CharField(required=True, allow_blank=False, allow_null=False)
+    metric_display_name = serializers.CharField(required=True, allow_blank=False, allow_null=False)
     # Need to allow Null for NaN
     metric_value = serializers.FloatField(required=True, allow_null=True)
 

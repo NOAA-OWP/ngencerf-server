@@ -80,8 +80,11 @@ def get_calibration_data_by_iteration(request: Request) -> Response:
         .filter(period=ValidationMetricPeriod.valid.value, calibration_run=run)
         .select_related('metric')
         .only('metric__name', 'metric_value')
-        .annotate(metric_name=F('metric__name'))
-        .values('metric_name', 'metric_value')
+        .annotate(
+            metric_name=F('metric__name'),
+            metric_display_name=F('metric__display_name'),
+        )
+        .values('metric_name', 'metric_display_name', 'metric_value')
     )
 
     retrospective_data = [{'name': 'NWM 3.0', 'data': nwm_retrospective_data}]
@@ -116,7 +119,11 @@ def get_calibration_data_by_iteration(request: Request) -> Response:
                 for param in iteration.iterationparameter_set.all()
             ],
             'metrics': [
-                {'metric_name': metric.metric.name, 'metric_value': metric.metric_value}
+                {
+                    'metric_name': metric.metric.name,
+                    'metric_display_name': metric.metric.display_name,
+                    'metric_value': metric.metric_value
+                }
                 for metric in iteration.iterationmetric_set.all()
             ]
         }
