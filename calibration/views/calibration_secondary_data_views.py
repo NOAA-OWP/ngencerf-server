@@ -479,15 +479,29 @@ def get_soil_moisture_timeseries_data(request: Request) -> Response:
     return _get_secondary_timeseries_data(request, SecondaryDataEnum.SOIL_MOISTURE)
 
 
-def read_csv_as_json(csv_filepath: str) -> list[dict[str, str]]:
+def read_csv_as_json(csv_filepath: str, keys: list[str] | None = None) -> list[dict[str, str]]:
     """
-    Reads a CSV file and returns a list of dictionaries using column names as keys.
+    Reads a CSV file and returns a list of dictionaries.
+
+    Always reads the header row from the file first.
+    If `keys` is provided, it overrides the column names (but still skips the file header).
 
     :param csv_filepath: Path to the CSV file.
+    :param keys: Optional list of keys to enforce instead of using the header row.
     :return: A list of dictionaries representing each row in the CSV.
     """
     with open(csv_filepath, newline='') as csvfile:
-        return list(csv.DictReader(csvfile))
+        reader = csv.reader(csvfile)
+
+        # Always read REAL header first from file
+        original_header = next(reader)
+
+        # Use override keys if provided, otherwise stick with the file's header
+        header = keys if keys else original_header
+
+        return [dict(zip(header, row)) for row in reader]
+
+
 
 
 def should_generate_swe(module_names: set[str], cached_modules_by_name: dict) -> bool:
