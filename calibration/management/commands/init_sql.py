@@ -19,6 +19,75 @@ from calibration.models.status import Status
 
 logger = logging.getLogger(__name__)
 
+"""
+STATIC DATA RULES
+
+This command seeds static reference tables. It may be re-run safely — records are matched by `name`.
+
+Allowed in this file:
+- Adding new records
+- Updating non-key fields such as description, is_active, display_name, etc.
+
+NOT allowed directly in this file (must use a custom Django migration first):
+
+────────────────────────────────────────────────────────────────────────────
+1) RENAMING an existing record (changing the `name` natural key)
+
+   - Changing `name` here alone will create a *new* row instead of updating the old one.
+   - A custom migration must update the row in the database first.
+
+   STEP 1: Create an empty migration
+       python manage.py makemigrations calibration --empty --name rename_metric_corr
+
+   # Example: renames the metric called 'Corr' to 'PearsonCorr'
+   STEP 2: Edit the migration file — example:
+       from django.db import migrations
+
+       def rename_metric(apps, schema_editor):
+           Metric = apps.get_model("calibration", "Metric")
+           obj = Metric.objects.get(name="Corr")
+           obj.name = "PearsonCorr"
+           obj.save(update_fields=["name"])
+
+       class Migration(migrations.Migration):
+           dependencies = [...]
+           operations = [migrations.RunPython(rename_metric)]
+
+   STEP 3: THEN, also update the new name in this file so future runs of init_sql
+           recognize the updated record rather than creating a duplicate.
+
+────────────────────────────────────────────────────────────────────────────
+2) DELETING an existing record
+
+   - Deleting a row from this file does *not* remove it from the database.
+   - A custom migration must delete it from the database first.
+
+   # Example: deletes the metric called 'ObsoleteMetric'
+   STEP 1: Create an empty migration
+       python manage.py makemigrations calibration --empty --name delete_obsolete_metric
+
+   STEP 2: Edit the migration file — example:
+       from django.db import migrations
+
+       def delete_metric(apps, schema_editor):
+           Metric = apps.get_model("calibration", "Metric")
+           Metric.objects.filter(name="ObsoleteMetric").delete()
+
+       class Migration(migrations.Migration):
+           dependencies = [...]
+           operations = [migrations.RunPython(delete_metric)]
+
+   STEP 3: THEN, also remove that record from this file, so init_sql does not
+           try to update an object that no longer exists.
+
+────────────────────────────────────────────────────────────────────────────
+
+SUMMARY:
+- init_sql is for ADDING or UPDATING non-key fields only.
+- Renames and deletions must be done with a migration first, and THEN reflected here.
+- If not, you will create duplicate records or cause update errors.
+"""
+
 
 class Command(BaseCommand):
     help = "Initializes static tables"
@@ -138,8 +207,8 @@ class Command(BaseCommand):
         if self.DELETE_FLAG:
             Module.objects.all().delete()
 
-        values = [{"name": "Topoflow",
-                   "description": "description",
+        values = [{"name": "Topoflow-Glacier",
+                   "description": "A glacier energy balance module as part of TopoFlow, an open source, BMI compatible, modularized, distributed hydrologic model",
                    "groups": ["Glacier"],
                    "output_variables": ["ACSNOM", "SNOWH", "SNEQV", "QSNOW", "TRAD", "LH", "FIRA", "HFX"],
                    "is_active": False},
@@ -164,10 +233,10 @@ class Command(BaseCommand):
                    "groups": ["Rainfall Runoff"],
                    "output_variables": ["sfcheadsubrt", "qBucket", "streamflow", "QRAIN", "SFCRNOFF"]},
                   {"name": "LSTM",
-                   "description": "description",
+                   "description": "The Long Short-Term Memory (LSTM) network Module is dependent on a trained deep learning model. The forward pass of this LSTM model nextgen_cuda_lstm.py is heavily based on NeuralHydrology's CudaLSTM",
                    "groups": ["Glacier", "Snowmelt", "Evapotranspiration", "Soil Moisture", "Rainfall Runoff"]},
                   {"name": "PET",
-                   "description": "description",
+                   "description": "PET handles potential evapotranspiration functions: Aerodynamic method, Combination method, Energy balance method, Penman Monteith method and Priestly Taylor method.",
                    "groups": ["Evapotranspiration"],
                    "is_active": False},
                   {"name": "TopModel",
