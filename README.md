@@ -112,16 +112,16 @@ aws s3 cp --recursive s3://ngwpc-dev/ngen-static-files /ngencerf/data/ngen-stati
 ```
 
 In addition, copy the directory `module_parameter_files` and all its contents from 
-https://github.com/NGWPC/nwm-cal-mgr/tree/development/module_parameter_files to the `/ngencerf/data/ngen-static-files` directory.
+https://github.com/NGWPC/nwm-msw-mgr/tree/development/src/mswm/module_parameter_files to the `/ngencerf/data/ngen-static-files` directory.
 
 ```
 cd /ngencerf/data/ngen-static-files (for PW, use /ngencerf-app/data/ngen-cal-data/ngen-static-files)
 rm -rf module_parameter_files
-git clone --depth 1 --filter=blob:none --sparse -b development https://github.com/NGWPC/nwm-cal-mgr.git tmp-nwm-cal-mgr && \
-cd tmp-nwm-cal-mgr && \
-git sparse-checkout set module_parameter_files && \
-mv module_parameter_files ../ && \
-cd .. && rm -rf tmp-nwm-cal-mgr
+git clone --depth 1 --filter=blob:none --sparse -b development https://github.com/NGWPC/nwm-msw-mgr.git tmp-nwm-msw-mgr && \
+cd tmp-nwm-msw-mgr && \
+git sparse-checkout set src/mswm/module_parameter_files && \
+mv src/mswm/module_parameter_files ../ && \
+cd .. && rm -rf tmp-nwm-msw-mgr
 ```
 
 Copy the directory `https://github.com/NGWPC/ngen-forcing/tree/forecast_validation_root_dir/NextGen_Forcings_Engine_BMI/BMI_NextGen_Configs/config_templates` 
