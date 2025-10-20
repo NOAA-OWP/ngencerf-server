@@ -269,6 +269,7 @@ class LoggingConfigSerializer(BaseSerializer):
 
         valid_modules = {m.name.lower() for m in get_cached_modules_with_groups().values()}
         valid_modules.add('ngen')  # Special case
+        valid_modules.add('ngen-forcing')  # Special case
 
         errors = {}
         normalized = {}
@@ -1031,10 +1032,6 @@ class ColdStartJobSlurmCallbackRequestSerializer(ColdStartRunSerializer):
 
 class ForecastJobSlurmCallbackRequestSerializer(ForecastRunSerializer):
     job_status = serializers.CharField(required=True, validators=[SlurmStatusEnum])
-
-
-# class ForecastForcingDownloadJobSlurmCallbackRequestSerializer(ForecastForcingDownloadRunSerializer):
-#     job_status = serializers.CharField(required=True, validators=[SlurmStatusEnum])
 
 
 class RunCalibrationJob(CalibrationRunSerializer):

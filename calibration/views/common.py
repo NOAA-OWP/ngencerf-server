@@ -789,7 +789,7 @@ def generate_ngen_logging_config(run: CalibrationRun | ValidationRun, logging_co
 
     The generated config includes:
     - All valid modules (based on cached definitions)
-    - A special module 'ngen'
+    - Special cases of 'ngen' and 'ngen-forcing'
     - Default log levels set to INFO, unless overridden
 
     Overrides are applied in this order:
@@ -814,6 +814,7 @@ def generate_ngen_logging_config(run: CalibrationRun | ValidationRun, logging_co
     # Get all valid module names in lowercase, plus special-case 'ngen'
     valid_modules = {m.name.lower() for m in get_cached_modules_with_groups().values()}
     valid_modules.add('ngen')
+    valid_modules.add('ngen-forcing')
 
     # Default all modules to INFO lvl
     module_levels = {name: NgenLogging.INFO.value for name in valid_modules}
