@@ -91,12 +91,21 @@ def check_http_error(http_status: int, response: str, content_type: str | None =
                                 parsed = ast.literal_eval(raw_message)
 
                             if isinstance(parsed, list):
+                                # list of dicts? list of strings? handle both safely
                                 for item in parsed:
-                                    print(item.get("message", str(item)))
+                                    if isinstance(item, dict):
+                                        print(item.get("message", str(item)))
+                                    else:
+                                        print(str(item))
+                                return None, False  # and bail out cleanly
+
                             elif isinstance(parsed, dict):
                                 print(parsed.get("message", str(parsed)))
+                                return None, False
+
                             else:
                                 print(parsed)
+                                return None, False
                         else:
                             print(raw_message)
                     except Exception as e:
