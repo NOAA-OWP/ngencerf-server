@@ -7,8 +7,8 @@ def check_http_error(http_status: int, response: str, content_type: str | None =
     Handles HTTP errors, returning the parsed response for 200 status codes,
     and printing appropriate error messages for other status codes.
 
-    - For 200 responses: parses and returns JSON if applicable.
-    - For 401 Unauthorized: attempts token refresh or re-login.
+    - For 200 responses: parses and returns JSON if applicable; non-JSON content is treated as success.
+    - For 401 Unauthorized: attempts token refresh; if that fails, performs a full login.
       If either succeeds and `retry_func` is provided, re-executes the original request once.
     - For 400 Bad Request and other errors: prints structured error messages.
 
@@ -32,6 +32,7 @@ def check_http_error(http_status: int, response: str, content_type: str | None =
     try:
         # If it's a binary response (e.g., ZIP file), don't try to parse it as JSON
         if http_status == 200:
+            # Non-JSON (e.g., streaming ZIP) is still success
             if content_type and not content_type.startswith("application/json"):
                 return None, True
 
@@ -42,7 +43,7 @@ def check_http_error(http_status: int, response: str, content_type: str | None =
                 print("Warning: Response is not valid JSON.")
                 return None, False
 
-        # Handle expired/invalid token
+        # 401 Unauthorized → refresh, then full login, then single retry if possible
         if http_status == 401:
             print("Unauthorized (401): Access token may have expired. Attempting refresh...")
 
@@ -52,6 +53,8 @@ def check_http_error(http_status: int, response: str, content_type: str | None =
             if refresh_access_token():
                 token_fixed = True
             else:
+                # Access token expired and refresh failed (or not present).
+                # Prompt user for credentials (shows default email; allows enter-to-accept).
                 print("[DEBUG] Refresh failed. Prompting for full login...")
                 if perform_full_login():
                     token_fixed = True
@@ -60,13 +63,15 @@ def check_http_error(http_status: int, response: str, content_type: str | None =
                 print("[DEBUG] Retrying request with new token...")
                 new_response = retry_func()
 
-                # Re-evaluate the new response recursively (no infinite retry)
-                return check_http_error(
-                    new_response.status_code,
-                    new_response.text,
-                    new_response.headers.get("Content-Type"),
-                    retry_func=None
-                )
+                # If retry succeeded
+                if new_response.status_code == 200:
+                    try:
+                        return new_response.json(), True
+                    except Exception:
+                        return None, True
+                else:
+                    # On failed retry after token fix → treat like normal failure
+                    return new_response.text, False
 
             return {"detail": "Token fixed, but no retry performed."}, token_fixed
 

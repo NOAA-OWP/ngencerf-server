@@ -108,7 +108,7 @@ def perform_full_login(_retry=False) -> bool:
     """
     print("[DEBUG] Performing full login with email/password.")
 
-    # Always get latest email, but don't reload the password file on retry
+    # Always get latest email (show default if present and allow override)
     email = os.environ.get("NGEN_EMAIL") or os.environ.get("NGEN_USERNAME")
     if not email:
         email = input("ngenCerf email: ")
@@ -118,8 +118,11 @@ def perform_full_login(_retry=False) -> bool:
         if entered:
             email = entered
 
-    # If we're retrying, force password prompt (don't trust any saved value)
+    # Password strategy:
+    #  - first attempt: use saved env value if present, otherwise prompt
+    #  - retry attempt: always force prompt
     if _retry:
+        print("Your saved credentials appear to be invalid. Please re-enter your password.")
         # On retry, always force prompt for new password
         os.environ.pop("NGEN_PASSWORD", None)
         password = getpass.getpass("ngenCerf password: ")
@@ -147,6 +150,7 @@ def perform_full_login(_retry=False) -> bool:
         os.environ.pop("NGEN_PASSWORD", None)
 
         if not _retry:
+            print("[DEBUG] Saved password failed — retrying full login.")
             return perform_full_login(_retry=True)
         else:
             print("[DEBUG] Second login attempt failed. Aborting.")
@@ -168,9 +172,9 @@ def perform_full_login(_retry=False) -> bool:
             save_to_env_file("REFRESH_TOKEN", refresh_token)
         print(f"{email} login successful.\n")
         return True
-    else:
-        print("Login succeeded, but access token missing.")
-        return False
+
+    print("Login succeeded, but access token missing.")
+    return False
 
 
 def _clear_saved_password():
