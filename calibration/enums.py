@@ -103,6 +103,12 @@ class ForecastConfigEnum(AbstractEnum):
     def get_model(cls) -> Type[ForecastConfiguration]:
         return ForecastConfiguration
 
+    @classmethod
+    def get_filter(cls) -> dict[str, Any]:
+        # Apply the filter to return only active elements
+        return {'is_active': True}
+
+
 
 class DomainEnum(AbstractEnum):
     """

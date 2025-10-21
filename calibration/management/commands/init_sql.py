@@ -394,7 +394,7 @@ class Command(BaseCommand):
                 "domain": conus_domain,
                 "cycle_start": 0, "cycle_end": 23, "cycle_freq": 1, "fcst_win": 48, "fcst_timestep": 1,
                 "availability_lag": 6,
-                "is_active": True
+                "is_active": False
             },
             {
                 "name": "Short Range Forecast", "internal_name": "short_range", "data_sources": "HRRR, RAP",
@@ -442,7 +442,7 @@ class Command(BaseCommand):
                 "domain": conus_domain,
                 "cycle_start": 0, "cycle_end": 23, "cycle_freq": 1, "fcst_win": 48, "fcst_timestep": 1,
                 "availability_lag": 6,
-                "is_active": True
+                "is_active": False
             },
             {
                 "name": "Medium Range Blend", "internal_name": "medium_range_blend", "data_sources": "tbd",

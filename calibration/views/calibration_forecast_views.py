@@ -66,9 +66,8 @@ def load_forecast_tab(request: Request) -> Response:
         return error_return
 
     with readonly_transaction():
-        # TODO This will only return active configurations.  Do we want to return everything and let the UI filter?
         configuration_values = ForecastConfigEnum.get_choices_with_fields(
-            fields=['name', 'data_sources', 'time_range', 'is_active',
+            fields=['name', 'data_sources', 'time_range',
                     'cycle_start', 'cycle_end', 'cycle_freq', 'fcst_win', 'fcst_timestep', 'availability_lag'
                     ],
             extra_filter={'domain': calibration_run.gage.domain}

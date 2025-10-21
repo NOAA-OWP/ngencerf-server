@@ -466,8 +466,7 @@ def get_forecast_jobs_internal(
     :param run_status: Optional list of StatusEnum values to filter on.
     :return: List[dict] shaped for GetForecastJobsResponseSerializer.
              Includes forecast_run_id, configuration, domain_name,
-             gage_id, forecast_status, submit_date, cycle_date,
-             cold_start_date, and cold_start_status.
+             gage_id, forecast_status, and nested forecast/cold_start data.
     """
     query = Q(calibration_run__owner=user)
 
@@ -489,6 +488,7 @@ def get_forecast_jobs_internal(
                 'status__name',
                 'cold_start_run__cold_start_date',
                 'cold_start_run__status__name',
+                'cold_start_run__submit_date',
             )
         )
 
@@ -499,8 +499,21 @@ def get_forecast_jobs_internal(
         f['domain_name'] = f.pop('configuration__domain__name')
         f['gage_id'] = f.pop('calibration_run__gage__gage_id')
         f['forecast_status'] = f.pop('status__name')
-        f['cold_start_date'] = f.pop('cold_start_run__cold_start_date')
-        f['cold_start_status'] = f.pop('cold_start_run__status__name')
+        f['cycle_date']   = f.pop('cycle_date')
+        f['submit_date']  = f.pop('submit_date')
+
+        cold_date = f.pop('cold_start_run__cold_start_date')
+        cold_status = f.pop('cold_start_run__status__name')
+        cold_submit = f.pop('cold_start_run__submit_date')
+
+        # OOnly include nested cold_start object if data exists
+        if cold_date or cold_status:
+            f['cold_start'] = {
+                'cold_start_date': cold_date,
+                'cold_start_status': cold_status,
+                'cold_start_submit_date': cold_submit
+            }
+        # else: omit cold_start entirely
 
     return rows
 
