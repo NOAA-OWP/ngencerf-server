@@ -372,7 +372,7 @@ formulation_validations = {
     "formulation_rules": {
         "group_requirements": {
             "Glacier": {
-                "expected_counts": [0],  # Change back to [0, 1], once Topoflow is allowed
+                "expected_counts": [0, 1],
                 "fatal": True
             },
             "Snowmelt": {
@@ -398,11 +398,11 @@ formulation_validations = {
         },
         "module_exclusions": {
             "SMP": {
-                "must_have": ["CFE-S", "CFE-X", "LASAM"],
+                "must_have": ["CFE-S", "CFE-X", "LASAM", "TopModel"],
                 "fatal": True
             },
             "SFT": {
-                "must_have": ["CFE-S", "CFE-X", "LASAM"],
+                "must_have": ["CFE-S", "CFE-X", "LASAM", "TopModel"],
                 "fatal": True
             }
         }
