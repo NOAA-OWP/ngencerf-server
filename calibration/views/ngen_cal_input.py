@@ -293,24 +293,28 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
         if not is_missing(formulations, 'Modules', error_object) and not is_missing(run.user_formulation_name, 'Formulation name', error_object):
             general['formulation'] = run.user_formulation_name
 
-            module_names = {modules_by_id[f.module_id].name for f in formulations}
+            # Extract only the modules actually used in THIS calibration job
+            module_names_for_job = {modules_by_id[f.module_id].name for f in formulations}
+
+            # Build the proper { name → Module } filter for just this job
+            modules_by_name_for_job = {name: modules_by_name[name] for name in module_names_for_job}
 
             # Store resolved model list in 'general' for logging/display
-            general['models'] = ', '.join(module_names)
+            general['models'] = ', '.join(module_names_for_job)
 
-            # Validate formulation with proper module names
-            formulation_errors, _, _ = validate_formulation(module_names)
+            # Validate using only modules actually present in this job
+            formulation_errors, _, _ = validate_formulation(module_names_for_job)
             for f in formulation_errors:
                 error_object.add_error(f)
 
-            general['output_swe'] = should_generate_swe(module_names, modules_by_name)
-            general['output_sm'] = should_generate_soil_moisture(module_names, modules_by_name)
+            general['output_swe'] = should_generate_swe(modules_by_name_for_job)
+            general['output_sm']  = should_generate_soil_moisture(modules_by_name_for_job)
 
             if run.use_sloth:
                 general['models'] += f', {SLOTH}'
 
-            # Dynamically add BMI config paths based on cached module names
-            for name in module_names:
+            # Dynamically add BMI config paths based on only the modules actually used
+            for name in module_names_for_job:
                 datafile[get_bmi_config_key(name)] = get_bmi_config_dir_for_module(run, name)
 
             general['is_aet_rootzone'] = run.is_aet_rootzone

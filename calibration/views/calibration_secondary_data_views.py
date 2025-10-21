@@ -17,7 +17,7 @@ from rest_framework.response import Response
 
 from calibration.enums import StatusEnum, ValidationType
 from calibration.enums_vanilla import SecondaryDataEnum
-from calibration.models import ValidationRun
+from calibration.models import ValidationRun, Module
 from calibration.util.calibration_validators import GetImagesByDateResponseSerializer, \
     ErrorResponseSerializer, ValidationRunSerializer, GetTimeseriesDataResponseSerializer, GetSoilMoistureImagesByDateRequestSerializer, \
     GetSWEImagesByDateRequestSerializer
@@ -502,25 +502,34 @@ def read_csv_as_json(csv_filepath: str, keys: list[str] | None = None) -> list[d
         return [dict(zip(header, row)) for row in reader]
 
 
-
-
-def should_generate_swe(module_names: set[str], cached_modules_by_name: dict) -> bool:
+def should_generate_swe(modules_by_name_for_job: dict[str, Module]) -> bool:
     """
-    Determine whether SWE timeseries data should be generated.
-    Returns True if at least one module belongs to the 'Snowmelt' group.
+    Determine whether SWE (Snow Water Equivalent) output should be generated
+    for the current calibration/validation/forecast job.
+
+    - Return True if ANY module in this job belongs to the "SnowMelt" module group.
+
+    :param modules_by_name_for_job: Dict mapping module name → Module instance
+                                    for only the modules active in this job.
+    :return: True if SWE output is required; False otherwise.
     """
-    return any(
-        any(group.name == "Snowmelt" for group in cached_modules_by_name[name].groups.all())
-        for name in module_names
-    )
+    for module in modules_by_name_for_job.values():
+        # Assumes group membership is already prefetched via get_cached_modules_with_groups
+        if any(group.name.lower() == "snowmelt" for group in module.groups.all()):
+            return True
+    return False
 
 
-def should_generate_soil_moisture(module_names: set[str], cached_modules_by_name: dict) -> bool:
+def should_generate_soil_moisture(modules_by_name_for_job: dict[str, Module]) -> bool:
     """
     Determine whether Soil Moisture timeseries data should be generated.
-    Returns True if an SMP module is present.
+
+    - Return True ONLY if the SMP module is present in the current job's module list.
+
+    :param modules_by_name_for_job: Dict mapping module name → Module instance
+                                    for only the modules active in this job.
+
+    :return: True if SMP is one of the modules in the job; False otherwise.
     """
-    return any(
-        cached_modules_by_name[name].name == "SMP"
-        for name in module_names
-    )
+    return "SMP" in modules_by_name_for_job
+

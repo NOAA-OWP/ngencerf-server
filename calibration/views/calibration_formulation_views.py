@@ -549,7 +549,7 @@ def check_completeness(module_names: set[str], fatal_errors: list[str], nonfatal
     modules_by_name = {m.name: m for m in modules_by_id.values()}
 
     # Get only the modules referenced in this formulation
-    modules_included = [modules_by_name[name] for name in module_names if name in cached_modules]
+    modules_included = [modules_by_name[name] for name in module_names if name in modules_by_name]
 
     # Get all output variable names from cacheable modules
     all_output_vars = {ov.name for m in modules_by_id.values() for ov in m.output_variables.all()}

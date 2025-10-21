@@ -49,6 +49,60 @@ from calibration.enums import PlotDefinitionsEnum
 from calibration.enums_vanilla import JobType
 from calibration.models import Module, ModuleGroup, Gage, CalibrationRun, ValidationRun, ForecastRun, CalibrationFormulation, OptimizationInput
 
+CACHED_MODULES_KEY = "cached_modules_with_groups"
+
+
+@lru_cache(maxsize=1)
+def get_cached_modules_with_groups() -> dict[str, Module]:
+    """
+    Retrieve all active Module ORM objects with prefetched groups/output_variables,
+    cached so that no further DB hits occur when accessing relationships.
+
+    - Cached globally in Django cache and also with lru_cache.
+    - Prefetch ensures groups and output_variables can be accessed without new queries.
+    - Fully safe to reuse for UI display, validations, or parameter resolution.
+
+    :return Returns a dict keyed by module name.
+    """
+    modules = cache.get(CACHED_MODULES_KEY)
+    if modules is None:
+        # Eagerly load everything needed (no lazy lookups later)
+        qs = (
+            Module.objects.filter(is_active=True)
+            .prefetch_related("groups", "output_variables")
+            .only("id", "name", "display_name", "description", "is_active")
+        )
+        modules = {m.name: m for m in qs}
+        # Force evaluate groups/output_variables to avoid lazy loading
+        for m in modules.values():
+            list(m.groups.all())
+            list(m.output_variables.all())
+        cache.set(CACHED_MODULES_KEY, modules, timeout=None)
+    return modules
+
+
+MODULE_GROUPS_CACHE_KEY = 'cached_module_groups'
+
+
+def get_cached_module_groups() -> list[str]:
+    """
+    Retrieve a list of active module group names, ordered by 'order',
+    cached to avoid repeated queries.
+
+    - Cached in Django cache under MODULE_GROUPS_CACHE_KEY.
+    - Ordered by the 'order' field from the DB.
+
+    :return: List of module group names (strings).
+    """
+    module_groups = cache.get(MODULE_GROUPS_CACHE_KEY)
+    if module_groups is None:
+        qs = ModuleGroup.objects.filter(is_active=True).order_by("order").only("id", "name", "order")
+        # Force eval to freeze them in cache
+        module_groups = [mg.name for mg in qs]
+        cache.set(MODULE_GROUPS_CACHE_KEY, module_groups, None)
+    return module_groups
+
+
 
 @lru_cache(maxsize=1)
 def get_cached_modules_by_id() -> dict[int, Module]:
@@ -194,60 +248,6 @@ def get_cached_optimization_inputs(optimization_name: str) -> list[dict[str, str
         cache.set(cache_key, optimization_inputs, timeout=None)
 
     return optimization_inputs
-
-
-CACHED_MODULES_KEY = "cached_modules_with_groups"
-
-
-@lru_cache(maxsize=1)
-def get_cached_modules_with_groups() -> dict[str, Module]:
-    """
-    Retrieve all active Module ORM objects with prefetched groups/output_variables,
-    cached so that no further DB hits occur when accessing relationships.
-
-    - Cached globally in Django cache and also with lru_cache.
-    - Prefetch ensures groups and output_variables can be accessed without new queries.
-    - Fully safe to reuse for UI display, validations, or parameter resolution.
-
-    :return Returns a dict keyed by module name.
-    """
-    modules = cache.get(CACHED_MODULES_KEY)
-    if modules is None:
-        # Eagerly load everything needed (no lazy lookups later)
-        qs = (
-            Module.objects.filter(is_active=True)
-            .prefetch_related("groups", "output_variables")
-            .only("id", "name", "display_name", "description", "is_active")
-        )
-        modules = {m.name: m for m in qs}
-        # Force evaluate groups/output_variables to avoid lazy loading
-        for m in modules.values():
-            list(m.groups.all())
-            list(m.output_variables.all())
-        cache.set(CACHED_MODULES_KEY, modules, timeout=None)
-    return modules
-
-
-MODULE_GROUPS_CACHE_KEY = 'cached_module_groups'
-
-
-def get_cached_module_groups() -> list[str]:
-    """
-    Retrieve a list of active module group names, ordered by 'order',
-    cached to avoid repeated queries.
-
-    - Cached in Django cache under MODULE_GROUPS_CACHE_KEY.
-    - Ordered by the 'order' field from the DB.
-
-    :return: List of module group names (strings).
-    """
-    module_groups = cache.get(MODULE_GROUPS_CACHE_KEY)
-    if module_groups is None:
-        qs = ModuleGroup.objects.filter(is_active=True).order_by("order").only("id", "name", "order")
-        # Force eval to freeze them in cache
-        module_groups = [mg.name for mg in qs]
-        cache.set(MODULE_GROUPS_CACHE_KEY, module_groups, None)
-    return module_groups
 
 
 def get_filtered_plot_definitions(
