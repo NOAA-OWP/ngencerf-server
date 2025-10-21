@@ -387,17 +387,12 @@ class Command(BaseCommand):
         puerto_rico_domain = DomainEnum.get_instance('Puerto_Rico')
         conus_domain = DomainEnum.get_instance('CONUS')
 
+        # Note that the order field represents the order within a given domain
+        # Inactive ones don't have an order for now
         values = [
             {
-                "name": "Analysis and Assimilation (AnA)", "internal_name": "standard_ana", "data_sources": "HRRR, RAP, MRMS-MS, MRMS-RO, USGS gages",
-                "time_range": "3 hr",
-                "domain": conus_domain,
-                "cycle_start": 0, "cycle_end": 23, "cycle_freq": 1, "fcst_win": 48, "fcst_timestep": 1,
-                "availability_lag": 6,
-                "is_active": False
-            },
-            {
-                "name": "Short Range Forecast", "internal_name": "short_range", "data_sources": "HRRR, RAP",
+                "name": "Short Range Forecast", "internal_name": "short_range", "order": 1,
+                "data_sources": "HRRR, RAP",
                 "time_range": "Latest forecast cycle - 18 hours",
                 "domain": conus_domain,
                 "cycle_start": 0, "cycle_end": 23, "cycle_freq": 1, "fcst_win": 18, "fcst_timestep": 1,
@@ -405,7 +400,53 @@ class Command(BaseCommand):
                 "is_active": True
             },
             {
-                "name": "Short Range Alaska", "internal_name": "short_range_alaska", "data_sources": "tbd",
+                "name": "Medium Range Blend", "internal_name": "medium_range_blend", "order": 2,
+                "data_sources": "tbd",
+                "time_range": "Latest forecast cycle - 240 hours",
+                "domain": conus_domain,
+                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 240, "fcst_timestep": 1,
+                "availability_lag": 6,
+                "is_active": True
+            },
+            {
+                "name": "Long Range MEM1", "internal_name": "long_range_mem1", "order": 3,
+                "data_sources": "tbd",
+                "time_range": "Latest forecast cycle - 720 hours",
+                "domain": conus_domain,
+                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 720, "fcst_timestep": 6,
+                "availability_lag": 12,
+                "is_active": True
+            },
+            {
+                "name": "Long Range MEM2", "internal_name": "long_range_mem2", "order": 4,
+                "data_sources": "tbd",
+                "time_range": "Latest forecast cycle - 720 hours",
+                "domain": conus_domain,
+                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 720, "fcst_timestep": 6,
+                "availability_lag": 12,
+                "is_active": True
+            },
+            {
+                "name": "Long Range MEM3", "internal_name": "long_range_mem3", "order": 5,
+                "data_sources": "tbd",
+                "time_range": "Latest forecast cycle - 720 hours",
+                "domain": conus_domain,
+                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 720, "fcst_timestep": 6,
+                "availability_lag": 12,
+                "is_active": True
+            },
+            {
+                "name": "Long Range MEM4", "internal_name": "long_range_mem4", "order": 6,
+                "data_sources": "tbd",
+                "time_range": "Latest forecast cycle - 720 hours",
+                "domain": conus_domain,
+                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 720, "fcst_timestep": 6,
+                "availability_lag": 12,
+                "is_active": True
+            },
+            {
+                "name": "Short Range Alaska", "internal_name": "short_range_alaska", "order": 1,
+                "data_sources": "tbd",
                 "time_range": "Latest forecast cycle - 15 hours (for even-numbered cycles)",
                 "domain": alaska_domain,
                 "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 15, "fcst_timestep": 1,
@@ -413,7 +454,8 @@ class Command(BaseCommand):
                 "is_active": True
             },
             {
-                "name": "Short Range Extended Alaska", "internal_name": "short_range_extended_alaska", "data_sources": "tbd",
+                "name": "Short Range Extended Alaska", "internal_name": "short_range_extended_alaska", "order": 2,
+                "data_sources": "tbd",
                 "time_range": "Latest forecast cycle - 45 hours (for odd-numbered cycles)",
                 "domain": alaska_domain,
                 "cycle_start": 3, "cycle_end": 21, "cycle_freq": 6, "fcst_win": 45, "fcst_timestep": 1,
@@ -421,7 +463,8 @@ class Command(BaseCommand):
                 "is_active": True
             },
             {
-                "name": "Short Range Hawaii", "internal_name": "short_range_hawaii", "data_sources": "tbd",
+                "name": "Short Range Hawaii", "internal_name": "short_range_hawaii", "order": 1,
+                "data_sources": "tbd",
                 "time_range": "Latest forecast cycle - 48 hours",
                 "domain": hawaii_domain,
                 "cycle_start": 0, "cycle_end": 23, "cycle_freq": 1, "fcst_win": 48, "fcst_timestep": 0.25,
@@ -429,7 +472,8 @@ class Command(BaseCommand):
                 "is_active": False
             },
             {
-                "name": "Short Range Puerto Rico", "internal_name": "short_range_puertorico", "data_sources": "tbd",
+                "name": "Short Range Puerto Rico", "internal_name": "short_range_puertorico", "order": 1,
+                "data_sources": "tbd",
                 "time_range": "Latest forecast cycle - 48 hours",
                 "domain": puerto_rico_domain,
                 "cycle_start": 6, "cycle_end": 18, "cycle_freq": 12, "fcst_win": 48, "fcst_timestep": 1,
@@ -437,7 +481,17 @@ class Command(BaseCommand):
                 "is_active": True
             },
             {
-                "name": "Extended AnA", "internal_name": "extended_ana", "data_sources": "RAP, HRRR, Stage IV",
+                "name": "Analysis and Assimilation (AnA)", "internal_name": "standard_ana",
+                "data_sources": "HRRR, RAP, MRMS-MS, MRMS-RO, USGS gages",
+                "time_range": "3 hr",
+                "domain": conus_domain,
+                "cycle_start": 0, "cycle_end": 23, "cycle_freq": 1, "fcst_win": 48, "fcst_timestep": 1,
+                "availability_lag": 6,
+                "is_active": False
+            },
+            {
+                "name": "Extended AnA", "internal_name": "extended_ana",
+                "data_sources": "RAP, HRRR, Stage IV",
                 "time_range": "tbd",
                 "domain": conus_domain,
                 "cycle_start": 0, "cycle_end": 23, "cycle_freq": 1, "fcst_win": 48, "fcst_timestep": 1,
@@ -445,15 +499,8 @@ class Command(BaseCommand):
                 "is_active": False
             },
             {
-                "name": "Medium Range Blend", "internal_name": "medium_range_blend", "data_sources": "tbd",
-                "time_range": "Latest forecast cycle - 240 hours",
-                "domain": conus_domain,
-                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 240, "fcst_timestep": 1,
-                "availability_lag": 6,
-                "is_active": True
-            },
-            {
-                "name": "Medium Range MEM1", "internal_name": "medium_range_mem1", "data_sources": "tbd",
+                "name": "Medium Range MEM1", "internal_name": "medium_range_mem1",
+                "data_sources": "tbd",
                 "time_range": "Latest forecast cycle - 240 hours",
                 "domain": conus_domain,
                 "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 240, "fcst_timestep": 1,
@@ -461,7 +508,8 @@ class Command(BaseCommand):
                 "is_active": False
             },
             {
-                "name": "Medium Range MEM2", "internal_name": "medium_range_mem2", "data_sources": "tbd",
+                "name": "Medium Range MEM2", "internal_name": "medium_range_mem2",
+                "data_sources": "tbd",
                 "time_range": "Latest forecast cycle - 240 hours",
                 "domain": conus_domain,
                 "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 240, "fcst_timestep": 1,
@@ -469,7 +517,8 @@ class Command(BaseCommand):
                 "is_active": False
             },
             {
-                "name": "Medium Range MEM3", "internal_name": "medium_range_mem3", "data_sources": "tbd",
+                "name": "Medium Range MEM3", "internal_name": "medium_range_mem3",
+                "data_sources": "tbd",
                 "time_range": "Latest forecast cycle - 240 hours",
                 "domain": conus_domain,
                 "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 240, "fcst_timestep": 1,
@@ -477,7 +526,8 @@ class Command(BaseCommand):
                 "is_active": False
             },
             {
-                "name": "Medium Range MEM4", "internal_name": "medium_range_mem4", "data_sources": "tbd",
+                "name": "Medium Range MEM4", "internal_name": "medium_range_mem4",
+                "data_sources": "tbd",
                 "time_range": "Latest forecast cycle - 240 hours",
                 "domain": conus_domain,
                 "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 240, "fcst_timestep": 1,
@@ -485,7 +535,8 @@ class Command(BaseCommand):
                 "is_active": False
             },
             {
-                "name": "Medium Range MEM5", "internal_name": "medium_range_mem5", "data_sources": "tbd",
+                "name": "Medium Range MEM5", "internal_name": "medium_range_mem5",
+                "data_sources": "tbd",
                 "time_range": "Latest forecast cycle - 240 hours",
                 "domain": conus_domain,
                 "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 240, "fcst_timestep": 1,
@@ -493,7 +544,8 @@ class Command(BaseCommand):
                 "is_active": False
             },
             {
-                "name": "Medium Range MEM6", "internal_name": "medium_range_mem6", "data_sources": "tbd",
+                "name": "Medium Range MEM6", "internal_name": "medium_range_mem6",
+                "data_sources": "tbd",
                 "time_range": "Latest forecast cycle - 240 hours",
                 "domain": conus_domain,
                 "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 240, "fcst_timestep": 1,
@@ -501,7 +553,8 @@ class Command(BaseCommand):
                 "is_active": False
             },
             {
-                "name": "Medium Range Blend Alaska", "internal_name": "medium_range_blend_alaska", "data_sources": "tbd",
+                "name": "Medium Range Blend Alaska", "internal_name": "medium_range_blend_alaska", "order": 3,
+                "data_sources": "tbd",
                 "time_range": "Latest forecast cycle - 240 hours",
                 "domain": alaska_domain,
                 "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 240, "fcst_timestep": 1,
@@ -509,7 +562,8 @@ class Command(BaseCommand):
                 "is_active": True
             },
             {
-                "name": "Medium Range Alaska MEM1", "internal_name": "medium_range_alaska_mem1", "data_sources": "tbd",
+                "name": "Medium Range Alaska MEM1", "internal_name": "medium_range_alaska_mem1",
+                "data_sources": "tbd",
                 "time_range": "Latest forecast cycle -240 hours",
                 "domain": alaska_domain,
                 "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 240, "fcst_timestep": 1,
@@ -517,7 +571,8 @@ class Command(BaseCommand):
                 "is_active": False
             },
             {
-                "name": "Medium Range Alaska MEM2", "internal_name": "medium_range_alaska_mem2", "data_sources": "tbd",
+                "name": "Medium Range Alaska MEM2", "internal_name": "medium_range_alaska_mem2",
+                "data_sources": "tbd",
                 "time_range": "Latest forecast cycle - 240 hours",
                 "domain": alaska_domain,
                 "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 240, "fcst_timestep": 1,
@@ -525,7 +580,8 @@ class Command(BaseCommand):
                 "is_active": False
             },
             {
-                "name": "Medium Range Alaska MEM3", "internal_name": "medium_range_alaska_mem3", "data_sources": "tbd",
+                "name": "Medium Range Alaska MEM3", "internal_name": "medium_range_alaska_mem3",
+                "data_sources": "tbd",
                 "time_range": "Latest forecast cycle - 240 hours",
                 "domain": alaska_domain,
                 "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 240, "fcst_timestep": 1,
@@ -533,7 +589,8 @@ class Command(BaseCommand):
                 "is_active": False
             },
             {
-                "name": "Medium Range Alaska MEM4", "internal_name": "medium_range_alaska_mem4", "data_sources": "tbd",
+                "name": "Medium Range Alaska MEM4", "internal_name": "medium_range_alaska_mem4",
+                "data_sources": "tbd",
                 "time_range": "Latest forecast cycle - 240 hours",
                 "domain": alaska_domain,
                 "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 240, "fcst_timestep": 1,
@@ -541,7 +598,8 @@ class Command(BaseCommand):
                 "is_active": False
             },
             {
-                "name": "Medium Range Alaska MEM5", "internal_name": "medium_range_alaska_mem5", "data_sources": "tbd",
+                "name": "Medium Range Alaska MEM5", "internal_name": "medium_range_alaska_mem5",
+                "data_sources": "tbd",
                 "time_range": "Latest forecast cycle - 240 hours",
                 "domain": alaska_domain,
                 "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 240, "fcst_timestep": 1,
@@ -549,7 +607,8 @@ class Command(BaseCommand):
                 "is_active": False
             },
             {
-                "name": "Medium Range Alaska MEM6", "internal_name": "medium_range_alaska_mem6", "data_sources": "tbd",
+                "name": "Medium Range Alaska MEM6", "internal_name": "medium_range_alaska_mem6",
+                "data_sources": "tbd",
                 "time_range": "Latest forecast cycle - 240 hours",
                 "domain": alaska_domain,
                 "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 240, "fcst_timestep": 1,
@@ -557,7 +616,8 @@ class Command(BaseCommand):
                 "is_active": False
             },
             {
-                "name": "Long Range AnA", "internal_name": "long_range_ana", "data_sources": "HRRR, RAP, MRMS-MS, MRMS-RO, USGS gages",
+                "name": "Long Range AnA", "internal_name": "long_range_ana",
+                "data_sources": "HRRR, RAP, MRMS-MS, MRMS-RO, USGS gages",
                 "time_range": "tbd",
                 "domain": conus_domain,
                 "cycle_start": 0, "cycle_end": 23, "cycle_freq": 1, "fcst_win": 48, "fcst_timestep": 1,
@@ -565,51 +625,22 @@ class Command(BaseCommand):
                 "is_active": False
             },
             {
-                "name": "Long Range Forecast", "internal_name": "long_range", "data_sources": "long_range_forecast",
+                "name": "Long Range Forecast", "internal_name": "long_range",
+                "data_sources": "long_range_forecast",
                 "time_range": "tbd",
                 "domain": conus_domain,
                 "cycle_start": 0, "cycle_end": 23, "cycle_freq": 1, "fcst_win": 48, "fcst_timestep": 1,
                 "availability_lag": 6,
                 "is_active": False
             },
-            {
-                "name": "Long Range MEM1", "internal_name": "long_range_mem1", "data_sources": "tbd",
-                "time_range": "Latest forecast cycle - 720 hours",
-                "domain": conus_domain,
-                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 720, "fcst_timestep": 6,
-                "availability_lag": 12,
-                "is_active": True
-            },
-            {
-                "name": "Long Range MEM2", "internal_name": "long_range_mem2", "data_sources": "tbd",
-                "time_range": "Latest forecast cycle - 720 hours",
-                "domain": conus_domain,
-                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 720, "fcst_timestep": 6,
-                "availability_lag": 12,
-                "is_active": True
-            },
-            {
-                "name": "Long Range MEM3", "internal_name": "long_range_mem3", "data_sources": "tbd",
-                "time_range": "Latest forecast cycle - 720 hours",
-                "domain": conus_domain,
-                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 720, "fcst_timestep": 6,
-                "availability_lag": 12,
-                "is_active": True
-            },
-            {
-                "name": "Long Range MEM4", "internal_name": "long_range_mem4", "data_sources": "tbd",
-                "time_range": "Latest forecast cycle - 720 hours",
-                "domain": conus_domain,
-                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 720, "fcst_timestep": 6,
-                "availability_lag": 12,
-                "is_active": True
-            },
+
         ]
 
         for v in values:
             ForecastConfiguration.objects.update_or_create(name=v['name'],
                                                            defaults={"is_active": v.get('is_active', True),
                                                                      "internal_name": v['internal_name'],
+                                                                     "order": v.get('order', None),
                                                                      "data_sources": v['data_sources'],
                                                                      "time_range": v['time_range'],
                                                                      "domain": v['domain'],
