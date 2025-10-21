@@ -470,7 +470,10 @@ def validate_formulation(module_names: set[str]) -> tuple[list[str], list[str], 
     # --- End of LSTM special case. All further checks assume LSTM is NOT present. ---
 
     # Perform checks for non-LSTM case
-    my_modules = [cached_modules[name] for name in module_names if name in cached_modules]
+    modules_by_id = get_cached_modules_by_id()  # canonical cache
+    modules_by_name = {m.name: m for m in modules_by_id.values()}  # lightweight derived view
+
+    my_modules = [modules_by_name[name] for name in module_names if name in modules_by_name]
 
     # Count how many selected modules belong to each group
     group_defs = formulation_validations["formulation_rules"]["group_requirements"]
@@ -532,7 +535,8 @@ def check_completeness(module_names: set[str], fatal_errors: list[str], nonfatal
     """
     Check if the formulation is complete by ensuring all necessary modules are included.
 
-    Uses cached modules and output variables to avoid extra DB queries.
+    Uses canonical cached modules (ID→Module), then derives a name-based view in-memory.
+    Avoids duplicate or inconsistent cache hydration.
 
     :param module_names: A set of module names to check for completeness.
     :param fatal_errors: List to append fatal errors.
@@ -540,11 +544,17 @@ def check_completeness(module_names: set[str], fatal_errors: list[str], nonfatal
     :param info_messages: List to append informational messages.
     :return: None.
     """
-    cached_modules = get_cached_modules_with_groups()
-    modules_included = [cached_modules[name] for name in module_names if name in cached_modules]
+    modules_by_id = get_cached_modules_by_id()
+    # lightweight derived view for name lookup
+    modules_by_name = {m.name: m for m in modules_by_id.values()}
+
+    # Get only the modules referenced in this formulation
+    modules_included = [modules_by_name[name] for name in module_names if name in cached_modules]
 
     # Get all output variable names from cacheable modules
-    all_output_vars = {ov.name for m in cached_modules.values() for ov in m.output_variables.all()}
+    all_output_vars = {ov.name for m in modules_by_id.values() for ov in m.output_variables.all()}
+
+    # Collect only the output variables produced by selected modules
     included_output_vars = {ov.name for m in modules_included for ov in m.output_variables.all()}
 
     missing_output_vars = sorted(all_output_vars - included_output_vars)

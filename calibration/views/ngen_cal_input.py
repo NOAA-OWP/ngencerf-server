@@ -15,7 +15,7 @@ from calibration.enums import StatusEnum, ForcingSourceEnum, ObservationalSource
 from calibration.enums_vanilla import NgenEnvironmentEnum
 from calibration.models import CalibrationOptimizationInput, CalibrationStopCriteria, CalibrationSlothParam, \
     CalibrationParameter, CalibrationFormulation, CalibrationRun
-from calibration.util.caching import get_cached_optimization_inputs, have_LSTM, get_cached_modules_with_groups
+from calibration.util.caching import get_cached_optimization_inputs, have_LSTM, get_cached_modules_by_id
 from calibration.util.file_util import get_single_file
 from calibration.util.geopkg import get_geometry_from_gpkg, normalize_gpkg
 from calibration.util.ngen_locations import CFE_LIB, TOPMD_LIB, SFT_LIB, SLOTH_LIB, SMP_LIB, LASAM_LIB, NOAH_LIB, NGEN_EXE, \
@@ -207,9 +207,9 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
 
         have_LSTM_flag = have_LSTM(run)
 
-        # --- Load cache once ---
-        cached_modules_by_name = get_cached_modules_with_groups()  # {name: Module}
-        cached_modules_by_id = {m.id: m for m in cached_modules_by_name.values()}  # {id: Module}
+        # --- Canonical module cache (shared Django file cache + per-worker @lru_cache) ---
+        modules_by_id = get_cached_modules_by_id()  # authoritative, no DB or disk after first hit
+        modules_by_name = {m.name: m for m in modules_by_id.values()}  # lightweight derived view for name-based lookups
 
         catchments = None
         # Validate and configure the gage ID and station name
@@ -293,7 +293,7 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
         if not is_missing(formulations, 'Modules', error_object) and not is_missing(run.user_formulation_name, 'Formulation name', error_object):
             general['formulation'] = run.user_formulation_name
 
-            module_names = {cached_modules_by_id[f.module_id].name for f in formulations}
+            module_names = {modules_by_id[f.module_id].name for f in formulations}
 
             # Store resolved model list in 'general' for logging/display
             general['models'] = ', '.join(module_names)
@@ -303,8 +303,8 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
             for f in formulation_errors:
                 error_object.add_error(f)
 
-            general['output_swe'] = should_generate_swe(module_names, cached_modules_by_name)
-            general['output_sm'] = should_generate_soil_moisture(module_names, cached_modules_by_name)
+            general['output_swe'] = should_generate_swe(module_names, modules_by_name)
+            general['output_sm'] = should_generate_soil_moisture(module_names, modules_by_name)
 
             if run.use_sloth:
                 general['models'] += f', {SLOTH}'
@@ -443,7 +443,7 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
                     sloth_error = True
                     error_object.add_warning(f"Missing fields {', '.join(missing_fields)} for sloth parameter '{s['param_name']}'")
                 else:
-                    module_name = cached_modules_by_id[s['maps_to_module_id']].name
+                    module_name = modules_by_id[s['maps_to_module_id']].name
                     sloth_lines.append(
                         line_format.format(
                             s['param_name'], s['param_count'], s['param_units'],
@@ -476,7 +476,7 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
             for p in params:
                 # Make sure everything is specified
                 if not p['name'] or p['initial_value'] is None or p['minimum'] is None or p['maximum'] is None:
-                    module_name = cached_modules_by_id[p['calibration_formulation__module_id']].name
+                    module_name = modules_by_id[p['calibration_formulation__module_id']].name
                     param_error = True
                     error_object.add_warning(
                         f"value ({p['initial_value']}), min ({p['minimum']}) and max ({p['maximum']}) "
@@ -487,7 +487,7 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
                 calibration['calib_parameter_file'] = os.path.join(job_data_dir, 'calib_parameter_dir')
                 # Swap module_id → name before writing files
                 for p in params:
-                    p['model'] = cached_modules_by_id[p['calibration_formulation__module_id']].name
+                    p['model'] = modules_by_id[p['calibration_formulation__module_id']].name
                 write_parameter_files(params, calibration['calib_parameter_file'])
 
         if NGEN_ENVIRONMENT == NgenEnvironmentEnum.PARALLEL_WORKS:

@@ -50,32 +50,36 @@ from calibration.enums_vanilla import JobType
 from calibration.models import Module, ModuleGroup, Gage, CalibrationRun, ValidationRun, ForecastRun, CalibrationFormulation, OptimizationInput
 
 
-def get_cached_module_by_name(module_name: str) -> Module | None:
-    """
-    Retrieve a single Module instance by name using the cached module map.
-
-    - Uses get_cached_modules_with_groups() internally (cached dict of name → Module).
-    - The returned Module is fully loaded with its groups and output_variables,
-      so no extra queries will be triggered when accessing those relations.
-
-    :param module_name: The name of the module to retrieve.
-    :return: The Module instance if found, otherwise None.
-    """
-    return get_cached_modules_with_groups().get(module_name)
-
-
 @lru_cache(maxsize=1)
 def get_cached_modules_by_id() -> dict[int, Module]:
     """
-    Retrieve all active Module objects keyed by ID, using the cached module map.
+    Canonical accessor: ID → Module (authoritative module cache)
 
-    - Each Module has groups and output_variables prefetched,
-      so no lazy lookups will trigger extra DB queries.
-    - Safe to reuse across requests within the process (also cached in Django cache).
+    Caching strategy:
+    - FIRST, we pull from Django's file-based cache (shared across Gunicorn workers).
+    - THEN we memoize the result with @lru_cache so this worker does not re-read from disk.
+      (Each worker gets its own in-memory copy — safely isolated.)
 
-    :return: Dict mapping {module.id → Module instance}.
+    :return: Dict mapping {module.id → fully hydrated Module instance}.
     """
-    return {m.id: m for m in get_cached_modules_with_groups().values()}
+    modules_by_name = get_cached_modules_with_groups()  # shared on disk, hydrated once per worker
+    return {m.id: m for m in modules_by_name.values()}
+
+
+def get_cached_module_by_name(module_name: str) -> Module | None:
+    """
+    Convenience lookup: name → Module
+
+    We DO NOT directly hit Django's file cache here.
+    Instead, we derive from the canonical ID-based in-memory cache.
+    This guarantees consistency and avoids duplicate disk reads.
+
+    :param module_name: Exact name of module to fetch.
+    :return: Module instance, or None if not found.
+    """
+    modules_by_id = get_cached_modules_by_id()  # single source of truth (per-worker @lru_cached)
+    modules_by_name = {m.name: m for m in modules_by_id.values()}  # derived lightweight view
+    return modules_by_name.get(module_name)
 
 
 CACHED_GAGES_KEY = 'cached_gages'

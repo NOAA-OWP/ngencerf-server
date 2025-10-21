@@ -260,7 +260,7 @@ class LoggingConfigSerializer(BaseSerializer):
         """
         Lowercase all module names and validate:
         - Keys (module names) must match known modules (case-insensitive),
-          or be the special case 'ngen'
+          or be the special case 'ngen' or 'ngen-forcing'
         - Values must be valid log levels from NgenLogging
 
         Returns a new dict with all lowercase keys.

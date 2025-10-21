@@ -25,10 +25,11 @@ from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import AccessToken
 
 from calibration.enums import StatusEnum, ValidationType, JobGenesis, NgenLogging
-from calibration.models import CalibrationRun, ValidationRun, Status, ForecastConfiguration, ForecastRun, CustomUser, ColdStartRun
+from calibration.models import CalibrationRun, ValidationRun, Status, ForecastConfiguration, ForecastRun, CustomUser, ColdStartRun, \
+    CalibrationFormulation
 from calibration.models import Iteration
 from calibration.models.base_run import BaseRun
-from calibration.util.caching import get_cached_modules_with_groups
+from calibration.util.caching import get_cached_modules_with_groups, get_cached_modules_by_id
 from calibration.util.calibration_validators import ErrorResponseSerializer, BaseSerializer
 from calibration.util.cloud_util import path_exists
 from calibration.util.ngen_locations import get_forecast_dir, get_output_calibration_run_dir, \
@@ -811,8 +812,13 @@ def generate_ngen_logging_config(run: CalibrationRun | ValidationRun, logging_co
     if not logging_config_param:
         logging_config_param = {}
 
-    # Get all valid module names in lowercase, plus special-case 'ngen'
-    valid_modules = {m.name.lower() for m in get_cached_modules_with_groups().values()}
+    # Only use modules in our formulation
+    formulations = CalibrationFormulation.objects.filter(calibration_run=run).only("module_id")
+    modules_by_id = get_cached_modules_by_id()
+    module_names = {modules_by_id[f.module_id].name for f in formulations}
+
+    # Get our  module names in lowercase, plus special-case 'ngen' and 'ngen-forcing'
+    valid_modules = {m.lower() for m in module_names}
     valid_modules.add('ngen')
     valid_modules.add('ngen-forcing')
 
@@ -862,6 +868,7 @@ def write_ngen_logging_file(run: CalibrationRun | ValidationRun, logging_config_
         }
         This is currently only provided by the UI when calling run_calibration_job.
     """
+    # TODO logging
     logging_config = generate_ngen_logging_config(run, logging_config_param)
 
     # Write logging config to disk
