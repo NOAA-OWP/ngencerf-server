@@ -16,7 +16,7 @@ class ForecastConfiguration(BaseModel):
     cycle_freq = models.IntegerField(null=False)
     fcst_win = models.IntegerField(null=False)
     fcst_timestep = models.FloatField(null=False)
-    order = models.IntegerField(null=False)
+    order = models.IntegerField(null=True)
 
     class Meta:
         db_table = 'forecast_configuration'

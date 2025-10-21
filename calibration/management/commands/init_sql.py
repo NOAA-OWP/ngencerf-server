@@ -624,16 +624,6 @@ class Command(BaseCommand):
                 "availability_lag": 6,
                 "is_active": False
             },
-            {
-                "name": "Long Range Forecast", "internal_name": "long_range",
-                "data_sources": "long_range_forecast",
-                "time_range": "tbd",
-                "domain": conus_domain,
-                "cycle_start": 0, "cycle_end": 23, "cycle_freq": 1, "fcst_win": 48, "fcst_timestep": 1,
-                "availability_lag": 6,
-                "is_active": False
-            },
-
         ]
 
         for v in values:
