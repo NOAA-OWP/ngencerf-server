@@ -506,7 +506,7 @@ def get_forecast_jobs_internal(
         cold_status = f.pop('cold_start_run__status__name')
         cold_submit = f.pop('cold_start_run__submit_date')
 
-        # OOnly include nested cold_start object if data exists
+        # Only include nested cold_start object if data exists
         if cold_date or cold_status:
             f['cold_start'] = {
                 'cold_start_date': cold_date,
