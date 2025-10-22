@@ -8,7 +8,7 @@ from calibration.models.forecast_run import ForecastRun
 class VerificationRun(BaseRun):
     owner = models.ForeignKey(get_user_model(), null=False, on_delete=models.RESTRICT, db_index=True)
     forecast_run = models.ForeignKey(ForecastRun, null=True, on_delete=models.CASCADE, db_index=True)
-    verification_yaml_file_path = models.TextField(null=True)
+    verification_config = models.TextField(null=True)
     job_data_dir = models.CharField(max_length=255, null=False)
 
     class Meta:
