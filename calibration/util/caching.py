@@ -47,7 +47,7 @@ from django.core.cache import cache
 
 from calibration.enums import PlotDefinitionsEnum
 from calibration.enums_vanilla import JobType
-from calibration.models import Module, ModuleGroup, Gage, CalibrationRun, ValidationRun, ForecastRun, CalibrationFormulation, OptimizationInput
+from calibration.models import Module, ModuleGroup, Gage, CalibrationRun, ValidationRun, CalibrationFormulation, OptimizationInput
 
 CACHED_MODULES_KEY = "cached_modules_with_groups"
 
@@ -101,7 +101,6 @@ def get_cached_module_groups() -> list[str]:
         module_groups = [mg.name for mg in qs]
         cache.set(MODULE_GROUPS_CACHE_KEY, module_groups, None)
     return module_groups
-
 
 
 @lru_cache(maxsize=1)
@@ -251,13 +250,12 @@ def get_cached_optimization_inputs(optimization_name: str) -> list[dict[str, str
 
 
 def get_filtered_plot_definitions(
-        run: CalibrationRun | ValidationRun | ForecastRun, plot_name: str | None = None, first_match: bool = False
+        run: CalibrationRun | ValidationRun, plot_name: str | None = None, first_match: bool = False
 ) -> list[dict] | dict | None:
     """
     Retrieve filtered plot definitions for the specified run and plot name, with a case-insensitive match.
 
     Behavior:
-    - ForecastRun → only forecast plots.
     - ValidationRun or CalibrationRun with automatic_validation → validation plots included.
     - CalibrationRun with LSTM module → only plots with lstm_flag=True.
     - Otherwise → plots must have a valid_optimizations list containing run.optimization.name.
@@ -268,52 +266,44 @@ def get_filtered_plot_definitions(
     :return: A list of dictionaries representing plot definitions that match the criteria, a single dictionary if first_match is True, or None if no match is found.
     """
     cached_plot_definitions = PlotDefinitionsEnum.get_choices_with_fields(
-        fields=['name', 'display_name', 'description', 'valid_optimizations', 'job_type', 'location', 'filename_mask', 'timeseries_available',
-                'lstm_flag']
+        fields=['name', 'display_name', 'description', 'valid_optimizations', 'job_type', 'location', 'filename_mask',
+                'timeseries_available', 'lstm_flag']
     )
 
     have_LSTM_flag = have_LSTM(run if isinstance(run, CalibrationRun) else run.calibration_run)
 
     plot_name_lower = plot_name.lower() if plot_name else None
 
+    # Determine if validation plots should be included
+    include_validation_plots = isinstance(run, ValidationRun) or (
+            isinstance(run, CalibrationRun) and run.automatic_validation
+    )
+
+    optimization = run.optimization if isinstance(run, CalibrationRun) else run.calibration_run.optimization
+
     def matches_common_criteria(plot: dict) -> bool:
         return (
                 (plot_name is None or plot['name'].lower() == plot_name_lower)
                 and (
-                        plot['job_type'] == JobType.CALIBRATION.value or
-                        (include_validation_plots and plot['job_type'] == JobType.VALIDATION.value)
+                        plot['job_type'] == JobType.CALIBRATION.value
+                        or (include_validation_plots and plot['job_type'] == JobType.VALIDATION.value)
                 )
         )
 
-    if isinstance(run, ForecastRun):
-        # Only return plots for Forecast jobs
+    if have_LSTM_flag:
+        # LSTM mode: only include plots with lstm_flag=True
         filtered_plots = [
             plot for plot in cached_plot_definitions
-            if (plot_name is None or plot['name'].lower() == plot_name.lower())
-               and plot['job_type'] == JobType.FORECAST.value
+            if matches_common_criteria(plot) and plot.get('lstm_flag', False) is True
         ]
     else:
-        # Determine if validation plots should be included
-        include_validation_plots = isinstance(run, ValidationRun) or (
-                isinstance(run, CalibrationRun) and run.automatic_validation
-        )
-
-        optimization = run.optimization if isinstance(run, CalibrationRun) else run.calibration_run.optimization
-
-        if have_LSTM_flag:
-            # LSTM mode: only include plots with lstm_flag=True
-            filtered_plots = [
-                plot for plot in cached_plot_definitions
-                if matches_common_criteria(plot) and plot.get('lstm_flag', False) is True
-            ]
-        else:
-            # Standard case: filter by valid_optimizations
-            filtered_plots = [
-                plot for plot in cached_plot_definitions
-                if matches_common_criteria(plot)
-                   and plot['valid_optimizations'] is not None
-                   and optimization.name in json.loads(plot['valid_optimizations'])
-            ]
+        # Standard case: filter by valid_optimizations
+        filtered_plots = [
+            plot for plot in cached_plot_definitions
+            if matches_common_criteria(plot)
+               and plot['valid_optimizations'] is not None
+               and optimization.name in json.loads(plot['valid_optimizations'])
+        ]
 
     # Return the first match if first_match is True, otherwise return the list of matches
     return filtered_plots[0] if first_match and filtered_plots else filtered_plots
