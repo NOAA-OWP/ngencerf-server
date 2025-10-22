@@ -2,7 +2,8 @@ from typing import Any, Type
 
 from django.core.cache import cache
 
-from calibration.models import Status, ForcingSource, ObservationalSource, Domain, Optimization, GeopackageSource, PlotDefinition, ForecastConfiguration, \
+from calibration.models import Status, ForcingSource, ObservationalSource, Domain, Optimization, GeopackageSource, PlotDefinition, \
+    ForecastConfiguration, \
     Metric
 from calibration.util.AbstractEnum import AbstractEnum
 
@@ -107,7 +108,6 @@ class ForecastConfigEnum(AbstractEnum):
     def get_filter(cls) -> dict[str, Any]:
         # Apply the filter to return only active elements
         return {'is_active': True}
-
 
 
 class DomainEnum(AbstractEnum):

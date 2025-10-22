@@ -499,8 +499,8 @@ def get_forecast_jobs_internal(
         f['domain_name'] = f.pop('configuration__domain__name')
         f['gage_id'] = f.pop('calibration_run__gage__gage_id')
         f['forecast_status'] = f.pop('status__name')
-        f['cycle_date']   = f.pop('cycle_date')
-        f['submit_date']  = f.pop('submit_date')
+        f['cycle_date'] = f.pop('cycle_date')
+        f['submit_date'] = f.pop('submit_date')
 
         cold_date = f.pop('cold_start_run__cold_start_date')
         cold_status = f.pop('cold_start_run__status__name')

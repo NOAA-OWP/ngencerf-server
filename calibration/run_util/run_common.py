@@ -13,8 +13,7 @@ import pandas as pd
 from datetimerange import DateTimeRange
 from django.conf import settings
 from django.db import transaction
-from mswm.build_inputs import RealizationBuilder
-from mswm.manager import build_fcst
+from mswm.manager import build_fcst, build_calib
 from rest_framework.response import Response
 
 from calibration.enums import StatusEnum, ValidationType, SlurmStatusEnum, ForcingSourceEnum, ObservationalSourceEnum
@@ -456,6 +455,7 @@ def prepare_calibration_job(calibration_run: CalibrationRun) -> tuple[bool, Resp
             errors=error_object.errors
         )
 
+    job_description = get_job_description(calibration_run)
     try:
         logger.info(f'Final preparation to run Calibration Job {calibration_run.id}')
         validation_errors = final_preprocessing_for_calibration(calibration_run)
@@ -466,16 +466,15 @@ def prepare_calibration_job(calibration_run: CalibrationRun) -> tuple[bool, Resp
                 errors=validation_errors
             )
 
-        logger.info(f'Running RealizationBuilder.build_calib_realization for Calibration Job {calibration_run.id}')
-        rb = RealizationBuilder(config_file)
-        rb.build_calib_realization()
+        logger.info(f'Running build_calib for {job_description} with config {config_file}')
+        build_calib(config_file)
     except Exception as e:
         CalibrationRun.objects.filter(id=calibration_run.id).update(status=StatusEnum.FAILED.db_instance)
-        msg = f'Exception during build_calib_realization for Calibration Job {calibration_run.id} - {str(e)}'
+        msg = f'Exception during build_calib for {job_description} - {str(e)}'
         logger.exception(msg)
         raise CerfException(msg) from e
 
-    logger.info(f'Return from build_calib_realization for Calibration Job {calibration_run.id}')
+    logger.info(f'Return from build_calib for {job_description}')
     return False, None
 
 
@@ -509,10 +508,6 @@ def prepare_fcst_or_cold_start_job(run: ColdStartRun | ForecastRun) -> tuple[boo
                     f'with config: {config_file}, valid_best: {valid_best}, run_name: {run_name}')
 
         build_fcst(config_file, valid_best, run_name, use_cold_start=use_cold_start)
-        # rb = RealizationBuilder(input_path=config_file,
-        #                         valid_yaml=get_validation_best_input_file(forecast_run.calibration_run),
-        #                         fcst_run_name=os.path.basename(get_forecast_dir(forecast_run)))
-        # rb.build_fcst_realization()
     except Exception as e:
         # Mark the run as failed
         run.__class__.objects.filter(id=run.id).update(status=StatusEnum.FAILED.db_instance)

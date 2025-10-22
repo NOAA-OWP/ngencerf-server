@@ -308,7 +308,7 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
                 error_object.add_error(f)
 
             general['output_swe'] = should_generate_swe(modules_by_name_for_job)
-            general['output_sm']  = should_generate_soil_moisture(modules_by_name_for_job)
+            general['output_sm'] = should_generate_soil_moisture(modules_by_name_for_job)
 
             if run.use_sloth:
                 general['models'] += f', {SLOTH}'

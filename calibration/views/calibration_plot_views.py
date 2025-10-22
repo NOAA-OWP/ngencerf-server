@@ -225,7 +225,6 @@ def get_plot(request: Request) -> Response:
 
     calibration_run_id = validator.get('calibration_run_id')
     validation_run_id = validator.get('validation_run_id')
-    #forecast_run_id = validator.get('forecast_run_id')
 
     plot_name = validator.get('plot_name')
     include_data = validator.get('include_data')
