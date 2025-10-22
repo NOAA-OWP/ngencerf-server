@@ -4,5 +4,14 @@
 #
 # Runs logrotate twice daily at 10:00 and 22:00 UTC (i.e., 6am ET and 6pm ET).
 # Uses the production logrotate config with hard-coded paths.
+#
+# Logrotate will REFUSE to run unless its config is:
+#   - owned by root (uid 0)
+#   - NOT writable by group or others (must be 644 or stricter)
+# These must be enforced manually on deployed hosts after checkout:
+#   sudo chown root:root /ngencerf-app/ngencerf-server/logrotate-ngencerf.prod.conf
+#   sudo chmod 644 /ngencerf-app/ngencerf-server/logrotate-ngencerf.prod.conf
+#
+# IMPORTANT: this cron job must run as root (use 'sudo crontab -e', NOT 'crontab -e')
 
 0 10,22 * * * /usr/sbin/logrotate -f /ngencerf-app/ngencerf-server/logrotate-ngencerf.prod.conf
