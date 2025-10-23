@@ -111,6 +111,7 @@ def get_calibration_jobs_for_forecast(request: Request) -> Response:
     include_archived = validator.get('include_archived')
 
     jobs = get_jobs(request.user,
+                    include_validation_data=GetValidationJobsScope.STATUS,
                     run_status=[StatusEnum.DONE],
                     include_archived=include_archived,
                     include_stop_criteria=True
