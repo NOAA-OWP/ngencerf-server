@@ -1033,7 +1033,7 @@ def handle_slurm_callback(request: Request, serializer_class, get_run_fn, job_en
     if error_return:
         return error_return
 
-    job_description = f"{get_job_description(run)} (Slurm id: {run.slurm_id})"
+    job_description = f"{get_job_description(run)} (Slurm id: {run.slurm_job_id})"
     if slurm_status == SlurmStatusEnum.STARTING:
         logger.info(f'{job_description} is starting')
         run.status = StatusEnum.RUNNING.db_instance
