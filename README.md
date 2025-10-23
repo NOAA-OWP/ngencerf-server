@@ -45,6 +45,7 @@ Create a directory that Django uses for a disk-based cache.  This is only needed
 
 ```aiignore
 sudo mkdir /var/django_cache
+sudo chmod 777 /var/django_cache
 ```
 
 # Access to AWS

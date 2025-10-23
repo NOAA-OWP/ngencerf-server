@@ -127,17 +127,17 @@ AUTHENTICATION_BACKENDS = [
 ]
 
 CACHE_DIRECTORY = "/var/django_cache"
-# Try to create the directory if missing (safe in both dev and prod)
-try:
-    os.makedirs(CACHE_DIRECTORY, exist_ok=True)
-    # Permission sanity check — warn immediately instead of failing later
-    if not os.access(CACHE_DIRECTORY, os.W_OK):
-        print(f"WARNING: Django cache directory is NOT writable: {CACHE_DIRECTORY}")
-    else:
-        print(f"Ensured cache directory exists and is writable: {CACHE_DIRECTORY}")
-except Exception as e:
-    print(f"Could not create cache directory {CACHE_DIRECTORY}: {e}")
 
+# Let this crash *naturally* if not permitted
+os.makedirs(CACHE_DIRECTORY, exist_ok=True)
+
+# 2) Explicitly assert writability — crash if not
+if not os.access(CACHE_DIRECTORY, os.W_OK):
+    raise PermissionError(f"Django cache directory is NOT writable: {CACHE_DIRECTORY}")
+
+print(f"Using Django cache directory: {CACHE_DIRECTORY}")
+
+# --- Now safe to define CACHES; Django will see a guaranteed writable path ---
 CACHES = {
     "default": {
         "BACKEND": "django.core.cache.backends.filebased.FileBasedCache",
