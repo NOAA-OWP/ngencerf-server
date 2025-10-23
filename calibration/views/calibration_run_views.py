@@ -720,11 +720,10 @@ def get_iteration(request: Request) -> Response:
     calibration_run_id = validator.get('calibration_run_id')
 
     with readonly_transaction():
-        # Allow status Ready for UI polling immediately after submission.
         run, error_return = get_calibration_run(
             calibration_run_id,
             request.user,
-            run_status=[StatusEnum.READY, StatusEnum.RUNNING, StatusEnum.DONE,
+            run_status=[StatusEnum.SUBMITTED, StatusEnum.RUNNING, StatusEnum.DONE,
                         StatusEnum.FAILED, StatusEnum.CANCELLED, StatusEnum.SERVER_ERROR]
         )
         if error_return:
