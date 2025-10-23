@@ -87,9 +87,17 @@ class CalibrationConfig(AppConfig):
                 cache = caches['default']
                 cache.clear()
                 logger.info(f'Cleared Django file-based cache at {settings.CACHE_DIRECTORY}')
+
+                # --- SANITY TEST ---
+                test_key = "cache_sanity_check_key"
+                cache.set(test_key, "OK", timeout=None)
+                if cache.get(test_key) == "OK":
+                    logger.info("Django file-based cache is WORKING (write/read success)")
+                else:
+                    logger.warning("Django cache SET/GET check FAILED — likely fallback to LocMemCache or DummyCache")
+
             except Exception as e:
-                logger.warning(f'Failed to clear Django cache: {e}')
-            # -------------------------------------------------------------
+                logger.error(f'Django cache failed during init SET/GET check: {e}')
 
             logger.info('')
             print_git_info_all()

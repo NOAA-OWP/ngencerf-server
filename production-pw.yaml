@@ -22,6 +22,7 @@ services:
       - ${CONTAINER_PATH}:/ngencerf/containers/
       - /var/run/docker.sock:/var/run/docker.sock
       - /ngencerf-app/aws:/root/.aws:ro
+      - /ngencerf-app/django_cache:/var/django_cache
     environment:
       - NGEN_CAL_DATA_PATH=${NGEN_CAL_DATA_PATH}
     env_file:

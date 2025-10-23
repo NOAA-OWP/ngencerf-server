@@ -126,15 +126,27 @@ AUTHENTICATION_BACKENDS = [
     "django.contrib.auth.backends.ModelBackend",
 ]
 
-CACHE_DIRECTORY = "/tmp/django_cache"
+CACHE_DIRECTORY = "/var/django_cache"
+# Try to create the directory if missing (safe in both dev and prod)
+try:
+    os.makedirs(CACHE_DIRECTORY, exist_ok=True)
+    # Permission sanity check — warn immediately instead of failing later
+    if not os.access(CACHE_DIRECTORY, os.W_OK):
+        print(f"WARNING: Django cache directory is NOT writable: {CACHE_DIRECTORY}")
+    else:
+        print(f"Ensured cache directory exists and is writable: {CACHE_DIRECTORY}")
+except Exception as e:
+    print(f"Could not create cache directory {CACHE_DIRECTORY}: {e}")
+
 CACHES = {
     "default": {
         "BACKEND": "django.core.cache.backends.filebased.FileBasedCache",
         "LOCATION": CACHE_DIRECTORY,  # any directory writable by Gunicorn
     }
 }
-os.makedirs(CACHE_DIRECTORY, exist_ok=True)
-os.chmod(CACHE_DIRECTORY, 0o777)
+
+print(f"Django file cache LOCATION: {CACHES['default']['LOCATION']}")
+
 
 AUTH_USER_MODEL = 'calibration.CustomUser'
 
