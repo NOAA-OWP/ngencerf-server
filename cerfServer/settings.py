@@ -362,7 +362,7 @@ LOGGING = {
         'file_dev': {
             'level': 'DEBUG',
             'class': 'logging.FileHandler',
-            'filename': os.path.join(NGEN_LOGGING_DIR, 'ngencerf_dev.log'),
+            'filename': os.path.join(NGEN_LOGGING_DIR, 'ngencerf.log'),
             'formatter': 'dev_format',
             'encoding': 'utf-8',
         },

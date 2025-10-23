@@ -385,7 +385,7 @@ if [ "${CERF_VENV}" != "Docker" ]; then
         crontab -l 2>/dev/null | grep -v 'logrotate-ngencerf.dev.conf' > /tmp/mycron
 
         # Add the new cron job (points at the generated dev config)
-        echo "0 10,22 * * * /usr/sbin/logrotate -f $DEV_LOGROTATE_CONF" >> /tmp/mycron
+        echo "0 10,22 * * * /usr/sbin/logrotate -s ~/.logrotate-status -f $DEV_LOGROTATE_CONF" >> /tmp/mycron
 
         crontab /tmp/mycron
         status=$?
