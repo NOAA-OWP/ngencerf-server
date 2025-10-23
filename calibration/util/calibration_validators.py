@@ -414,10 +414,12 @@ class CalibrationJobsForValidationResponseSerializer(CalibrationJobsResponseSeri
 
 class GetCalibrationJobsResponseSerializer(BaseSerializer):
     jobs = serializers.ListSerializer(child=CalibrationJobsResponseSerializer(), required=True, allow_empty=True)
+    total_count = serializers.IntegerField(required=True)
 
 
 class GetCalibrationJobsForEvaluationResponseSerializer(BaseSerializer):
     jobs = serializers.ListSerializer(child=CalibrationJobsForValidationResponseSerializer(), required=True, allow_empty=True)
+    total_count = serializers.IntegerField(required=True)
 
 
 class ValidationJobsParameter(BaseSerializer):
@@ -530,7 +532,12 @@ class LockJobRequestSerializer(CalibrationRunIdList):
     lock = serializers.BooleanField(default=True, allow_null=False, required=False)
 
 
-class GetCalibrationJobsRequestSerializer(BaseSerializer):
+class PaginationSerializer(BaseSerializer):
+    limit = serializers.IntegerField(required=False, min_value=1, max_value=500)
+    offset = serializers.IntegerField(required=False, min_value=0, default=0)
+
+
+class GetCalibrationJobsRequestSerializer(PaginationSerializer):
     include_archived = serializers.BooleanField(default=False, required=False)
 
 
@@ -1126,6 +1133,7 @@ class ForecastJobsResponseSerializer(BaseSerializer):
 
 class GetForecastJobsResponseSerializer(BaseSerializer):
     forecast_jobs = serializers.ListSerializer(child=ForecastJobsResponseSerializer(), required=True, allow_empty=True)
+    total_count = serializers.IntegerField(required=True)
 
 
 ##################################

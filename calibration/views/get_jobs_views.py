@@ -11,9 +11,9 @@ from rest_framework.response import Response
 
 from calibration.enums import GetValidationJobsScope, StatusEnum, ValidationType
 from calibration.models import CalibrationFormulation, CalibrationRun, CalibrationStopCriteria, ValidationRun, IterationParameter, ForecastRun
-from calibration.util.calibration_validators import EmptySerializer, GetCalibrationJobsForEvaluationResponseSerializer, ErrorResponseSerializer, \
+from calibration.util.calibration_validators import GetCalibrationJobsForEvaluationResponseSerializer, ErrorResponseSerializer, \
     GetCalibrationJobsResponseSerializer, GetCalibrationJobsRequestSerializer, CalibrationRunSerializer, GetValidationJobsResponseSerializer, \
-    GetForecastJobsResponseSerializer
+    GetForecastJobsResponseSerializer, PaginationSerializer
 from calibration.views.calibration_evaluation_views import downloadable_statuses
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import handle_exceptions, validate_request, validate_response, truncate_large_fields, get_calibration_run, \
@@ -56,15 +56,23 @@ def get_calibration_jobs_for_evaluation(request: Request) -> Response:
         return error_return
 
     include_archived = validator.get('include_archived')
+    limit = validator.get("limit")
+    offset = validator.get("offset", 0)
 
-    jobs = get_jobs(request.user,
-                    include_validation_data=GetValidationJobsScope.STATUS,
-                    run_status=[StatusEnum.DONE, StatusEnum.FAILED, StatusEnum.CANCELLED, StatusEnum.SERVER_ERROR],
-                    include_archived=include_archived,
-                    include_stop_criteria=True
-                    )
+    jobs, total_count = get_jobs(
+        request.user,
+        run_status=[StatusEnum.DONE, StatusEnum.FAILED, StatusEnum.CANCELLED, StatusEnum.SERVER_ERROR],
+        include_validation_data=GetValidationJobsScope.STATUS,
+        include_archived=include_archived,
+        include_stop_criteria=True,
+        limit=limit,
+        offset=offset
+    )
 
-    response = {'jobs': jobs}
+    response = {
+        "jobs": jobs,
+        "total_count": total_count
+    }
 
     response_validator, error_response = validate_response(GetCalibrationJobsForEvaluationResponseSerializer, response, fields_to_truncate=['jobs'])
     if error_response:
@@ -109,15 +117,23 @@ def get_calibration_jobs_for_forecast(request: Request) -> Response:
         return error_return
 
     include_archived = validator.get('include_archived')
+    limit = validator.get("limit")
+    offset = validator.get("offset", 0)
 
-    jobs = get_jobs(request.user,
-                    include_validation_data=GetValidationJobsScope.STATUS,
-                    run_status=[StatusEnum.DONE],
-                    include_archived=include_archived,
-                    include_stop_criteria=True
-                    )
+    jobs, total_count = get_jobs(
+        request.user,
+        run_status=[StatusEnum.DONE],
+        include_validation_data=GetValidationJobsScope.STATUS,
+        include_archived=include_archived,
+        include_stop_criteria=True,
+        limit=limit,
+        offset=offset
+    )
 
-    response = {'jobs': jobs}
+    response = {
+        "jobs": jobs,
+        "total_count": total_count
+    }
 
     response_validator, error_response = validate_response(GetCalibrationJobsResponseSerializer, response, fields_to_truncate=['jobs'], max_length=10)
     if error_response:
@@ -160,16 +176,23 @@ def get_calibration_jobs(request):
         return error_return
 
     include_archived = validator.get('include_archived')
+    limit = validator.get("limit")
+    offset = validator.get("offset", 0)
 
-    jobs = get_jobs(
+    jobs, total_count = get_jobs(
         request.user,
         run_status=list(StatusEnum),
         include_validation_data=GetValidationJobsScope.STATUS,
         include_archived=include_archived,
-        include_stop_criteria=True
+        include_stop_criteria=True,
+        limit=limit,
+        offset=offset
     )
 
-    response = {'jobs': jobs}
+    response = {
+        "jobs": jobs,
+        "total_count": total_count
+    }
 
     response_validator, error_response = validate_response(GetCalibrationJobsResponseSerializer, response, fields_to_truncate=['jobs'], max_length=10)
     if error_response:
@@ -187,8 +210,10 @@ def get_jobs(
         run_status: list[StatusEnum] = None,
         include_validation_data: GetValidationJobsScope = None,
         include_archived: bool = False,
-        include_stop_criteria: bool = False
-) -> list[dict[str, Any]]:
+        include_stop_criteria: bool = False,
+        limit: int | None = None,
+        offset: int = 0
+) -> tuple[list[dict[str, Any]], int]:
     """
     Retrieves calibration jobs for the given user with optional status filtering and validation data inclusion.
     Runs in READ ONLY mode to reduce contention.
@@ -200,7 +225,9 @@ def get_jobs(
         - 'status': Includes validation status details.
     :param include_archived: Whether to include archived jobs in the queryset.
     :param include_stop_criteria: Whether to include stop_criteria in the queryset.
-    :return: List of calibration jobs with selected fields.
+    :param limit: Optional maximum number of rows to return (for pagination). If None, return all.
+    :param offset: Optional number of rows to skip before returning results (for pagination).
+    :return: A tuple of (list of job dicts, total_count BEFORE pagination).
     """
     with readonly_transaction():
         # Base query: filter jobs for the user
@@ -228,6 +255,14 @@ def get_jobs(
                 "is_archived", "is_locked"
             )
         )
+
+        total_count = CalibrationRun.objects.filter(query).count()
+        # ───────────────────────────────────────
+        # Apply pagination ONLY if limit provided
+        # ───────────────────────────────────────
+        if limit:
+            calibration_runs_qs = calibration_runs_qs[offset: offset + limit]
+        # ───────────────────────────────────────
 
         calibration_runs = list(calibration_runs_qs)
         run_ids = [r["id"] for r in calibration_runs]
@@ -322,7 +357,7 @@ def get_jobs(
 
             results.append(result)
 
-        return results
+        return results, total_count
 
 
 def get_validation_jobs_internal(
@@ -461,7 +496,9 @@ def get_validation_jobs(request: Request) -> Response:
 def get_forecast_jobs_internal(
         user: User,
         run_status: list[StatusEnum] | None = None,
-) -> list[dict[str, Any]]:
+        limit: int | None = None,
+        offset: int = 0
+) -> tuple[list[dict[str, Any]], int]:
     """
     Internal helper to retrieve forecast jobs for a user (READ ONLY).
     Intended to be reused by multiple endpoints.
@@ -476,6 +513,8 @@ def get_forecast_jobs_internal(
 
     if run_status:
         query &= Q(status_id__in=[s.db_instance.id for s in run_status])
+
+    total_count = ForecastRun.objects.filter(query).count()
 
     with readonly_transaction():
         rows = list(
@@ -496,6 +535,13 @@ def get_forecast_jobs_internal(
                 'cold_start_run__submit_date',
             )
         )
+
+        # ──────────────────────────────────────────
+        # Apply pagination ONLY if limit provided
+        # ──────────────────────────────────────────
+        if limit:
+            rows = rows[offset: offset + limit]
+        # ──────────────────────────────────────────
 
     # Normalize keys expected by the API response/serializer
     for f in rows:
@@ -520,11 +566,11 @@ def get_forecast_jobs_internal(
             }
         # else: omit cold_start entirely
 
-    return rows
+    return rows, total_count
 
 
 @extend_schema(
-    request=EmptySerializer,
+    request=PaginationSerializer,
     responses={
         200: GetForecastJobsResponseSerializer,
         400: OpenApiResponse(
@@ -551,12 +597,25 @@ def get_forecast_jobs(request: Request) -> Response:
     data = request.data if request.method == 'POST' else request.query_params.dict()
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
 
-    validator, error_return = validate_request(EmptySerializer, data)
+    validator, error_return = validate_request(PaginationSerializer, data)
     if error_return:
         return error_return
 
-    forecast_jobs = get_forecast_jobs_internal(request.user)
-    response = {'forecast_jobs': forecast_jobs}
+    limit = validator.get("limit")
+    offset = validator.get("offset", 0)
+
+    forecast_jobs, total_count = get_forecast_jobs_internal(
+        request.user,
+        run_status=None,
+        limit=limit,
+        offset=offset
+    )
+
+    response = {
+        "forecast_jobs": forecast_jobs,
+        "total_count": total_count
+    }
+
     response_validator, error_response = validate_response(
         GetForecastJobsResponseSerializer, response,
         fields_to_truncate=['forecast_jobs'], max_length=10
@@ -572,7 +631,7 @@ def get_forecast_jobs(request: Request) -> Response:
 
 
 @extend_schema(
-    request=EmptySerializer,
+    request=PaginationSerializer,
     responses={
         200: GetForecastJobsResponseSerializer,
         400: OpenApiResponse(
@@ -598,13 +657,24 @@ def get_forecast_jobs_for_verification(request: Request) -> Response:
     data = request.data if request.method == 'POST' else request.query_params.dict()
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
 
-    validator, error_return = validate_request(EmptySerializer, data)
+    validator, error_return = validate_request(PaginationSerializer, data)
     if error_return:
         return error_return
 
-    forecast_jobs = get_forecast_jobs_internal(request.user, run_status=[StatusEnum.DONE])
+    limit = validator.get("limit")
+    offset = validator.get("offset", 0)
 
-    response = {'forecast_jobs': forecast_jobs}
+    forecast_jobs, total_count = get_forecast_jobs_internal(
+        request.user, run_status=[StatusEnum.DONE],
+        limit=limit,
+        offset=offset
+    )
+
+    response = {
+        "forecast_jobs": forecast_jobs,
+        "total_count": total_count
+    }
+
     response_validator, error_response = validate_response(
         GetForecastJobsResponseSerializer, response,
         fields_to_truncate=['forecast_jobs'], max_length=10

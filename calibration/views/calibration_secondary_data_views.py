@@ -532,4 +532,3 @@ def should_generate_soil_moisture(modules_by_name_for_job: dict[str, Module]) ->
     :return: True if SMP is one of the modules in the job; False otherwise.
     """
     return "SMP" in modules_by_name_for_job
-
