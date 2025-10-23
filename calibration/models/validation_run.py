@@ -15,6 +15,7 @@ class ValidationRun(BaseRun):
             models.Index(fields=['calibration_run', 'validation_type'], name='idx_validationrun_run_type'),
             models.Index(fields=['calibration_run'], name='idx_validation_calibration_run'),
             models.Index(fields=['status'], name='idx_validation_status'),
+            models.Index(fields=['calibration_run', 'validation_type', '-id'], name='idx_val_run_type_id_desc')
         ]
 
     @property

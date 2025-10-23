@@ -218,6 +218,7 @@ def get_jobs(
             CalibrationRun.objects
             .filter(query)
             .select_related("gage", "status", "objective_function", "optimization")
+            .order_by('-id')
             .values(
                 "id", "gage__gage_id", "gage__domain__name", "submit_date", "user_formulation_name",
                 "calibration_start_period", "calibration_end_period",
@@ -235,6 +236,7 @@ def get_jobs(
             CalibrationFormulation.objects
             .filter(calibration_run_id__in=run_ids)
             .select_related("module")
+            .order_by('-id')
             .values_list("calibration_run_id", "module__name")
         )
 
@@ -255,6 +257,7 @@ def get_jobs(
                 .filter(calibration_run_id__in=run_ids)
                 .filter(validation_filter)
                 .select_related("status")
+                .order_by('-id')
                 .values("id", "calibration_run_id", "validation_type", "status__name")
             )
 
@@ -471,12 +474,13 @@ def get_forecast_jobs_internal(
     query = Q(calibration_run__owner=user)
 
     if run_status:
-        query &= Q(status__in=[s.db_instance for s in run_status])
+        query &= Q(status_id__in=[s.db_instance.id for s in run_status])
 
     with readonly_transaction():
         rows = list(
             ForecastRun.objects
             .filter(query)
+            .order_by('-id')
             .values(
                 'id',
                 'calibration_run_id',

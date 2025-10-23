@@ -16,6 +16,8 @@ class ForecastRun(BaseRun):
             models.Index(fields=['cold_start_run'], name='idx_forecast_cold_start_run'),
             models.Index(fields=['status'], name='idx_forecast_status'),
             models.Index(fields=['cycle_date'], name='idx_forecast_cycle_date'),
+            models.Index(fields=['calibration_run', 'status', '-id'], name='idx_fcst_run_status_id_desc')
+
         ]
 
     def __str__(self):
