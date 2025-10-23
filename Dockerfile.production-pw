@@ -121,13 +121,13 @@ WORKDIR /ngencerf/ngencerf-server/
 ARG MSWM_ORG=NGWPC
 ARG MSWM_TAG=development
 
-ARG NGEN_FORCING_ORG=NGWPC
-ARG NGEN_FORCING_TAG=development
+ARG DATA_ASSIMILATION_ORG=NGWPC
+ARG DATA_ASSIMILATION_BRANCH=development
 
 ARG CACHE_BUST=1
 RUN set -eux && \
-    echo $CACHE_BUST && pip3 install "git+https://github.com/${MSWM_ORG}/nwm-msw-mgr.git@${MSWM_TAG}#egg=mswm" && \
-    echo $CACHE_BUST && pip3 install "git+https://github.com/${NGEN_FORCING_ORG}/ngen-forcing.git@${NGEN_FORCING_TAG}#egg=swe_processing&subdirectory=swe_processing" && \
+    echo $CACHE_BUST && pip3 install "git+https://github.com/${MSWM_ORG}/nwm-msw-mgr.git@${MSWM_TAG}" && \
+    echo $CACHE_BUST && pip3 install "git+https://github.com/${DATA_ASSIMILATION_ORG}/data-assimilation-engine.git@${DATA_ASSIMILATION_BRANCH}" && \
     pip3 cache purge
 
 COPY cli /ngencerf/ngencerf-server/cli
