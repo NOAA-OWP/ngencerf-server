@@ -111,12 +111,14 @@ def perform_full_login(_retry=False) -> bool:
     # Always get latest email (show default if present and allow override)
     email = os.environ.get("NGEN_EMAIL") or os.environ.get("NGEN_USERNAME")
     if not email:
+        # Only prompt if email truly unknown
         email = input("ngenCerf email: ")
-    else:
-        # Prompt showing default email in brackets
+    elif not _retry:
+        # Only offer override on FIRST attempt
         entered = input(f"ngenCerf email [{email}]: ").strip()
         if entered:
             email = entered
+    # else: skip email prompt entirely on retry (always use remembered email)
 
     # Password strategy:
     #  - first attempt: use saved env value if present, otherwise prompt
