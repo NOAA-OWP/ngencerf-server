@@ -108,21 +108,28 @@ def perform_full_login(_retry=False) -> bool:
     """
     print("[DEBUG] Performing full login with email/password.")
 
-    # Always get latest email (show default if present and allow override)
+    # Always load the latest email from env if available
     email = os.environ.get("NGEN_EMAIL") or os.environ.get("NGEN_USERNAME")
+
+    # Decide whether to prompt for email
+    # RULE:
+    #   - If no email at all → must prompt
+    #   - If retry → do NOT prompt (email is trusted)
+    #   - If first attempt AND no saved password → allow optional override
+    #   - If first attempt AND saved password exists → SKIP prompt entirely
     if not email:
         # Only prompt if email truly unknown
         email = input("ngenCerf email: ")
-    elif not _retry:
+    elif not _retry and "NGEN_PASSWORD" not in os.environ:
         # Only offer override on FIRST attempt
         entered = input(f"ngenCerf email [{email}]: ").strip()
         if entered:
             email = entered
-    # else: skip email prompt entirely on retry (always use remembered email)
+    # else: email prompt is skipped entirely
 
-    # Password strategy:
-    #  - first attempt: use saved env value if present, otherwise prompt
-    #  - retry attempt: always force prompt
+    # PASSWORD STRATEGY:
+    #   - First attempt: use saved password if present, otherwise prompt
+    #   - Retry attempt: always force prompt
     if _retry:
         print("Your saved credentials appear to be invalid. Please re-enter your password.")
         # On retry, always force prompt for new password
