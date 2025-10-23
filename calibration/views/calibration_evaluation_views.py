@@ -414,12 +414,14 @@ def get_log(request: Request) -> Response:
         'status': validation_run.status.name if validation_run else calibration_run.status.name
     }
 
-    response_validator, error_response = validate_response(GetLogsResponseSerializer, response)
+    response_validator, error_response = validate_response(GetLogsResponseSerializer, response, fields_to_truncate=['log_data'], max_length=10)
     if error_response:
         return error_response
 
     logger.debug(
-        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
+        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - '
+        f'{json.dumps(truncate_large_fields(response_validator.data, fields_to_truncate=["log_data"], max_length=10))}'
+    )
     return Response(response_validator.data)
 
 
