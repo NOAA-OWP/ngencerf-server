@@ -39,7 +39,13 @@ Enter these commands to create the top-level `/ngencerf` directory and then crea
 sudo mkdir /ngencerf
 sudo ln -s ~/ngwpc/data /ngencerf/data
 ```
+# Create cache directory
 
+Create a directory that Django uses for a disk-based cache.  This is only needed on development/AWS Workspace.
+
+```aiignore
+sudo mkdir /var/django_cache
+```
 
 # Access to AWS
 This needs to be done if you are running on AWS Workspace
