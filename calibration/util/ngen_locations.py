@@ -428,10 +428,10 @@ def get_secondary_plot_dir(run: ValidationRun, data_type: SecondaryDataEnum) -> 
     Determines and returns the appropriate plot directory for a given validation run.
     """
     if run.validation_type == ValidationType.VALID_ITERATION.value:
-        plot_dir_parent = os.path.dirname(get_output_validation_iteration_plot_dir(run.calibration_run, run.iteration_num, run.worker_name))
+        base_dir = get_output_validation_iteration_plot_dir(run.calibration_run, run.iteration_num, run.worker_name)
     else:
-        plot_dir_parent = os.path.dirname(get_output_validation_plot_dir(run.calibration_run))
+        base_dir = get_output_validation_plot_dir(run.calibration_run)
 
-    plot_dir = os.path.join(plot_dir_parent, str(data_type.value))
+    plot_dir = os.path.join(base_dir, str(data_type.value))
     os.makedirs(plot_dir, exist_ok=True)
     return plot_dir
