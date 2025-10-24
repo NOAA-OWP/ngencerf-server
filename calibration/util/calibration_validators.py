@@ -540,13 +540,24 @@ class LockJobRequestSerializer(CalibrationRunIdList):
     lock = serializers.BooleanField(default=True, allow_null=False, required=False)
 
 
+class FilterSerializer(BaseSerializer):
+    gage_id = serializers.CharField(required=False)
+    status = serializers.ListField(child=serializers.CharField(validators=[enum_validator(StatusEnum)]), required=False, allow_empty=False)
+    modules = serializers.ListField(child=serializers.CharField(), required=False, allow_empty=False)
+    include_archived = serializers.BooleanField(default=False, required=False)
+
+
+class SortSerializer(BaseSerializer):
+    # Need to define an enum
+    field = serializers.CharField(required=True)  # will validate allowed fields manually
+    direction = serializers.ChoiceField(choices=['asc', 'desc'], required=False, default='asc')
+
+
 class PaginationSerializer(BaseSerializer):
     limit = serializers.IntegerField(required=False, min_value=1, max_value=500)
     offset = serializers.IntegerField(required=False, min_value=0, default=0)
-
-
-class GetCalibrationJobsRequestSerializer(PaginationSerializer):
-    include_archived = serializers.BooleanField(default=False, required=False)
+    filters = FilterSerializer(required=False, allow_null=True)
+    sort = SortSerializer(required=False, allow_null=True)
 
 
 ##################################
