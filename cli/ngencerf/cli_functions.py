@@ -101,7 +101,7 @@ def post_with_spinner_and_retry(message: str, endpoint: str, **kwargs) -> tuple[
         response.status_code,
         response.text,
         response.headers.get("Content-Type"),
-        retry_func=do_post
+        retry_func = lambda: post_with_spinner_and_retry(message, endpoint, **kwargs)
     )
 
 
