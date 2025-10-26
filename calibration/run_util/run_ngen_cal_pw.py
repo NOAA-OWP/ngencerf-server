@@ -79,22 +79,24 @@ def submit_job_to_slurm(run: BaseRun, owner: User, arguments: dict[str, str], st
     # Common payload preparation
     payload['auth_token'] = (None, generate_custom_token(owner, TOKEN_SLURM_SCOPE))
 
-    logger.info(f"Submitting Slurm job to {url} with payload: {payload}")
+    job_description = get_job_description(run)
+
+    logger.info(f"Submitting Slurm job for {job_description} to {url} with payload: {payload}")
     response = requests.post(url, files=payload)
     handle_slurm_http_error(response, url, run.id)
 
-    logger.info(f"Slurm response for {url_endpoint}: {response.json()}")
+    logger.info(f"Slurm response from {url_endpoint} for {job_description}: {response.json()}")
     slurm_response = validate_response_data(
         SlurmSubmitResponseSerializer,
         response.json(),
-        'Submit job response data from Slurm is not in the expected format',
+        f'Submit job response data from Slurm for {job_description} is not in the expected format'
     )
 
     # Dynamically update fields
     run.slurm_job_id = slurm_response.get('slurm_job_id')
 
     run.save(update_fields=['slurm_job_id'])
-    logger.info(f"{get_job_description(run)} submitted successfully! Slurm id: {run.slurm_job_id}")
+    logger.info(f"{job_description} submitted successfully! Slurm id: {run.slurm_job_id}")
 
 
 def check_pw_for_failure(run: BaseRun, slurm_status: SlurmStatusEnum) -> bool:

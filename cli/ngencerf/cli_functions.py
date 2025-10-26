@@ -3,13 +3,10 @@ Module providing CLI functionality for interacting with ngen calibration job end
 Supports operations like uploading data, submitting/deleting/cancelling jobs, and
 importing/exporting configurations.
 """
-import itertools
 import json
 import os
 import sys
 import tempfile
-import threading
-import time
 import zipfile
 from contextlib import ExitStack
 from datetime import datetime
@@ -17,7 +14,7 @@ from datetime import datetime
 import requests
 import tabulate
 
-from ngencerf.cli_util import check_http_error
+from ngencerf.cli_util import check_http_error, Spinner
 
 API_BASE = "http://localhost:8000"
 
@@ -48,29 +45,26 @@ def post_with_spinner_and_retry(message: str, endpoint: str, **kwargs) -> tuple[
     def _rewind_files(files_obj):
         # Support dict: {"field": fileobj} or {"field": (filename, fileobj)}
         # Support list: [("files", (filename, fileobj)), ...]
-        try:
-            if isinstance(files_obj, dict):
-                for v in files_obj.values():
-                    try:
-                        # (filename, fileobj) tuple
-                        if isinstance(v, tuple) and len(v) >= 2 and hasattr(v[1], "seek"):
-                            v[1].seek(0)
-                        elif hasattr(v, "seek"):
-                            v.seek(0)
-                    except Exception:
-                        pass
-            elif isinstance(files_obj, list):
-                for item in files_obj:
-                    try:
-                        # ("files", (filename, fileobj)) or similar
-                        if isinstance(item, tuple) and len(item) >= 2:
-                            inner = item[1]
-                            if isinstance(inner, tuple) and len(inner) >= 2 and hasattr(inner[1], "seek"):
-                                inner[1].seek(0)
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+        if isinstance(files_obj, dict):
+            for v in files_obj.values():
+                try:
+                    # (filename, fileobj) tuple
+                    if isinstance(v, tuple) and len(v) >= 2 and hasattr(v[1], "seek"):
+                        v[1].seek(0)
+                    elif hasattr(v, "seek"):
+                        v.seek(0)
+                except Exception:
+                    pass
+        elif isinstance(files_obj, list):
+            for item in files_obj:
+                try:
+                    # ("files", (filename, fileobj)) or similar
+                    if isinstance(item, tuple) and len(item) >= 2:
+                        inner = item[1]
+                        if isinstance(inner, tuple) and len(inner) >= 2 and hasattr(inner[1], "seek"):
+                            inner[1].seek(0)
+                except Exception:
+                    pass
 
     def do_post():
         # Make a fresh copy of kwargs for each attempt
@@ -87,21 +81,28 @@ def post_with_spinner_and_retry(message: str, endpoint: str, **kwargs) -> tuple[
 
         return requests.post(f"{API_BASE}{endpoint}", **req_kwargs)
 
-    spinner = Spinner(message)
-    spinner.start()
-    try:
-        response = do_post()
-    except KeyboardInterrupt:
-        print("\nOperation cancelled by user.")
+    def _attempt_with_spinner(msg: str):
+        spinner = Spinner(msg)
+        spinner.start()
+        try:
+            return do_post()
+        except KeyboardInterrupt:
+            print("\nOperation cancelled by user.")
+            return None
+        finally:
+            spinner.stop()
+
+    # First attempt
+    response = _attempt_with_spinner(message)
+    if response is None:
         return None, False
-    finally:
-        spinner.stop()
 
     return check_http_error(
         response.status_code,
         response.text,
         response.headers.get("Content-Type"),
-        retry_func = lambda: post_with_spinner_and_retry(message, endpoint, **kwargs)
+        retry_func=do_post,
+        retry_message=message  # so check_http_error can show "Retrying: {message}..."
     )
 
 
@@ -846,31 +847,3 @@ def resolve_output_path(output_path: str | None, default_filename: str) -> str:
             sys.exit(1)
 
     return output_path
-
-
-class Spinner:
-    def __init__(self, message="Processing..."):
-        self.spinner = itertools.cycle(["|", "/", "-", "\\"])
-        self.running = False
-        self.thread = None
-        self.message = message
-
-    def start(self):
-        self.running = True
-        self.thread = threading.Thread(target=self._spin)
-        self.thread.start()
-
-    def _spin(self):
-        print(self.message, end=" ", flush=True)
-        while self.running:
-            sys.stdout.write(next(self.spinner))
-            sys.stdout.flush()
-            time.sleep(0.1)
-            sys.stdout.write("\b")
-
-    def stop(self):
-        self.running = False
-        if self.thread:
-            self.thread.join()
-        sys.stdout.write(" \n")
-        sys.stdout.flush()
