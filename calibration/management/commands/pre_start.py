@@ -13,6 +13,8 @@ from cerfServer.settings import NgenEnvironmentEnum
 
 logger = logging.getLogger(__name__)
 
+RUN_MODELS = (CalibrationRun, ValidationRun, ForecastRun, ColdStartRun)
+
 
 # This should be run prior to starting the server to clean up any orphans
 
@@ -32,22 +34,16 @@ class Command(BaseCommand):
             # ─────────────────────────────────────────────────────────────
             if settings.NGEN_ENVIRONMENT != NgenEnvironmentEnum.PARALLEL_WORKS:
 
-                cal_count = CalibrationRun.objects.filter(status=running_status).update(status=error_status)
-                logger.info(f'Updated {cal_count} calibration run records')
+                total_count = 0
+                for model in RUN_MODELS:
+                    count = model.objects.filter(status=running_status).update(status=error_status)
+                    logger.info(f'Updated {count} {model.__name__} records')
+                    total_count += count
 
-                val_count = ValidationRun.objects.filter(status=running_status).update(status=error_status)
-                logger.info(f'Updated {val_count} validation run records')
-
-                fcst_count = ForecastRun.objects.filter(status=running_status).update(status=error_status)
-                logger.info(f'Updated {fcst_count} forecast run records')
-
-                cold_count = ColdStartRun.objects.filter(status=running_status).update(status=error_status)
-                logger.info(f'Updated {cold_count} cold start run records')
-
-                total_count = cal_count + val_count + fcst_count + cold_count
                 logger.info(
                     f"Non-Parallel cleanup summary: updated {total_count} total job(s) to SERVER_ERROR."
                 )
+
 
             else:
                 # ─────────────────────────────────────────────────────────────
@@ -69,8 +65,10 @@ class Command(BaseCommand):
                     run.status = error_status
                     run.save(update_fields=["status"])
 
+                base_url = urljoin(settings.SLURM_URL, settings.SLURM_STATUS_ENDPOINT)
+
                 # Iterate across all job models
-                for model in (CalibrationRun, ValidationRun, ForecastRun, ColdStartRun):
+                for model in RUN_MODELS:
                     # Only jobs that are *currently marked* RUNNING in the DB
                     for run in model.objects.filter(status=running_status):
                         total_running += 1
@@ -82,7 +80,6 @@ class Command(BaseCommand):
                             continue
 
                         # Query Slurm for the live job status
-                        base_url = urljoin(settings.SLURM_URL, settings.SLURM_STATUS_ENDPOINT)
                         url = f"{base_url}?slurm_job_id={slurm_id}"
 
                         try:
