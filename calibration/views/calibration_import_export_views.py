@@ -32,7 +32,8 @@ from calibration.views.calibration_tuning_views import get_times, get_parameters
     save_parameters, has_user_selected_tuning_parameters, compute_time_range, persist_time_range
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import get_calibration_run, ResponseError, handle_exceptions, validate_response, create_calibration_run_internal, \
-    validate_request, get_valid_path, truncate_large_fields, get_user_email, generate_ngen_logging_config, get_elapsed_str, readonly_transaction
+    validate_request, get_valid_path, truncate_large_fields, get_user_email, generate_ngen_logging_config, get_elapsed_str, readonly_transaction, \
+    format_datetime
 from calibration.views.data_services import DataServicesException, get_module_metadata_from_data_services, get_geopackage_from_data_services, \
     get_forcing_data_from_s3, get_observational_data_from_data_services
 
@@ -476,11 +477,13 @@ def load_calibration_run_data(run: CalibrationRun, export: bool = False, include
         export_start = time.time()
         metadata = {
             'source_calibration_run_id': run.id,
+            'last_updated_on': format_datetime(run.updated_at),
+            'last_updated_by': run.updated_by.email,
             'source_status': run.status.name,
             'time_range': serialized_time_range,
             'job_data_dir': resolve_job_data_dir(run),
             'num_catchments': num_catchments,
-            'forcing_source_actual': run.forcing_source_actual.name if run.forcing_source_actual else None
+            'forcing_source_actual': run.forcing_source_actual.name if run.forcing_source_actual else None,
         }
         fm = parse_failure_messages(run.failure_messages)
         if fm is not None:
@@ -520,6 +523,9 @@ def load_calibration_run_data(run: CalibrationRun, export: bool = False, include
     #############################
     else:
         calibration_run_data['job_data_dir'] = resolve_job_data_dir(run)
+
+        calibration_run_data['last_updated_on'] = run.updated_at
+        calibration_run_data['last_updated_by'] = run.updated_by.email
 
         ui_display_start = time.time()
         calibration_run_data['calibration_run_id'] = run.id

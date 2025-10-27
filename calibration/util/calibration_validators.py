@@ -455,6 +455,8 @@ def validate_automatic_validation(value):
 
 class LoadCalibrationRunResponseSerializer(BaseSerializer):
     calibration_run_id = serializers.IntegerField(required=True)
+    last_updated_by = serializers.CharField(required=True)
+    last_updated_on = serializers.DateTimeField(required=True)
     job_data_dir = serializers.CharField(required=True)
     submit_date = serializers.DateTimeField(required=True, allow_null=True)
     gage = GageSerializer(required=True, allow_null=True)
