@@ -478,7 +478,6 @@ def load_calibration_run_data(run: CalibrationRun, export: bool = False, include
         metadata = {
             'source_calibration_run_id': run.id,
             'last_updated_on': format_datetime(run.updated_at),
-            'last_updated_by': run.updated_by.email,
             'source_status': run.status.name,
             'time_range': serialized_time_range,
             'job_data_dir': resolve_job_data_dir(run),
@@ -525,7 +524,6 @@ def load_calibration_run_data(run: CalibrationRun, export: bool = False, include
         calibration_run_data['job_data_dir'] = resolve_job_data_dir(run)
 
         calibration_run_data['last_updated_on'] = run.updated_at
-        calibration_run_data['last_updated_by'] = run.updated_by.email
 
         ui_display_start = time.time()
         calibration_run_data['calibration_run_id'] = run.id
