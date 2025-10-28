@@ -96,7 +96,7 @@ def submit_job_to_slurm(run: BaseRun, owner: User, arguments: dict[str, str], st
     run.slurm_job_id = slurm_response.get('slurm_job_id')
 
     run.save(update_fields=['slurm_job_id'])
-    logger.info(f"{job_description} submitted successfully! Slurm id: {run.slurm_job_id}")
+    logger.info(f"{job_description} submitted successfully! slurm_job_id: {run.slurm_job_id}")
 
 
 def check_pw_for_failure(run: BaseRun, slurm_status: SlurmStatusEnum) -> bool:
