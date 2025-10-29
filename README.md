@@ -131,14 +131,13 @@ mv src/mswm/module_parameter_files ../ && \
 cd .. && rm -rf tmp-nwm-msw-mgr
 ```
 
-Copy the directory `https://github.com/NGWPC/ngen-forcing/tree/forecast_validation_root_dir/NextGen_Forcings_Engine_BMI/BMI_NextGen_Configs/config_templates` 
-and all its contents 
-to the `/ngencerf/data/ngen-static-files` directory as `forecast_forcing_templates`
+Copy the directory `https://github.com/NGWPC/ngen-forcing/tree/development/NextGen_Forcings_Engine_BMI/BMI_NextGen_Configs/config_templates` 
+and all its contents to the `/ngencerf/data/ngen-static-files` directory as `forecast_forcing_templates`
 
 ```
 cd /ngencerf/data/ngen-static-files (for PW, use /ngencerf-app/data/ngen-cal-data/ngen-static-files)
 rm -rf forecast_forcing_templates
-git clone --depth 1 --filter=blob:none --sparse -b forecast_validation_root_dir https://github.com/NGWPC/ngen-forcing.git tmp-ngen-forcing && \
+git clone --depth 1 --filter=blob:none --sparse -b development https://github.com/NGWPC/ngen-forcing.git tmp-ngen-forcing && \
 cd tmp-ngen-forcing && \
 git sparse-checkout set NextGen_Forcings_Engine_BMI/BMI_NextGen_Configs/config_templates && \
 mv NextGen_Forcings_Engine_BMI/BMI_NextGen_Configs/config_templates ../forecast_forcing_templates && \
@@ -146,8 +145,7 @@ cd .. && rm -rf tmp-ngen-forcing
 ```
 
 From the directory `https://github.com/NGWPC/nwm-verf/tree/development/data/inputs`, 
-copy only the *.parquet files
-to the `/ngencerf/data/ngen-static-files/verfication_data` directory
+copy only the *.parquet files to the `/ngencerf/data/ngen-static-files/verfication_data` directory
 
 ```
 cd /ngencerf/data/ngen-static-files (for PW, use /ngencerf-app/data/ngen-cal-data/ngen-static-files)
