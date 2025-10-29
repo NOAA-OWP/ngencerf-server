@@ -5,7 +5,8 @@ from rest_framework.fields import empty
 from rest_framework.settings import api_settings
 
 from calibration.enums import DataTypeEnum, UnitsEnum, LocationEnum, ForcingSourceEnum, ObservationalSourceEnum, DomainEnum, StatusEnum, \
-    OptimizationEnum, GeopackageSourceEnum, SlurmStatusEnum, JobGenesis, PlotDefinitionsEnum, ForecastConfigEnum, LogCategory, LogName, NgenLogging
+    OptimizationEnum, GeopackageSourceEnum, SlurmStatusEnum, JobGenesis, PlotDefinitionsEnum, ForecastConfigEnum, LogCategory, LogName, NgenLogging, \
+    CalibrationSortField, ForecastSortField
 from calibration.util.caching import get_cached_modules_with_groups
 
 
@@ -25,6 +26,7 @@ class BaseSerializer(serializers.Serializer):
 def enum_validator(enum_class):
     """
     Validates if the value is a valid name or alias of the enum class, case-insensitively.
+    Raises a fatal error if the enum class does not implement get_names() or get_all_valid_names().
     """
 
     def validate_enum(value):
@@ -36,10 +38,16 @@ def enum_validator(enum_class):
         if hasattr(enum_class, 'get_all_valid_names'):
             # Enum with get_all_valid_names() method (typically from AbstractEnum)
             valid_names = [name.lower() for name in enum_class.get_all_valid_names()]
+        elif hasattr(enum_class, 'get_names'):
+            valid_names = [name.lower() for name in enum_class.get_names()]
         else:
-            # Standard enum without aliases, using get_names() if available
-            valid_names = [name.lower() for name in enum_class.get_names()] if hasattr(enum_class, 'get_names') else []
+            # Fatal configuration error – enum must define one of these methods
+            raise RuntimeError(
+                f"Enum class '{enum_class.__name__}' must define either "
+                f"'get_names()' or 'get_all_valid_names()' to work with enum_validator()."
+            )
 
+        # Perform the actual validation
         if value not in valid_names:
             raise serializers.ValidationError(f"Invalid value '{original_value}'. This field must be one of {valid_names}.")
 
@@ -547,9 +555,13 @@ class FilterSerializer(BaseSerializer):
     include_archived = serializers.BooleanField(default=False, required=False)
 
 
-class SortSerializer(BaseSerializer):
-    # Need to define an enum
-    field = serializers.CharField(required=True)  # will validate allowed fields manually
+class CalibrationSortSerializer(BaseSerializer):
+    field = serializers.CharField(required=True, validators=[enum_validator(CalibrationSortField)])
+    direction = serializers.ChoiceField(choices=['asc', 'desc'], required=False, default='asc')
+
+
+class ForecastSortSerializer(BaseSerializer):
+    field = serializers.CharField(required=True, validators=[enum_validator(ForecastSortField)])
     direction = serializers.ChoiceField(choices=['asc', 'desc'], required=False, default='asc')
 
 
@@ -557,7 +569,14 @@ class PaginationSerializer(BaseSerializer):
     limit = serializers.IntegerField(required=False, min_value=1, max_value=500)
     offset = serializers.IntegerField(required=False, min_value=0, default=0)
     filters = FilterSerializer(required=False, allow_null=True)
-    sort = SortSerializer(required=False, allow_null=True)
+
+
+class CalibrationPaginationSerializer(PaginationSerializer):
+    sort = CalibrationSortSerializer(required=False, allow_null=True)
+
+
+class ForecastPaginationSerializer(PaginationSerializer):
+    sort = ForecastSortSerializer(required=False, allow_null=True)
 
 
 ##################################

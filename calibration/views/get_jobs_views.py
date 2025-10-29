@@ -1,8 +1,7 @@
 import json
 import logging
-from typing import Any
+from typing import Any, Type
 
-from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db.models import Q, Exists, OuterRef
 from drf_spectacular.utils import extend_schema, OpenApiResponse
@@ -10,12 +9,14 @@ from rest_framework.decorators import api_view
 from rest_framework.request import Request
 from rest_framework.response import Response
 
-from calibration.enums import GetValidationJobsScope, StatusEnum, ValidationType
+from calibration.enums import GetValidationJobsScope, StatusEnum, ValidationType, CalibrationSortField, ForecastSortField
 from calibration.models import CalibrationFormulation, CalibrationRun, CalibrationStopCriteria, \
     ValidationRun, IterationParameter, ForecastRun, VerificationRun
+from calibration.util.caching import get_cached_modules_by_id
 from calibration.util.calibration_validators import EmptySerializer, GetCalibrationJobsForEvaluationResponseSerializer, ErrorResponseSerializer, \
-    GetCalibrationJobsResponseSerializer, GetCalibrationJobsRequestSerializer, CalibrationRunSerializer, GetValidationJobsResponseSerializer, \
-    GetForecastJobsResponseSerializer, GetVerificationJobsResponseSerializer, PaginationSerializer
+    GetCalibrationJobsResponseSerializer, CalibrationRunSerializer, GetValidationJobsResponseSerializer, \
+    GetForecastJobsResponseSerializer, GetVerificationJobsResponseSerializer, CalibrationPaginationSerializer, \
+    ForecastPaginationSerializer
 from calibration.views.calibration_evaluation_views import downloadable_statuses
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import handle_exceptions, validate_request, validate_response, truncate_large_fields, get_calibration_run, \
@@ -37,6 +38,9 @@ All filter and sorting changes trigger a fresh API call:
 - When the user changes sorting (either field or direction),
   immediately request data with offset = 0.
 - No “Apply” button is required; auto-submit on change is acceptable.
+  The server is optimized for this pattern — each response should return
+  a single page of results almost instantly (well under one second in typical use).
+
 
 Pagination behavior:
 
@@ -44,6 +48,12 @@ Pagination behavior:
   to the appropriate value (e.g., offset = pageIndex * limit)
 - Changing limit resets offset to 0
 - Changing filters or sort always resets offset to 0
+- Implement **anticipatory loading (prefetching)**:
+  When fetching a page (e.g., limit = 25), request and locally cache the next page as well
+  (offset + limit). This ensures that when the user clicks “Next,”
+  data for the next page is already available and transitions are instantaneous.
+  Once the user advances to that next page, fetch the following one in the background.
+  This rolling prefetch avoids lag while keeping memory usage predictable.
 
 Request payload shape:
 
@@ -66,8 +76,8 @@ If there is no sort, omit "sort".
 
 Example request (as plain text):
 
-    { 
-    "limit": 25, "offset": 0,
+    {
+      "limit": 25, "offset": 0,
       "filters": { "gage_id": "01544887", "status": ["Done","Failed"],
                    "modules": ["NWMv3","ParFlow"], "include_archived": false },
       "sort": { "field": "submit_date", "direction": "asc" }
@@ -118,14 +128,18 @@ Performance guidance:
 - Don’t send the request if nothing actually changed.
 - Optimistically flip sort indicators during user interaction.
 - Optionally cache results by a hash of {limit, offset, filters, sort}.
+- Implement **rolling prefetch** for pagination (anticipatory loading):
+  Always keep one page ahead preloaded. Replace older pages when the user moves forward
+  to limit memory footprint.
 
 This ensures consistent behavior: any filter or sort change resets offset = 0
-and immediately fetches new server data. Pagination only manipulates offset.
+and immediately fetches new server data. Pagination manipulates offset only,
+while prefetching makes transitions instantaneous.
 """
 
 
 @extend_schema(
-    request=PaginationSerializer,
+    request=CalibrationPaginationSerializer,
     responses={
         200: GetCalibrationJobsForEvaluationResponseSerializer,
         400: OpenApiResponse(
@@ -151,7 +165,7 @@ def get_calibration_jobs_for_evaluation(request: Request) -> Response:
     data = request.data if request.method == 'POST' else request.query_params.dict()
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
 
-    validator, error_return = validate_request(PaginationSerializer, data)
+    validator, error_return = validate_request(CalibrationPaginationSerializer, data)
     if error_return:
         return error_return
 
@@ -188,7 +202,7 @@ def get_calibration_jobs_for_evaluation(request: Request) -> Response:
 
 
 @extend_schema(
-    request=PaginationSerializer,
+    request=CalibrationPaginationSerializer,
     responses={
         200: GetCalibrationJobsResponseSerializer,
         400: OpenApiResponse(
@@ -214,7 +228,7 @@ def get_calibration_jobs_for_forecast(request: Request) -> Response:
     data = request.data if request.method == 'POST' else request.query_params.dict()
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
 
-    validator, error_return = validate_request(PaginationSerializer, data)
+    validator, error_return = validate_request(CalibrationPaginationSerializer, data)
     if error_return:
         return error_return
 
@@ -227,7 +241,6 @@ def get_calibration_jobs_for_forecast(request: Request) -> Response:
         request.user,
         run_status=[StatusEnum.DONE],
         include_validation_data=GetValidationJobsScope.DONE,
-        include_archived=include_archived,
         include_stop_criteria=True,
         limit=limit,
         offset=offset,
@@ -252,7 +265,7 @@ def get_calibration_jobs_for_forecast(request: Request) -> Response:
 
 
 @extend_schema(
-    request=PaginationSerializer,
+    request=CalibrationPaginationSerializer,
     responses={
         200: GetCalibrationJobsResponseSerializer,
         400: OpenApiResponse(
@@ -276,7 +289,7 @@ def get_calibration_jobs(request):
     data = request.data if request.method == 'POST' else request.query_params.dict()
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
 
-    validator, error_return = validate_request(PaginationSerializer, data)
+    validator, error_return = validate_request(CalibrationPaginationSerializer, data)
     if error_return:
         return error_return
 
@@ -335,29 +348,32 @@ def apply_calibration_filters(query: Q, filters: dict) -> Q:
     return query
 
 
-# Map client sort field → actual ORM values(field)
-CALIBRATION_SORT_FIELD_MAP = {
-    "gage_id": "gage__gage_id",
-    "user_formulation_name": "user_formulation_name",
-    "submit_date": "submit_date",
-    "created_at": "created_at",
-    "job_genesis": "job_genesis",
-    "status": "status__name",
-    "calibration_start_period": "calibration_start_period",
-    "calibration_end_period": "calibration_end_period",
-    "stop_criteria": "calibrationstopcriteria__value",
-}
+def resolve_sort(sort: dict | None, enum_class: Type[CalibrationSortField | ForecastSortField]) -> str:
+    """
+    Convert the validated client-provided sort object into a Django `order_by` string.
 
-# Map client sort field → actual ORM values(field)
-FORECAST_SORT_FIELD_MAP = {
-    "gage_id": "calibration_run__gage__gage_id",
-    "submit_date": "submit_date",
-    "cycle_date": "cycle_date",
-    "configuration": "configuration__name",
-    "domain_name": "configuration__domain__name",
-    "created_at": "created_at",
-    "status": "status__name",
-}
+    Assumptions (enforced by the serializer + enum_validator upstream):
+    - `sort["field"]` is a valid string representation of an existing enum member.
+    - It can be converted into an enum safely via enum_class.from_name().
+
+    - `enum_class` must be either CalibrationSortField or ForecastSortField.
+    - If `sort` is missing or has no "field", default to descending primary key (`-id`).
+    - Otherwise, match the client's enum-backed `field` to its ORM column via `.orm_field`.
+    - If direction is "desc", prefix the ORM field with "-".
+
+    Returns something like:
+        "gage__gage_id"    (for ascending)
+        "-gage__gage_id"   (for descending)
+    """
+    if not sort or "field" not in sort:
+        return "-id"
+
+    # Convert validated string → enum member (no try/except needed by design)
+    member = enum_class.from_name(sort["field"])
+
+    direction = sort.get("direction", "asc").lower()
+    orm_field = member.orm_field
+    return orm_field if direction == "asc" else f"-{orm_field}"
 
 
 def get_jobs(
@@ -368,7 +384,7 @@ def get_jobs(
         limit: int | None = None,
         offset: int = 0,
         filters: dict[str, Any] | None = None,
-        sort: dict[str, str] | None = None  # ← NEW
+        sort: dict[str, str] | None = None
 ) -> tuple[list[dict[str, Any]], int]:
     """
     Retrieves calibration jobs for the given user with optional status filtering,
@@ -382,7 +398,6 @@ def get_jobs(
         - 'ids': Includes validation_run_ids and their count in validation_runs.
         - 'status': Includes validation status details.
         - 'done': Filters to only include jobs where both valid_control and valid_best are DONE.
-    :param include_archived: Whether to include archived jobs in the queryset.
     :param include_stop_criteria: Whether to include stop_criteria in the queryset.
     :param limit: Optional maximum number of rows to return (for pagination). If None, return all.
     :param offset: Optional number of rows to skip before returning results (for pagination).
@@ -392,14 +407,7 @@ def get_jobs(
     """
     filters = filters or {}
 
-    # Default ordering
-    order_by = "-id"
-
-    # Apply requested sort if valid
-    if sort and "field" in sort and sort["field"] in CALIBRATION_SORT_FIELD_MAP:
-        orm_field = CALIBRATION_SORT_FIELD_MAP[sort["field"]]
-        direction = sort.get("direction", "asc").lower()
-        order_by = orm_field if direction == "asc" else f"-{orm_field}"
+    order_by = resolve_sort(sort, CalibrationSortField)
 
     with readonly_transaction():
         # Base query: filter jobs for the user
@@ -408,6 +416,8 @@ def get_jobs(
         # If a specific status list is provided, filter by those statuses
         if run_status:
             query &= Q(status__in=[s.db_instance for s in run_status])
+
+        query = apply_calibration_filters(query, filters)
 
         base_qs = CalibrationRun.objects.filter(query)
 
@@ -438,7 +448,7 @@ def get_jobs(
         # Base query for CalibrationRun (dict results, lighter than ORM instances)
         calibration_runs_qs = (
             base_qs
-            .order_by('-id')
+            .order_by(order_by)
             .values(
                 "id", "gage__gage_id", "gage__domain__name", "submit_date", "updated_at", "user_formulation_name",
                 "calibration_start_period", "calibration_end_period",
@@ -708,17 +718,7 @@ def get_forecast_jobs_internal(
     """
     filters = filters or {}
 
-    # Default ordering
-    order_by = "-id"
-
-    # Apply forecast-specific sorting
-    if sort:
-        field = sort.get("field")
-        direction = sort.get("direction", "").lower()
-        if field not in FORECAST_SORT_FIELD_MAP or direction not in ("asc", "desc"):
-            raise ValueError(f"Invalid sort field or direction: {sort}")
-        orm_field = FORECAST_SORT_FIELD_MAP[field]
-        order_by = orm_field if direction == "asc" else f"-{orm_field}"
+    order_by = resolve_sort(sort, ForecastSortField)
 
     query = Q(calibration_run__owner=user)
     query = apply_calibration_filters(query, filters)
@@ -782,7 +782,7 @@ def get_forecast_jobs_internal(
 
 
 @extend_schema(
-    request=PaginationSerializer,
+    request=ForecastPaginationSerializer,
     responses={
         200: GetForecastJobsResponseSerializer,
         400: OpenApiResponse(
@@ -809,7 +809,7 @@ def get_forecast_jobs(request: Request) -> Response:
     data = request.data if request.method == 'POST' else request.query_params.dict()
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
 
-    validator, error_return = validate_request(PaginationSerializer, data)
+    validator, error_return = validate_request(ForecastPaginationSerializer, data)
     if error_return:
         return error_return
 
@@ -847,7 +847,7 @@ def get_forecast_jobs(request: Request) -> Response:
 
 
 @extend_schema(
-    request=PaginationSerializer,
+    request=ForecastPaginationSerializer,
     responses={
         200: GetForecastJobsResponseSerializer,
         400: OpenApiResponse(
@@ -873,7 +873,7 @@ def get_forecast_jobs_for_verification(request: Request) -> Response:
     data = request.data if request.method == 'POST' else request.query_params.dict()
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
 
-    validator, error_return = validate_request(PaginationSerializer, data)
+    validator, error_return = validate_request(ForecastPaginationSerializer, data)
     if error_return:
         return error_return
 

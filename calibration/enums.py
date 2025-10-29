@@ -1,4 +1,5 @@
-from typing import Any, Type
+from enum import Enum
+from typing import Any, Type, Self
 
 from django.core.cache import cache
 
@@ -267,3 +268,51 @@ class NgenLogging(AbstractEnum):
     WARNING = 'warning'
     SEVERE = 'severe'
     FATAL = 'fatal'
+
+
+class ForecastSortField(Enum):
+    GAGE_ID = ("gage_id", "calibration_run__gage__gage_id")
+    SUBMIT_DATE = ("submit_date", "submit_date")
+    CYCLE_DATE = ("cycle_date", "cycle_date")
+    CONFIGURATION = ("configuration", "configuration__name")
+    DOMAIN_NAME = ("domain_name", "configuration__domain__name")
+    CREATED_AT = ("created_at", "created_at")
+    STATUS = ("status", "status__name")
+
+    @property
+    def orm_field(self):
+        return self.value[1]
+
+    @classmethod
+    def from_name(cls, name: str) -> "Self":
+        return next(member for member in cls if member.value[0] == name)
+
+    @classmethod
+    def get_names(cls) -> list[str]:
+        """Return the canonical API names (i.e., the first slot of each tuple)."""
+        return [member.value[0] for member in cls]
+
+
+class CalibrationSortField(Enum):
+    GAGE_ID = ("gage_id", "gage__gage_id")
+    USER_FORMULATION_NAME = ("user_formulation_name", "user_formulation_name")
+    SUBMIT_DATE = ("submit_date", "submit_date")
+    CREATED_AT = ("created_at", "created_at")
+    JOB_GENESIS = ("job_genesis", "job_genesis")
+    STATUS = ("status", "status__name")
+    CALIBRATION_START_PERIOD = ("calibration_start_period", "calibration_start_period")
+    CALIBRATION_END_PERIOD = ("calibration_end_period", "calibration_end_period")
+    STOP_CRITERIA = ("stop_criteria", "calibrationstopcriteria__value")
+
+    @property
+    def orm_field(self):
+        return self.value[1]
+
+    @classmethod
+    def from_name(cls, name: str) -> "Self":
+        return next(member for member in cls if member.value[0] == name)
+
+    @classmethod
+    def get_names(cls) -> list[str]:
+        """Return the canonical API names (i.e., the first slot of each tuple)."""
+        return [member.value[0] for member in cls]

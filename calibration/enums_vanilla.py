@@ -30,3 +30,4 @@ class JobType(StrEnum):
 class SecondaryDataEnum(StrEnum):
     SWE = 'SWE'
     SOIL_MOISTURE = 'Soil Moisture'
+
