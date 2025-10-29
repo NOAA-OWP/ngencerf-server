@@ -396,6 +396,7 @@ class CalibrationJobsResponseSerializer(BaseSerializer):
     domain_name = serializers.CharField(required=True, allow_null=True)
     job_genesis = serializers.CharField(required=True, validators=[enum_validator(JobGenesis)])
     created_at = serializers.DateTimeField(required=True)
+    last_updated_on = serializers.DateTimeField(required=True)
     status = serializers.CharField(required=True, validators=[enum_validator(StatusEnum)])
     calibration_start_period = serializers.DateTimeField(required=False, allow_null=True)
     calibration_end_period = serializers.DateTimeField(required=False, allow_null=True)

@@ -275,7 +275,7 @@ def get_jobs(
             base_qs
             .order_by('-id')
             .values(
-                "id", "gage__gage_id", "gage__domain__name", "submit_date", "user_formulation_name",
+                "id", "gage__gage_id", "gage__domain__name", "submit_date", "updated_at", "user_formulation_name",
                 "calibration_start_period", "calibration_end_period",
                 "status__name", "job_genesis", "created_at",
                 "objective_function__name", "optimization__name",
@@ -354,6 +354,7 @@ def get_jobs(
                 'calibration_end_period': run['calibration_end_period'],
                 'job_genesis': run['job_genesis'],
                 'created_at': run['created_at'],
+                'last_updated_on': run['updated_at'],
                 'modules': formulations_map.get(run_id, []),
                 'is_downloadable': StatusEnum.from_name(run['status__name']) in downloadable_statuses,
             }
