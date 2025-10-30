@@ -819,6 +819,7 @@ def get_zip_status(request: Request, calibration_run_id: int) -> StreamingHttpRe
     def event_stream():
         try:
             start_time = datetime.now()
+            last_keepalive = time.time()
             logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} for Calibration Run id {calibration_run_id}')
 
             # Stream loop: keep checking the job status until it is "done" or "error"
@@ -839,8 +840,19 @@ def get_zip_status(request: Request, calibration_run_id: int) -> StreamingHttpRe
                     )
                     break
 
+                # ─────────────────────────────────────────────────────────────
+                # Send a lightweight heartbeat every 30 seconds
+                # (comment line ':' is valid SSE syntax and keeps proxies alive)
+                # ─────────────────────────────────────────────────────────────
+                now = time.time()
+                if now - last_keepalive >= 30:  # every 30 seconds
+                    yield ": keep-alive\n\n"
+                    last_keepalive = now
+                # ─────────────────────────────────────────────────────────────
+
                 # Sleep before checking again (keeps CPU usage low and reduces frequency)
                 time.sleep(1)
+
         except GeneratorExit:
             # Happens if the client closes the connection
             logger.info(f"Client disconnected during SSE stream for run {calibration_run_id}")
