@@ -739,7 +739,12 @@ def start_zip_for_calibration_job(request: Request) -> Response:
             }, timeout=None)
 
             duration = datetime.now() - start_time
-            logger.info(f"Zip job completed for Calibration Job {run.id} in {duration.total_seconds():.2f} seconds")
+            zip_size = os.path.getsize(zip_path)
+            logger.info(
+                f"Zip job completed for Calibration Job {run.id} in {duration.total_seconds():.2f} seconds "
+                f"— size: {zip_size / 1024 / 1024:.2f} MB)"
+            )
+
 
         except Exception as e:
             cache.set(cache_key, {
@@ -902,6 +907,11 @@ def download_calibration_zip(request: Request) -> FileResponse | Response:
     zip_path = zip_status.get("path")
     if not zip_path or not os.path.exists(zip_path):
         return ResponseError(f"Zip file is missing for Calibration Job {calibration_run_id}")
+
+    zip_size = os.path.getsize(zip_path)
+    logger.info(
+        f"Serving zip file for Calibration Job {calibration_run_id} — size: {zip_size / 1024 / 1024:.2f} MB"
+    )
 
     try:
         response = FileResponse(open(zip_path, 'rb'), content_type='application/zip')
