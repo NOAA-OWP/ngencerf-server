@@ -336,7 +336,6 @@ SLURM_SUBMIT_FORECAST_JOB_ENDPOINT = 'submit-forecast-job'
 SLURM_SUBMIT_VERIFICATION_JOB_ENDPOINT = 'submit-verification-job'
 SLURM_JOB_STATUS_ENDPOINT = 'job-status'
 SLURM_CANCEL_JOB_ENDPOINT = 'cancel-job'
-SLURM_STATUS_ENDPOINT = 'job_status'
 
 # -----------------------------
 # Logging

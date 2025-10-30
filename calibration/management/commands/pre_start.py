@@ -64,7 +64,7 @@ class Command(BaseCommand):
                     run.status = error_status
                     run.save(update_fields=["status"])
 
-                base_url = urljoin(settings.SLURM_URL, settings.SLURM_STATUS_ENDPOINT)
+                base_url = urljoin(settings.SLURM_URL, settings.SLURM_JOB_STATUS_ENDPOINT)
 
                 # Iterate across all job models
                 for model in RUN_MODELS:
