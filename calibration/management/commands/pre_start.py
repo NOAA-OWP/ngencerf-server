@@ -44,7 +44,6 @@ class Command(BaseCommand):
                     f"Non-Parallel cleanup summary: updated {total_count} total job(s) to SERVER_ERROR."
                 )
 
-
             else:
                 # ─────────────────────────────────────────────────────────────
                 # Case 2: On Parallel Works → must check Slurm to confirm if
@@ -84,7 +83,26 @@ class Command(BaseCommand):
 
                         try:
                             resp = requests.get(url, timeout=10)
-                            data = resp.json()
+
+                            # Handle non-200 HTTP codes
+                            if resp.status_code != 200:
+                                logger.error(
+                                    f"Non-200 response from Slurm for job {slurm_id}: "
+                                    f"{resp.status_code}\n{resp.text}"
+                                )
+                                mark_error(run, f"Slurm HTTP {resp.status_code}")
+                                continue
+
+                            # Try to parse JSON response
+                            try:
+                                data = resp.json()
+                            except ValueError:
+                                # Log the entire response text when not JSON
+                                logger.error(
+                                    f"Invalid JSON response from Slurm for job {slurm_id}:\n{resp.text}"
+                                )
+                                mark_error(run, "Invalid JSON response from Slurm")
+                                continue
 
                             # Treat any error or non-RUNNING status as a failed job
                             if "error" in data:
@@ -97,6 +115,7 @@ class Command(BaseCommand):
                                     f"Job still RUNNING on Slurm: "
                                     f"{model.__name__}(id={run.id}, slurm_job_id={slurm_id}) — leaving untouched."
                                 )
+
                         except Exception as ex:
                             # Network/timeout/etc → safest assumption: job is gone
                             mark_error(run, f"Exception querying Slurm: {ex!r}")
