@@ -79,6 +79,7 @@ def get_git_info_internal() -> dict[str, dict[str, str]]:
         image_name = 'ngencerf-ngencerf-ui'
         container_name = f'{image_name}_temp_container'
         container_file_name = "/var/www/ngencerf/nuxt-app/ngencerf-ui_git_info.json"
+        local_file_name = os.path.join(git_info_directory, "ngencerf-ui_git_info.json")  # ← FIX HERE
         # This will always be from docker
         copy_file_from_docker_image(image_name, container_name, container_file_name, local_file_name)
     else:
