@@ -18,7 +18,7 @@ CONFIG_TEMPLATE = {
     "Forcing": {
         "forcing_provider": "bmi",
         "root_dir": NGEN_FORECAST_WORK_DIR,
-        "forecast_configuration": "",
+        "forcing_configuration": "",
         "cycle_datetime": None,
         "forcing_template_dir": FORECAST_FORCING_TEMPLATES,
         "cold_start_datetime": None
@@ -60,7 +60,7 @@ def create_forecast_input(run: ForecastRun | ColdStartRun) -> tuple[ErrorReport 
 
     forcing = config['Forcing']
 
-    forcing['forecast_configuration'] = run.configuration.internal_name
+    forcing['forcing_configuration'] = run.configuration.internal_name
     forcing['cycle_datetime'] = format_datetime(run.cycle_date)
 
     if isinstance(run, ColdStartRun):
