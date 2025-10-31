@@ -42,7 +42,7 @@ def post_with_spinner_and_retry(message: str, endpoint: str, **kwargs) -> tuple[
     Behavior:
     - If stream=True and first attempt is 200: returns (requests.Response, True) for caller to iter_content().
     - If retry is needed and succeeds:
-        - non-stream: returns parsed JSON (dict), True (let check_http_error print any server messages)
+        - non-stream: returns parsed JSON (dict), True
         - stream: issues one more request (with spinner) and returns that new Response, True
     - On error: prints structured messages via check_http_error and returns (None, False).
     :param message: Message to display while waiting.
@@ -54,8 +54,7 @@ def post_with_spinner_and_retry(message: str, endpoint: str, **kwargs) -> tuple[
     """
 
     def _rewind_files(files_obj):
-        # Support dict: {"field": fileobj} or {"field": (filename, fileobj)}
-        # Support list: [("files", (filename, fileobj)), ...]
+        # Rewind any file-like objects so retries resend from the start
         if isinstance(files_obj, dict):
             for v in files_obj.values():
                 try:
@@ -106,11 +105,14 @@ def post_with_spinner_and_retry(message: str, endpoint: str, **kwargs) -> tuple[
             print("\nOperation cancelled by user.")
             return None
         finally:
-            sp.stop()
+            if sp.running:
+                sp.stop()
 
     is_stream = bool(kwargs.get("stream"))
 
-    # 1) First attempt (with spinner)
+    # ───────────────────────────────
+    # 1. First attempt (with spinner)
+    # ───────────────────────────────
     first_resp = _with_spinner(message, _make_post)
     if first_resp is None:
         return None, False
@@ -119,12 +121,29 @@ def post_with_spinner_and_retry(message: str, endpoint: str, **kwargs) -> tuple[
         # Success on first try → return raw Response for streaming
         return first_resp, True
 
-    # 2) Delegate error handling + auth refresh/login to check_http_error.
+    # ───────────────────────────────
+    # 2. Handle response and decide on retry
+    # ───────────────────────────────
     parsed_or_none, ok = check_http_error(
         first_resp.status_code,
         first_resp.text,
         first_resp.headers.get("Content-Type")
     )
+
+    # Retry only if 401 and refresh/login succeeded
+    if not ok and first_resp.status_code == 401:
+        print("Retrying request after authentication recovery...")
+        retry_resp = _with_spinner(f"Retrying: {message}...", _make_post)
+        if retry_resp is None:
+            return None, False
+
+        if retry_resp.ok:
+            if is_stream:
+                return retry_resp, True
+            try:
+                return retry_resp.json(), True
+            except Exception:
+                return None, True
 
     if not ok:
         return None, False
