@@ -192,7 +192,7 @@ def get_parameters(modules: QuerySet[CalibrationFormulation]) -> list[dict[str, 
 
 def get_parameters_for_export(run: CalibrationRun) -> list[dict]:
     """
-    Export calibration parameters for all modules in the given calibration run.
+    Export calibration parameters for all modules in the given calibration run that have been selected by the user
     Uses cached modules to resolve names instead of hitting DB for Module.
 
     :param run: The CalibrationRun to export parameters from.
@@ -203,12 +203,13 @@ def get_parameters_for_export(run: CalibrationRun) -> list[dict]:
     # Query parameters linked to formulations by module_id
     params = (
         CalibrationParameter.objects
-        .filter(calibration_formulation__calibration_run=run)
+        .filter(calibration_formulation__calibration_run=run, user_selected_for_tuning=True)
         .values(
             "name", "initial_value", "minimum", "maximum",
             "calibration_formulation__module_id"
         )
     )
+    print('params', params)
 
     result = []
     for p in params:
@@ -221,6 +222,7 @@ def get_parameters_for_export(run: CalibrationRun) -> list[dict]:
             "maximum": p["maximum"],
             "module": module_name,
         })
+    print('result', result)
     return result
 
 
