@@ -548,11 +548,23 @@ class LockJobRequestSerializer(CalibrationRunIdList):
     lock = serializers.BooleanField(default=True, allow_null=False, required=False)
 
 
+class ModuleFilterSerializer(serializers.Serializer):
+    """Filter by one or more module names with logical operator ('and' | 'or')."""
+    operator = serializers.ChoiceField(choices=['or', 'and'], required=False, default='or')
+    modules = serializers.ListField(child=serializers.CharField(), required=True, allow_empty=False)
+
+
+class DateFilterSerializer(serializers.Serializer):
+    """Filter by CalibrationRun.run_start using 'before' or 'after' logic."""
+    operator = serializers.ChoiceField(choices=['before', 'after'], required=True)
+    date = serializers.DateField(required=True)
+
+
 class FilterSerializer(BaseSerializer):
     gage_id = serializers.CharField(required=False)
     status = serializers.ListField(child=serializers.CharField(validators=[enum_validator(StatusEnum)]), required=False, allow_empty=False)
-    modules_operator = serializers.ChoiceField(choices=['or', 'and'], required=False, default='or')
-    modules = serializers.ListField(child=serializers.CharField(), required=False, allow_empty=False)
+    module_filter = ModuleFilterSerializer(required=False)
+    date_filter = DateFilterSerializer(required=False)
     include_archived = serializers.BooleanField(default=False, required=False)
 
 

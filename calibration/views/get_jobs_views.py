@@ -1,5 +1,6 @@
 import json
 import logging
+from datetime import datetime
 from typing import Any, Type
 
 from django.contrib.auth import get_user_model
@@ -329,56 +330,78 @@ def apply_calibration_filters(query: Q, filters: dict) -> Q:
     """
     Apply optional calibration-related filters to a base Q() expression.
 
-    Supports:
+    Supported filters:
       - gage_id: exact match on gage.gage_id
       - status: list of StatusEnum values
-      - modules: list of module names, with optional logical operator:
-          * "or" (default) → include runs that contain any of the listed modules
-          * "and"          → include runs that contain all listed modules (inclusive)
+      - module_filter: {
+            "operator": "and" | "or",
+            "modules": ["CFE-X", "Noah-OWP-Modular"]
+        }
+      - date_filter: {
+            "operator": "before" | "after",
+            "date": "YYYY-MM-DD"
+        }
       - include_archived: exclude archived runs unless explicitly True
 
     Notes:
-      - The "and" operator uses a correlated subquery with aggregation
-        to ensure that all listed modules exist for a given run.
-      - This performs efficiently with <10 modules thanks to the
-        (calibration_run_id, module_id) composite index.
+      - 'module_filter.operator' controls whether *all* or *any* modules must match.
+      - 'date_filter.operator' determines before/after relative to CalibrationRun.run_start.
+      - Uses EXISTS + COUNT for 'and' module logic, index-efficient with <10 modules.
     """
     if not filters:
         return query
 
+    # ───── Basic field filters ─────
     if "gage_id" in filters and filters["gage_id"]:
         query &= Q(gage__gage_id=filters["gage_id"])
 
     if "status" in filters and filters["status"]:
         query &= Q(status__in=[StatusEnum.from_name(s).db_instance for s in filters["status"]])
 
-    if "modules" in filters and filters["modules"]:
-        modules_by_name = {m.name: m.id for m in get_cached_modules_by_id().values()}
-        module_ids = [modules_by_name[name] for name in filters["modules"] if name in modules_by_name]
-        if module_ids:
-            operator = filters.get("modules_operator", "or").lower()
-            if operator == "and":
-                # ─────────────────────────────────────────────
-                # Require all listed modules to be present
-                # in the CalibrationFormulation table for a run
-                # ─────────────────────────────────────────────
-                subquery = (
-                    CalibrationFormulation.objects
-                    .filter(
-                        calibration_run_id=OuterRef("pk"),
-                        module_id__in=module_ids
-                    )
-                    .values("calibration_run_id")
-                    .annotate(match_count=Count("module_id", distinct=True))
-                    .filter(match_count=len(module_ids))
-                )
-                query &= Q(Exists(subquery))
-            else:
-                # ─────────────────────────────────────────────
-                # Match if any of the listed modules are present
-                # ─────────────────────────────────────────────
-                query &= Q(calibrationformulation__module_id__in=module_ids)
+    # ───── Module filter (structured) ─────
+    if "module_filter" in filters:
+        mf = filters["module_filter"]
+        modules = mf.get("modules") or []
+        operator = (mf.get("operator") or "or").lower()
 
+        if modules:
+            modules_by_name = {m.name: m.id for m in get_cached_modules_by_id().values()}
+            module_ids = [modules_by_name[name] for name in modules if name in modules_by_name]
+
+            if module_ids:
+                if operator == "and":
+                    # ─────────────────────────────────────────────
+                    # Require all listed modules to be present
+                    # in the CalibrationFormulation table for a run
+                    # ─────────────────────────────────────────────
+                    subquery = (
+                        CalibrationFormulation.objects
+                        .filter(calibration_run_id=OuterRef("pk"), module_id__in=module_ids)
+                        .values("calibration_run_id")
+                        .annotate(match_count=Count("module_id", distinct=True))
+                        .filter(match_count=len(module_ids))
+                    )
+                    query &= Q(Exists(subquery))
+                else:
+                    # ─────────────────────────────────────────────
+                    # Match if any of the listed modules are present
+                    # ─────────────────────────────────────────────
+                    query &= Q(calibrationformulation__module_id__in=module_ids)
+
+    # ─────────────────────────────────────────────
+    # Date filtering: CalibrationRun.run_start
+    # ─────────────────────────────────────────────
+    if "date_filter" in filters:
+        date_info = filters["date_filter"]
+        operator = date_info.get("operator")
+        date_value = date_info.get("date")
+
+        if operator == "before":
+            query &= Q(run_start__lt=date_value)
+        elif operator == "after":
+            query &= Q(run_start__gt=date_value)
+
+    # ───── Archived toggle ─────
     if "include_archived" in filters and not filters["include_archived"]:
         query &= Q(is_archived=False)
 
