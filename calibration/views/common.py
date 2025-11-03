@@ -265,6 +265,12 @@ def create_calibration_run_internal(user: User, genesis: JobGenesis | None = Non
         new_name = f"{run.job_data_dir}_{datetime.now().isoformat()}"
         os.rename(run.job_data_dir, new_name)
 
+    os.makedirs(run.job_data_dir, exist_ok=True)
+    mode = os.stat(run.job_data_dir).st_mode
+    perm_str = oct(mode & 0o777)
+
+    logger.info(f"Directory {run.job_data_dir} created - Permissions: {perm_str}")
+
     # This is always true
     run.automatic_validation = True
     run.save(update_fields=['job_data_dir', 'automatic_validation', 'job_genesis'])

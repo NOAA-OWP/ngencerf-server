@@ -322,9 +322,6 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
         job_data_dir = run.job_data_dir
         general['main_dir'] = job_data_dir
 
-        if build:
-            os.makedirs(job_data_dir, exist_ok=True)
-
         # Validate required calibration fields
         required_calibration_fields = {
             "calibration_start_period": run.calibration_start_period,
