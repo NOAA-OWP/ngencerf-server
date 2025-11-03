@@ -551,6 +551,7 @@ class LockJobRequestSerializer(CalibrationRunIdList):
 class FilterSerializer(BaseSerializer):
     gage_id = serializers.CharField(required=False)
     status = serializers.ListField(child=serializers.CharField(validators=[enum_validator(StatusEnum)]), required=False, allow_empty=False)
+    modules_operator = serializers.ChoiceField(choices=['or', 'and'], required=False, default='or')
     modules = serializers.ListField(child=serializers.CharField(), required=False, allow_empty=False)
     include_archived = serializers.BooleanField(default=False, required=False)
 

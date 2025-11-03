@@ -3,7 +3,7 @@ import logging
 from typing import Any, Type
 
 from django.contrib.auth import get_user_model
-from django.db.models import Q, Exists, OuterRef
+from django.db.models import Q, Exists, OuterRef, Count
 from drf_spectacular.utils import extend_schema, OpenApiResponse
 from rest_framework.decorators import api_view
 from rest_framework.request import Request
@@ -326,7 +326,23 @@ def get_calibration_jobs(request):
 
 
 def apply_calibration_filters(query: Q, filters: dict) -> Q:
-    """Apply optional calibration-related filters to a base Q expression."""
+    """
+    Apply optional calibration-related filters to a base Q() expression.
+
+    Supports:
+      - gage_id: exact match on gage.gage_id
+      - status: list of StatusEnum values
+      - modules: list of module names, with optional logical operator:
+          * "or" (default) → include runs that contain any of the listed modules
+          * "and"          → include runs that contain all listed modules (inclusive)
+      - include_archived: exclude archived runs unless explicitly True
+
+    Notes:
+      - The "and" operator uses a correlated subquery with aggregation
+        to ensure that all listed modules exist for a given run.
+      - This performs efficiently with <10 modules thanks to the
+        (calibration_run_id, module_id) composite index.
+    """
     if not filters:
         return query
 
@@ -340,7 +356,28 @@ def apply_calibration_filters(query: Q, filters: dict) -> Q:
         modules_by_name = {m.name: m.id for m in get_cached_modules_by_id().values()}
         module_ids = [modules_by_name[name] for name in filters["modules"] if name in modules_by_name]
         if module_ids:
-            query &= Q(calibrationformulation__module_id__in=module_ids)
+            operator = filters.get("modules_operator", "or").lower()
+            if operator == "and":
+                # ─────────────────────────────────────────────
+                # Require all listed modules to be present
+                # in the CalibrationFormulation table for a run
+                # ─────────────────────────────────────────────
+                subquery = (
+                    CalibrationFormulation.objects
+                    .filter(
+                        calibration_run_id=OuterRef("pk"),
+                        module_id__in=module_ids
+                    )
+                    .values("calibration_run_id")
+                    .annotate(match_count=Count("module_id", distinct=True))
+                    .filter(match_count=len(module_ids))
+                )
+                query &= Q(Exists(subquery))
+            else:
+                # ─────────────────────────────────────────────
+                # Match if any of the listed modules are present
+                # ─────────────────────────────────────────────
+                query &= Q(calibrationformulation__module_id__in=module_ids)
 
     if "include_archived" in filters and not filters["include_archived"]:
         query &= Q(is_archived=False)

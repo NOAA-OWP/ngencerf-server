@@ -17,6 +17,8 @@ class CalibrationFormulation(BaseModel):
         ]
         indexes = [
             models.Index(fields=['calibration_run'], name='idx_formulation_run'),
+            models.Index(fields=['module'], name='idx_formulation_module'),
+            models.Index(fields=['calibration_run', 'module'], name='idx_formulation_run_module'),
         ]
 
     def __str__(self):
