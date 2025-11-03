@@ -20,7 +20,7 @@ from ngencerf.cli_functions import (
     upload_observational_data,
     upload_forcing_data,
     upload_geopackage_data,
-    download_zip, archive_job, unarchive_job, about, generate_regionalization_files, job_status, update_and_get_gage_status,
+    download_zip, archive_job, unarchive_job, about, generate_regionalization_files, job_status, update_and_get_gage_status, lock_job, unlock_job,
 )
 from ngencerf.cli_user import ngen_login, ngen_register
 
@@ -314,6 +314,15 @@ def main():
         help="Path to save the job list (optional output path)"
     )
     jobs_parser.set_defaults(func=lambda cmd_args: list_jobs(output_path=cmd_args.output_path))
+    
+    lock_parser = add_parser("lock", "lock one or more jobs")
+    lock_parser.add_argument(
+        "run_ids",
+        type=int,
+        nargs="+",  # One or more space-separated integers
+        help="One or more calibration job IDs"
+    )
+    lock_parser.set_defaults(func=lambda cmd_args: lock_job(cmd_args.run_ids))
 
     observation_parser = add_parser("upload-obs", "Upload observational data CSV for a calibration job")
     observation_parser.add_argument("run_id", type=int, help="Calibration job ID")
@@ -392,6 +401,15 @@ def main():
         help="One or more calibration job IDs"
     )
     unarchive_parser.set_defaults(func=lambda cmd_args: unarchive_job(cmd_args.run_ids))
+
+    unlock_parser = add_parser("unlock", "Unlock one or more jobs")
+    unlock_parser.add_argument(
+        "run_ids",
+        type=int,
+        nargs="+",  # One or more space-separated integers
+        help="One or more calibration job IDs"
+    )
+    unlock_parser.set_defaults(func=lambda cmd_args: unlock_job(cmd_args.run_ids))
 
     update_parser = add_parser("update", "Update job from a JSON file")
     update_parser.add_argument("run_id", type=int, help="Calibration job ID")

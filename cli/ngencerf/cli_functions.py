@@ -490,6 +490,51 @@ def unarchive_job(calibration_run_ids: list[int]) -> int:
     return 0
 
 
+def lock_job(calibration_run_ids: list[int]) -> int:
+    """
+    Locks one or more calibration runs.
+
+    :param calibration_run_ids: A list of one or more calibration run IDs.
+    :returns: 0 on success, 1 on failure.
+    """
+    print(f"Archiving calibration run jobs {calibration_run_ids}")
+    payload = {"calibration_run_ids": calibration_run_ids, "lock": True}
+    response_json, success = post_with_spinner_and_retry(
+        "Locking jobs...",
+        "/calibration/lock_jobs/",
+        headers={**get_auth_headers(), "Content-Type": "application/json"},
+        json=payload,
+    )
+    if not success:
+        return 1
+
+    for job in response_json.get("jobs", []):
+        print(job.get("message", f"Job {job['calibration_run_id']} locked."))
+    return 0
+
+
+def unlock_job(calibration_run_ids: list[int]) -> int:
+    """
+    Unlocks one or more calibration runs.
+
+    :param calibration_run_ids: A list of one or more calibration run IDs.
+    :returns: 0 on success, 1 on failure.
+    """
+    print(f"Unarchiving calibration run jobs {calibration_run_ids}")
+    payload = {"calibration_run_ids": calibration_run_ids, "lock": False}
+    response_json, success = post_with_spinner_and_retry(
+        "Unlocking jobs...",
+        "/calibration/lock_jobs/",
+        headers={**get_auth_headers(), "Content-Type": "application/json"},
+        json=payload,
+    )
+    if not success:
+        return 1
+    for job in response_json.get("jobs", []):
+        print(job.get("message", f"Job {job['calibration_run_id']} unlocked."))
+    return 0
+
+
 def cancel_job(calibration_run_id: int) -> int:
     """
     Cancels a running calibration job.
