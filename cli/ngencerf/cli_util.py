@@ -59,7 +59,7 @@ def check_http_error(http_status: int, response: str, content_type: str | None =
                 print("Retrying request with new token...")
                 return retry_func()
 
-            return {"detail": "Token fixed, but no retry performed."}, token_fixed
+            return {"detail": "Token fixed, but no retry performed."}, True
 
         # Handle 400 Bad Request
         if http_status == 400:
