@@ -6,7 +6,7 @@ from rest_framework.settings import api_settings
 
 from calibration.enums import DataTypeEnum, UnitsEnum, LocationEnum, ForcingSourceEnum, ObservationalSourceEnum, DomainEnum, StatusEnum, \
     OptimizationEnum, GeopackageSourceEnum, SlurmStatusEnum, JobGenesis, PlotDefinitionsEnum, ForecastConfigEnum, LogCategory, LogName, NgenLogging, \
-    CalibrationSortField, ForecastSortField
+    CalibrationSortField, ForecastSortField, VerificationSortField
 from calibration.util.caching import get_cached_modules_with_groups
 
 
@@ -568,14 +568,20 @@ class FilterSerializer(BaseSerializer):
     include_archived = serializers.BooleanField(default=False, required=False)
 
 
-class CalibrationSortSerializer(BaseSerializer):
+class SortSerializer(BaseSerializer):
+    direction = serializers.ChoiceField(choices=['asc', 'desc'], required=False, default='asc')
+
+
+class CalibrationSortSerializer(SortSerializer):
     field = serializers.CharField(required=True, validators=[enum_validator(CalibrationSortField)])
-    direction = serializers.ChoiceField(choices=['asc', 'desc'], required=False, default='asc')
 
 
-class ForecastSortSerializer(BaseSerializer):
+class ForecastSortSerializer(SortSerializer):
     field = serializers.CharField(required=True, validators=[enum_validator(ForecastSortField)])
-    direction = serializers.ChoiceField(choices=['asc', 'desc'], required=False, default='asc')
+
+
+class VerificationSortSerializer(SortSerializer):
+    field = serializers.CharField(required=True, validators=[enum_validator(VerificationSortField)])
 
 
 class PaginationSerializer(BaseSerializer):
@@ -590,6 +596,10 @@ class CalibrationPaginationSerializer(PaginationSerializer):
 
 class ForecastPaginationSerializer(PaginationSerializer):
     sort = ForecastSortSerializer(required=False, allow_null=True)
+
+
+class VerificationPaginationSerializer(PaginationSerializer):
+    sort = VerificationSortSerializer(required=False, allow_null=True)
 
 
 ##################################
@@ -1215,6 +1225,7 @@ class VerificationJobDetailsResponseSerializer(VerificationJobsResponseSerialize
 
 class GetVerificationJobsResponseSerializer(BaseSerializer):
     verification_jobs = serializers.ListSerializer(child=VerificationJobsResponseSerializer(), required=True, allow_empty=True)
+    total_count = serializers.IntegerField(required=True)
 
 
 class CreateVerificationJobRequestSerializer(BaseSerializer):

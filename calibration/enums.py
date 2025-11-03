@@ -316,3 +316,23 @@ class CalibrationSortField(Enum):
     def get_names(cls) -> list[str]:
         """Return the canonical API names (i.e., the first slot of each tuple)."""
         return [member.value[0] for member in cls]
+
+
+class VerificationSortField(Enum):
+    FORECAST_RUN_ID = ("forecast_run_id", "forecast_run__id")
+    STATUS = ("status", "status__name")
+    SUBMIT_DATE = ("submit_date", "submit_date")
+    CREATED_AT = ("created_at", "created_at")
+
+    @property
+    def orm_field(self):
+        return self.value[1]
+
+    @classmethod
+    def from_name(cls, name: str) -> "Self":
+        return next(member for member in cls if member.value[0] == name)
+
+    @classmethod
+    def get_names(cls) -> list[str]:
+        """Return the canonical API names (i.e., the first slot of each tuple)."""
+        return [member.value[0] for member in cls]

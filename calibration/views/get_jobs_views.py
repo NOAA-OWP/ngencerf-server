@@ -1,6 +1,5 @@
 import json
 import logging
-from datetime import datetime
 from typing import Any, Type
 
 from django.contrib.auth import get_user_model
@@ -10,14 +9,14 @@ from rest_framework.decorators import api_view
 from rest_framework.request import Request
 from rest_framework.response import Response
 
-from calibration.enums import GetValidationJobsScope, StatusEnum, ValidationType, CalibrationSortField, ForecastSortField
+from calibration.enums import GetValidationJobsScope, StatusEnum, ValidationType, CalibrationSortField, ForecastSortField, VerificationSortField
 from calibration.models import CalibrationFormulation, CalibrationRun, CalibrationStopCriteria, \
     ValidationRun, IterationParameter, ForecastRun, VerificationRun
 from calibration.util.caching import get_cached_modules_by_id
-from calibration.util.calibration_validators import EmptySerializer, GetCalibrationJobsForEvaluationResponseSerializer, ErrorResponseSerializer, \
+from calibration.util.calibration_validators import GetCalibrationJobsForEvaluationResponseSerializer, ErrorResponseSerializer, \
     GetCalibrationJobsResponseSerializer, CalibrationRunSerializer, GetValidationJobsResponseSerializer, \
     GetForecastJobsResponseSerializer, GetVerificationJobsResponseSerializer, CalibrationPaginationSerializer, \
-    ForecastPaginationSerializer
+    ForecastPaginationSerializer, VerificationPaginationSerializer
 from calibration.views.calibration_evaluation_views import downloadable_statuses
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import handle_exceptions, validate_request, validate_response, truncate_large_fields, get_calibration_run, \
@@ -64,8 +63,13 @@ Use this shape for every request (omit keys you’re not using):
     offset: integer row offset (0-based)
     filters: object with any of:
         gage_id: string
-        status: array of validated status names (e.g. ["Done","Failed"])
-        modules: array of module names
+        status: array of validated status names (e.g. ["Done", "Failed"])
+        module_filter: object with:
+            operator: "and" | "or"       (default = "or")
+            modules: array of module names
+        date_filter: object with:
+            operator: "before" | "after"
+            date: "YYYY-MM-DD"
         include_archived: boolean (false by default on backend)
     sort: object with:
         field: one of the server-allowed fields
@@ -78,9 +82,21 @@ If there is no sort, omit "sort".
 Example request (as plain text):
 
     {
-      "limit": 25, "offset": 0,
-      "filters": { "gage_id": "01544887", "status": ["Done","Failed"],
-                   "modules": ["NWMv3","ParFlow"], "include_archived": false },
+      "limit": 25,
+      "offset": 0,
+      "filters": {
+          "gage_id": "01544887",
+          "status": ["Done", "Failed"],
+          "module_filter": {
+              "operator": "and",
+              "modules": ["CFE-X", "Noah-OWP-Modular"]
+          },
+          "date_filter": {
+              "operator": "after",
+              "date": "2025-01-01"
+          },
+          "include_archived": false
+      },
       "sort": { "field": "submit_date", "direction": "asc" }
     }
 
@@ -94,6 +110,7 @@ Allowed sort fields (must match what backend supports):
   job_genesis, status, calibration_start_period, calibration_end_period, stop_criteria
 - Forecast: gage_id, submit_date, cycle_date, configuration, domain_name,
   created_at, status
+- Verification: forecast_run_id, submit_date, created_at, status
 
 Default sort (when not provided): by -id on the server.
 
@@ -326,39 +343,38 @@ def get_calibration_jobs(request):
     return Response(response_validator.data)
 
 
-def apply_calibration_filters(query: Q, filters: dict) -> Q:
+def _apply_shared_filters(
+        query: Q, filters: dict, *,
+        gage_prefix: str,
+        module_prefix: str,
+        status_field: str,
+        run_start_field: str,
+        archived_field: str = "is_archived"
+) -> Q:
     """
-    Apply optional calibration-related filters to a base Q() expression.
+    Apply shared filter logic for Calibration, Forecast, and Verification jobs.
 
-    Supported filters:
-      - gage_id: exact match on gage.gage_id
-      - status: list of StatusEnum values
-      - module_filter: {
-            "operator": "and" | "or",
-            "modules": ["CFE-X", "Noah-OWP-Modular"]
-        }
-      - date_filter: {
-            "operator": "before" | "after",
-            "date": "YYYY-MM-DD"
-        }
-      - include_archived: exclude archived runs unless explicitly True
-
-    Notes:
-      - 'module_filter.operator' controls whether *all* or *any* modules must match.
-      - 'date_filter.operator' determines before/after relative to CalibrationRun.run_start.
-      - Uses EXISTS + COUNT for 'and' module logic, index-efficient with <10 modules.
+    :param query: Base Q object to filter (e.g., ownership constraint).
+    :param filters: Dictionary of filters passed by the client.
+    :param gage_prefix: ORM prefix path to gage_id (e.g., 'gage__' or 'calibration_run__gage__').
+    :param module_prefix: ORM prefix path to module relationship (e.g., 'calibrationformulation__').
+    :param status_field: ORM field path for status filtering (e.g., 'status__in').
+    :param run_start_field: ORM field path to the run_start date field.
+    :param archived_field: ORM field path to the archive flag field (default 'is_archived').
+    :return: Updated Q object with all applicable filters applied.
     """
     if not filters:
         return query
 
-    # ───── Basic field filters ─────
+    # ───── Gage filter ─────
     if "gage_id" in filters and filters["gage_id"]:
-        query &= Q(gage__gage_id=filters["gage_id"])
+        query &= Q(**{f"{gage_prefix}gage_id": filters["gage_id"]})
 
+    # ───── Status filter ─────
     if "status" in filters and filters["status"]:
-        query &= Q(status__in=[StatusEnum.from_name(s).db_instance for s in filters["status"]])
+        query &= Q(**{status_field: [StatusEnum.from_name(s).db_instance for s in filters["status"]]})
 
-    # ───── Module filter (structured) ─────
+    # ───── Module filter ─────
     if "module_filter" in filters:
         mf = filters["module_filter"]
         modules = mf.get("modules") or []
@@ -370,60 +386,114 @@ def apply_calibration_filters(query: Q, filters: dict) -> Q:
 
             if module_ids:
                 if operator == "and":
-                    # ─────────────────────────────────────────────
-                    # Require all listed modules to be present
-                    # in the CalibrationFormulation table for a run
-                    # ─────────────────────────────────────────────
                     subquery = (
                         CalibrationFormulation.objects
-                        .filter(calibration_run_id=OuterRef("pk"), module_id__in=module_ids)
+                        .filter(calibration_run_id=OuterRef(f"{module_prefix.rstrip('__')}id"),
+                                module_id__in=module_ids)
                         .values("calibration_run_id")
                         .annotate(match_count=Count("module_id", distinct=True))
                         .filter(match_count=len(module_ids))
                     )
                     query &= Q(Exists(subquery))
                 else:
-                    # ─────────────────────────────────────────────
-                    # Match if any of the listed modules are present
-                    # ─────────────────────────────────────────────
-                    query &= Q(calibrationformulation__module_id__in=module_ids)
+                    query &= Q(**{f"{module_prefix}module_id__in": module_ids})
 
-    # ─────────────────────────────────────────────
-    # Date filtering: CalibrationRun.run_start
-    # ─────────────────────────────────────────────
+    # ───── Date filter ─────
     if "date_filter" in filters:
         date_info = filters["date_filter"]
         operator = date_info.get("operator")
         date_value = date_info.get("date")
 
         if operator == "before":
-            query &= Q(run_start__lt=date_value)
+            query &= Q(**{f"{run_start_field}__lt": date_value})
         elif operator == "after":
-            query &= Q(run_start__gt=date_value)
+            query &= Q(**{f"{run_start_field}__gt": date_value})
 
     # ───── Archived toggle ─────
     if "include_archived" in filters and not filters["include_archived"]:
-        query &= Q(is_archived=False)
+        query &= Q(**{archived_field: False})
 
     return query
 
 
-def resolve_sort(sort: dict | None, enum_class: Type[CalibrationSortField | ForecastSortField]) -> str:
+def apply_calibration_filters(query: Q, filters: dict) -> Q:
+    """
+    Apply standard calibration filters to a CalibrationRun queryset.
+
+    :param query: Base Q object (typically includes ownership constraint).
+    :param filters: Dictionary of filter parameters (gage_id, modules, date_filter, etc.).
+    :return: Q object with calibration-specific filters applied.
+    """
+    return _apply_shared_filters(
+        query, filters,
+        gage_prefix="gage__",
+        module_prefix="calibrationformulation__",
+        status_field="status__in",
+        run_start_field="run_start",
+        archived_field="is_archived"
+    )
+
+
+def apply_forecast_filters(query: Q, filters: dict) -> Q:
+    """
+    Apply standard forecast filters to a ForecastRun queryset.
+
+    :param query: Base Q object (e.g., Q(calibration_run__owner=user)).
+    :param filters: Dictionary of filter parameters (gage_id, modules, date_filter, etc.).
+    :return: Q object with forecast-specific filters applied.
+    """
+    return _apply_shared_filters(
+        query, filters,
+        gage_prefix="calibration_run__gage__",
+        module_prefix="calibration_run__calibrationformulation__",
+        status_field="status__in",  # ForecastRun's own status
+        run_start_field="calibration_run__run_start",
+        archived_field="calibration_run__is_archived"
+    )
+
+
+def apply_verification_filters(query: Q, filters: dict) -> Q:
+    """
+    Apply standard verification filters to a VerificationRun queryset.
+
+    :param query: Base Q object (e.g., Q(forecast_run__calibration_run__owner=user)).
+    :param filters: Dictionary of filter parameters (gage_id, modules, date_filter, etc.).
+    :return: Q object with verification-specific filters applied.
+    """
+    return _apply_shared_filters(
+        query, filters,
+        gage_prefix="forecast_run__calibration_run__gage__",
+        module_prefix="forecast_run__calibration_run__calibrationformulation__",
+        status_field="status__in",  # VerificationRun's own status
+        run_start_field="forecast_run__calibration_run__run_start",
+        archived_field="forecast_run__calibration_run__is_archived"
+    )
+
+
+def resolve_sort(sort: dict | None, enum_class: Type[CalibrationSortField | ForecastSortField | VerificationSortField]) -> str:
     """
     Convert the validated client-provided sort object into a Django `order_by` string.
 
-    Assumptions (enforced by the serializer + enum_validator upstream):
-    - `sort["field"]` is a valid string representation of an existing enum member.
-    - It can be converted into an enum safely via enum_class.from_name().
+    This function translates the UI-provided sort configuration into the corresponding ORM field
+    name used for ordering querysets. The mapping between user-facing fields and database columns
+    is defined by the respective Enum (e.g. CalibrationSortField, ForecastSortField, etc.).
 
-    - `enum_class` must be either CalibrationSortField or ForecastSortField.
-    - If `sort` is missing or has no "field", default to descending primary key (`-id`).
-    - Otherwise, match the client's enum-backed `field` to its ORM column via `.orm_field`.
-    - If direction is "desc", prefix the ORM field with "-".
+    Assumptions (enforced by upstream serializers and enum validators):
+      - `sort["field"]` is a valid string representation of an existing enum member.
+      - It can be safely converted via `enum_class.from_name()`.
+      - `enum_class` must be a subclass defining `.orm_field` mappings.
+      - If `sort` is missing or empty, the function defaults to `-id` (descending by primary key).
+      - If direction is `"desc"`, a leading "-" is applied.
 
-    Returns something like:
-        "gage__gage_id"    (for ascending)
-        "-gage__gage_id"   (for descending)
+    Examples:
+      >>> resolve_sort({"field": "gage_id", "direction": "asc"}, CalibrationSortField)
+      'gage__gage_id'
+      >>> resolve_sort({"field": "created_at", "direction": "desc"}, ForecastSortField)
+      '-created_at'
+
+    :param sort: Dictionary with 'field' and optional 'direction' ('asc' or 'desc').
+    :param enum_class: Enum class defining valid sort fields and their ORM column names.
+    :return: Django-compatible order_by string (e.g., "-submit_date" or "gage__gage_id").
     """
     if not sort or "field" not in sort:
         return "-id"
@@ -780,8 +850,7 @@ def get_forecast_jobs_internal(
 
     order_by = resolve_sort(sort, ForecastSortField)
 
-    query = Q(calibration_run__owner=user)
-    query = apply_calibration_filters(query, filters)
+    query = apply_forecast_filters(Q(calibration_run__owner=user), filters)
 
     if run_status:
         query &= Q(status_id__in=[s.db_instance.id for s in run_status])
@@ -969,8 +1038,68 @@ def get_forecast_jobs_for_verification(request: Request) -> Response:
     return Response(response_validator.data)
 
 
+def get_verification_jobs_internal(
+        user: User,
+        run_status: list[StatusEnum] | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        filters: dict[str, Any] | None = None,
+        sort: dict[str, str] | None = None
+) -> tuple[list[dict[str, Any]], int]:
+    """
+    Internal helper to retrieve verification jobs (READ ONLY) with optional
+    filtering, sorting, and pagination.
+
+    :param user: Owner of the jobs to fetch.
+    :param run_status: Optional list of StatusEnum values to filter on (e.g., DONE).
+    :param limit: Optional maximum number of rows to return (for pagination). If None, return all.
+    :param offset: Optional number of rows to skip before returning results (for pagination).
+    :param filters: Optional dict of filter criteria (reusing calibration filters, e.g. gage_id, status, modules).
+    :param sort: Optional dict { "field": one of FORECAST_SORT_FIELD_MAP keys, "direction": "asc" or "desc" }.
+    :return: Tuple (results, total_count). total_count reflects the total number of matching rows
+             BEFORE pagination is applied.
+    """
+    filters = filters or {}
+
+    order_by = resolve_sort(sort, VerificationSortField)
+
+    query = apply_verification_filters(Q(forecast_run__calibration_run__owner=user), filters)
+
+    if run_status:
+        query &= Q(status_id__in=[s.db_instance.id for s in run_status])
+
+    total_count = VerificationRun.objects.filter(query).count()
+
+    with readonly_transaction():
+        rows = list(
+            VerificationRun.objects
+            .filter(query)
+            .order_by(order_by)
+            .values(
+                "id",
+                "forecast_run_id",
+                "status__name",
+                "created_at",
+                "submit_date",
+            )
+        )
+
+        # ──────────────────────────────────────────
+        # Apply pagination ONLY if limit provided
+        # ──────────────────────────────────────────
+        if limit:
+            rows = rows[offset: offset + limit]
+
+    # Normalize keys expected by the API response/serializer
+    for r in rows:
+        r["verification_job_id"] = r.pop("id")
+        r["status"] = r.pop("status__name")
+
+    return rows, total_count
+
+
 @extend_schema(
-    request=EmptySerializer,
+    request=VerificationPaginationSerializer,
     responses={
         200: GetVerificationJobsResponseSerializer,
         400: OpenApiResponse(
@@ -996,23 +1125,33 @@ def get_verification_jobs(request: Request) -> Response:
     data = request.data if request.method == 'POST' else request.query_params.dict()
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
 
-    validator, error_return = validate_request(EmptySerializer, data)
+    validator, error_return = validate_request(VerificationPaginationSerializer, data)
     if error_return:
         return error_return
 
-    verification_objects = VerificationRun.objects.filter(owner=request.user)
+    limit = validator.get("limit")
+    offset = validator.get("offset", 0)
+    filters = validator.get("filters") or {}
+    sort = validator.get("sort")
 
-    verification_jobs = list(
-        verification_objects.values('id', 'created_at', 'submit_date', 'status__name', 'forecast_run_id'))
+    verification_jobs, total_count = get_verification_jobs_internal(
+        request.user,
+        run_status=None,
+        limit=limit,
+        offset=offset,
+        filters=filters,
+        sort=sort,
+    )
 
-    for v in verification_jobs:
-        v['verification_job_id'] = v.pop('id')
-        v['status'] = v.pop('status__name')
+    response = {
+        'verification_jobs': verification_jobs,
+        "total_count": total_count
+    }
 
-    response = {'verification_jobs': verification_jobs}
-    response_validator, error_response = validate_response(GetVerificationJobsResponseSerializer, response,
-                                                           fields_to_truncate=['verification_jobs'], max_length=10)
-
+    response_validator, error_response = validate_response(
+        GetVerificationJobsResponseSerializer, response,
+        fields_to_truncate=['verification_jobs'], max_length=10
+    )
     if error_response:
         return error_response
 

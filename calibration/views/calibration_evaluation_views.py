@@ -745,7 +745,6 @@ def start_zip_for_calibration_job(request: Request) -> Response:
                 f"— size: {zip_size / 1024 / 1024:.2f} MB)"
             )
 
-
         except Exception as e:
             cache.set(cache_key, {
                 'status': 'error',

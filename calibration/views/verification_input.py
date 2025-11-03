@@ -1,6 +1,5 @@
 import copy
 import logging
-import os
 from typing import Any
 
 import yaml
@@ -8,9 +7,8 @@ import yaml
 from calibration.enums import StatusEnum
 from calibration.models import VerificationRun
 from calibration.util.caching import generate_forecast_config_yaml
-from calibration.util.ngen_locations import get_forecast_dir, get_forecast_output_file, get_verification_run_dir, \
+from calibration.util.ngen_locations import get_forecast_output_file, get_verification_run_dir, \
     get_verification_yaml_config_file, VERF_CROSSWALK_NGEN_FILE, VERF_GAGE_HYDROFABRIC_FILE
-from calibration.views.calibration_run_views import resolve_job_data_dir
 from calibration.views.called_from import called_from
 from calibration.views.common import join_with_or, ErrorReport, readonly_transaction
 
