@@ -405,6 +405,7 @@ def submit_job(run: BaseRun, logging_config=None) -> Response | None:
                     run.save(update_fields=['status', 'failure_messages'])
                 return response
         elif isinstance(run, (ColdStartRun, ForecastRun)):
+            write_ngen_logging_file(run, logging_config)
             _, _ = prepare_fcst_or_cold_start_job(run)
 
         # Determine the appropriate job execution function

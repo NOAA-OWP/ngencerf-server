@@ -827,13 +827,13 @@ def get_user_email(request: Request) -> str:
     return "Anonymous"
 
 
-def generate_ngen_logging_config(run: CalibrationRun | ValidationRun, logging_config_param: dict = None) -> dict:
+def generate_ngen_logging_config(run: CalibrationRun | ValidationRun | ForecastRun, logging_config_param: dict = None) -> dict:
     """
     Generate the JSON logging configuration for a calibration or validation run.
 
     The generated config includes:
     - All valid modules (based on cached definitions)
-    - Special cases of 'ngen' and 'ngen-forcing'
+    - Special cases of 'ngen' and 'forcing'
     - Default log levels set to INFO, unless overridden
 
     Overrides are applied in this order:
@@ -856,14 +856,15 @@ def generate_ngen_logging_config(run: CalibrationRun | ValidationRun, logging_co
         logging_config_param = {}
 
     # Only use modules in our formulation
-    formulations = CalibrationFormulation.objects.filter(calibration_run=run).only("module_id")
+    calibration_run = run if isinstance(run, CalibrationRun) else run.calibration_run
+    formulations = CalibrationFormulation.objects.filter(calibration_run=calibration_run).only("module_id")
     modules_by_id = get_cached_modules_by_id()
     module_names = {modules_by_id[f.module_id].name for f in formulations}
 
-    # Get our  module names in lowercase, plus special-case 'ngen' and 'ngen-forcing'
+    # Get our  module names in lowercase, plus special-case 'ngen' and 'forcing'
     valid_modules = {m.lower() for m in module_names}
     valid_modules.add('ngen')
-    valid_modules.add('ngen-forcing')
+    valid_modules.add('forcing')
 
     # Default all modules to INFO lvl
     module_levels = {name: NgenLogging.INFO.value for name in valid_modules}
@@ -896,7 +897,7 @@ def generate_ngen_logging_config(run: CalibrationRun | ValidationRun, logging_co
     }
 
 
-def write_ngen_logging_file(run: CalibrationRun | ValidationRun, logging_config_param: dict) -> None:
+def write_ngen_logging_file(run: CalibrationRun | ValidationRun | ForecastRun | ColdStartRun, logging_config_param: dict) -> None:
     """
     Generate and write the logging config to a JSON file on disk, and create a symbolic link pointing
     to it using a consistent base name.
@@ -911,7 +912,6 @@ def write_ngen_logging_file(run: CalibrationRun | ValidationRun, logging_config_
         }
         This is currently only provided by the UI when calling run_calibration_job.
     """
-    # TODO logging
     logging_config = generate_ngen_logging_config(run, logging_config_param)
 
     # Write logging config to disk
@@ -919,8 +919,9 @@ def write_ngen_logging_file(run: CalibrationRun | ValidationRun, logging_config_
     with open(output_path, "w") as f:
         json.dump(logging_config, f, indent=4)
 
-    # Replace or create a symbolic link with a consistent name
-    symlink_path = os.path.join(run.job_data_dir, f'{get_ngen_logging_basename()}.json')
+    # Replace or create a symbolic link with a consistent name - All files created in the job root directory
+    job_data_dir = run.job_data_dir if isinstance(run, CalibrationRun) else run.calibration_run.job_data_dir
+    symlink_path = os.path.join(job_data_dir, f'{get_ngen_logging_basename()}.json')
     if os.path.islink(symlink_path) or os.path.exists(symlink_path):
         os.remove(symlink_path)
     os.symlink(output_path, symlink_path)

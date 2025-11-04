@@ -204,6 +204,7 @@ def create_and_run_forecast(request: Request) -> Response:
     configuration_name = validator.get('configuration_name')
     cycle_date = validator.get('cycle_date')
     cold_start_date = validator.get('cold_start_date')
+    logging_config = validator.get('logging_config')
 
     run_cold_start = cold_start_date is not None
 
@@ -267,9 +268,9 @@ def create_and_run_forecast(request: Request) -> Response:
 
     if run_cold_start:
         # Forecast Job will run automatically after the cold start
-        submit_job(cold_start_run)
+        submit_job(cold_start_run, logging_config=logging_config)
     else:
-        submit_job(forecast_run)
+        submit_job(forecast_run, logging_config=logging_config)
 
     msg = get_job_description(cold_start_run if run_cold_start else forecast_run) + ' created and submitted'
     if run_cold_start:
