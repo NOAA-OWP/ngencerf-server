@@ -922,9 +922,12 @@ def write_ngen_logging_file(run: CalibrationRun | ValidationRun | ForecastRun | 
     # Replace or create a symbolic link with a consistent name - All files created in the job root directory
     job_data_dir = run.job_data_dir if isinstance(run, CalibrationRun) else run.calibration_run.job_data_dir
     symlink_path = os.path.join(job_data_dir, f'{get_ngen_logging_basename()}.json')
+
     if os.path.islink(symlink_path) or os.path.exists(symlink_path):
         os.remove(symlink_path)
-    os.symlink(output_path, symlink_path)
+
+    # Since both are in the same directory, relative link = basename
+    os.symlink(os.path.basename(output_path), symlink_path)
 
 
 class ErrorReport:
