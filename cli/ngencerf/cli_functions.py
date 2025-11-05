@@ -3,6 +3,7 @@ Module providing CLI functionality for interacting with ngen calibration job end
 Supports operations like uploading data, submitting/deleting/cancelling jobs, and
 importing/exporting configurations.
 """
+import argparse
 import itertools
 import json
 import os
@@ -17,6 +18,7 @@ from typing import Callable
 
 import requests
 import tabulate
+import yaml
 
 from ngencerf.cli_util import check_http_error
 
@@ -545,13 +547,14 @@ def cancel_job(calibration_run_id: int) -> int:
     return 0
 
 
-def list_jobs(output_path: str | None = None, filters: dict | None = None, sort: dict | None = None) -> int:
+def list_jobs(output_path: str | None = None, filters: dict | None = None, sort: dict | None = None, cmd_args=None) -> int:
     """
     Lists calibration jobs from the server with optional filtering and sorting,
     and saves the results to a Markdown file.
 
-    The function sends a POST request to `/calibration/get_calibration_jobs/`
-    using the same request schema supported by the backend API.
+    This function powers the `ngencerf jobs` CLI command.
+    It builds the payload for `/calibration/get_calibration_jobs/` from CLI arguments or file input,
+    sends the API request, and writes the formatted job table to disk.
 
     Example payload:
         {
@@ -567,23 +570,49 @@ def list_jobs(output_path: str | None = None, filters: dict | None = None, sort:
             "sort": { "field": "submit_date", "direction": "desc" }
         }
 
-    :param output_path: Path to save the job list in Markdown format (optional).
-    :param filters: Dictionary or parsed JSON defining filters to apply (optional).
-    :param sort: Dictionary or parsed JSON defining sort field and direction (optional).
+    :param output_path: Optional path to save the job list as a Markdown file.
+    :param filters: Parsed filter dictionary (from YAML/JSON or CLI flags).
+    :param sort: Parsed sort dictionary (from YAML/JSON or CLI flags).
+    :param cmd_args: argparse.Namespace when called directly from CLI.
     :return: 0 on success, 1 on failure.
     """
-    # Resolve and validate path early
+    # Detect when called with a single argparse.Namespace positional argument
+    if isinstance(output_path, argparse.Namespace):
+        cmd_args = output_path
+        output_path = getattr(cmd_args, "output_path", "__DEFAULT__")
+
+    # ─────────────────────────────────────────────
+    # Build filters and sort dynamically from CLI args
+    # ─────────────────────────────────────────────
+    if cmd_args:
+        filters = _build_filters(cmd_args)
+        sort = _build_sort(cmd_args)
+        output_path = getattr(cmd_args, "output_path", output_path)
+
+    # ─────────────────────────────────────────────
+    # Resolve and validate output path
+    # ─────────────────────────────────────────────
     final_path = resolve_output_path(
         output_path,
         f"calibration_jobs_{datetime.now().strftime('%Y-%m-%d_%H%M')}.md"
     )
 
+    # ─────────────────────────────────────────────
+    # Construct payload
+    # ─────────────────────────────────────────────
     payload = {}
     if filters:
         payload["filters"] = filters
     if sort:
         payload["sort"] = sort
 
+    print(f"\nFetching job list with filters:\n{json.dumps(filters or {}, indent=2)}")
+    if sort:
+        print(f"Sorting:\n{json.dumps(sort, indent=2)}")
+
+    # ─────────────────────────────────────────────
+    # Perform API call
+    # ─────────────────────────────────────────────
     response_json, success = post_with_spinner_and_retry(
         "Fetching job list...",
         "/calibration/get_calibration_jobs/",
@@ -592,14 +621,15 @@ def list_jobs(output_path: str | None = None, filters: dict | None = None, sort:
     )
     if not success or not response_json:
         return 1
-    if not response_json:
-        return 0
 
     jobs = response_json.get("jobs", [])
     if not jobs:
         print("No jobs found.")
         return 0
 
+    # ─────────────────────────────────────────────
+    # Build Markdown table
+    # ─────────────────────────────────────────────
     rows = []
     for job in jobs:
         rows.append([
@@ -991,6 +1021,143 @@ def _normalize_job_ids(input_value: list[int] | str) -> list[int] | None:
 
     # List of ints or numeric strings
     return [int(i) for i in input_value]
+
+
+def _parse_json_arg(arg):
+    """
+    Parses either a file path (YAML/JSON) or an inline JSON/YAML string.
+    Returns a dict or None.
+    """
+    if not arg:
+        return None
+
+    if os.path.isfile(arg):
+        with open(arg, "r", encoding="utf-8") as f:
+            content = f.read()
+        try:
+            return yaml.safe_load(content)
+        except yaml.YAMLError:
+            return json.loads(content)
+    else:
+        try:
+            return json.loads(arg)
+        except json.JSONDecodeError:
+            return yaml.safe_load(arg)
+
+
+def _build_filters(cmd_args) -> dict:
+    """
+    Construct the filters dictionary for the /calibration/get_calibration_jobs/ API.
+
+    Validates and merges filter-related CLI arguments into a single structured dict.
+    Ensures grouped options are complete (e.g., --module-operator must be paired
+    with --module-list, date and ID filters require all relevant fields).
+
+    - Produces the same structure as filter_template.yaml.
+    - Exits with an error message if incomplete or inconsistent filter options are provided.
+
+    :param cmd_args: argparse.Namespace containing CLI arguments.
+    :return: dict of filters suitable for API POST to /get_calibration_jobs/.
+    """
+    filters = {}
+
+    # ───────────── Basic filters ─────────────
+    if getattr(cmd_args, "gage_id", None):
+        filters["gage_id"] = cmd_args.gage_id
+    if getattr(cmd_args, "status", None):
+        filters["status"] = cmd_args.status
+    if getattr(cmd_args, "include_archived", False):
+        filters["include_archived"] = cmd_args.include_archived
+
+    # ───────────── Module filter ─────────────
+    module_op = getattr(cmd_args, "module_operator", None)
+    module_list = getattr(cmd_args, "module_list", None)
+    if module_op or module_list:
+        if not module_op or not module_list:
+            print("Error: --module-operator and --module-list must be used together.")
+            sys.exit(1)
+        filters["module_filter"] = {
+            "operator": module_op,
+            "modules": module_list,
+        }
+
+    # ───────────── Date filter ─────────────
+    date_op = getattr(cmd_args, "date_operator", None)
+    date = getattr(cmd_args, "date", None)
+    date_start = getattr(cmd_args, "date_start", None)
+    date_end = getattr(cmd_args, "date_end", None)
+    if date_op:
+        match date_op:
+            case "before" | "after":
+                if not date:
+                    print(f"Error: --date is required when using --date-operator {date_op}.")
+                    sys.exit(1)
+                filters["date_filter"] = {"operator": date_op, "create_date": date}
+            case "between":
+                if not (date_start and date_end):
+                    print("Error: --date-start and --date-end are required for --date-operator between.")
+                    sys.exit(1)
+                filters["date_filter"] = {
+                    "operator": "between",
+                    "start_date": date_start,
+                    "end_date": date_end,
+                }
+
+    # ───────────── ID filter ─────────────
+    id_op = getattr(cmd_args, "id_operator", None)
+    id_val = getattr(cmd_args, "id", None)
+    id_start = getattr(cmd_args, "id_start", None)
+    id_end = getattr(cmd_args, "id_end", None)
+    if id_op:
+        match id_op:
+            case "before" | "after":
+                if id_val is None:
+                    print(f"Error: --id is required when using --id-operator {id_op}.")
+                    sys.exit(1)
+                filters["id_filter"] = {"operator": id_op, "id": id_val}
+            case "between":
+                if id_start is None or id_end is None:
+                    print("Error: --id-start and --id-end are required for --id-operator between.")
+                    sys.exit(1)
+                filters["id_filter"] = {
+                    "operator": "between",
+                    "start_id": id_start,
+                    "end_id": id_end,
+                }
+
+    return filters
+
+
+def _build_sort(cmd_args) -> dict | None:
+    """
+    Build the sort dictionary for /get_calibration_jobs/.
+
+    Accepts either:
+      - --sort: a path to a YAML/JSON file or inline JSON string, OR
+      - --sort-field / --sort-direction flags.
+
+    Returns:
+        dict with {"field": ..., "direction": ...}, or None if no sorting specified.
+    """
+    sort_data = None
+
+    # Priority 1: explicit file or inline JSON
+    if getattr(cmd_args, "sort", None):
+        try:
+            sort_data = _load_json_or_yaml(cmd_args.sort)  # reuse helper if you already have it
+        except Exception as e:
+            print(f"Error parsing sort definition: {e}")
+            sys.exit(1)
+
+    # Priority 2: individual CLI flags
+    elif getattr(cmd_args, "sort_field", None):
+        sort_data = {
+            "field": cmd_args.sort_field,
+            "direction": getattr(cmd_args, "sort_direction", "desc")
+        }
+
+    # No sort provided
+    return sort_data
 
 
 def _process_job_action(

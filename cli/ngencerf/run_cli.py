@@ -7,11 +7,7 @@ for managing calibration jobs via a REST API.
 """
 
 import argparse
-import json
-import os
 import sys
-
-import yaml
 
 from ngencerf.cli_functions import (
     import_job,
@@ -317,74 +313,131 @@ def main():
         run_after_import=cmd_args.run_after_import
     ))
 
-    jobs_parser = add_parser("jobs", "List jobs")
+    jobs_parser = add_parser("jobs", "List calibration jobs with optional filtering and sorting.")
     jobs_parser.add_argument(
         "--output", "-o",
         dest="output_path",
         nargs="?",
         const="__DEFAULT__",
         default="__DEFAULT__",
-        help="Path to save the job list (optional output path)"
+        help=(
+            "Optional path to save the job list in Markdown format. "
+            "If omitted, a timestamped file name will be generated automatically."
+        ),
     )
     jobs_parser.add_argument(
         "--filters",
+        metavar="FILTERS",
         help=(
-            "JSON string or path to JSON file containing filters, e.g. "
-            "'{\"gage_id\": \"01544887\", \"status\": [\"Done\", \"Failed\"]}' "
-            "or filters.json"
+            "Filter definition in JSON or YAML format. "
+            "Can be provided either as a file path or an inline JSON/YAML string.\n\n"
+            "Examples:\n"
+            "  --filters filters.yaml\n"
+            "  --filters '{\"gage_id\": \"01544887\", \"status\": [\"Done\", \"Failed\"]}'"
         ),
     )
     jobs_parser.add_argument(
         "--sort",
+        metavar="SORT",
         help=(
-            "JSON string or path to JSON file containing sort, e.g. "
-            "'{\"field\": \"submit_date\", \"direction\": \"desc\"}' "
-            "or sort.json"
+            "Sort definition in JSON or YAML format. "
+            "Can be provided either as a file path or an inline JSON/YAML string.\n\n"
+            "Examples:\n"
+            "  --sort sort.yaml\n"
+            "  --sort '{\"field\": \"submit_date\", \"direction\": \"desc\"}'"
         ),
     )
 
-    def _parse_json_arg(arg):
-        """
-        Parse input as JSON or YAML (supports comments if YAML).
-        Accepts either inline JSON/YAML string or path to a file.
+    # ────────────────────────────────────────────────
+    # CLI FILTER FLAGS
+    # ────────────────────────────────────────────────
 
-        Examples:
-            # Inline JSON
-            --filters '{"gage_id": "01544887"}'
+    # Basic filters
+    jobs_parser.add_argument("--gage-id", help="Filter by gage ID (exact string match)")
+    jobs_parser.add_argument(
+        "--status",
+        nargs="+",
+        help="Filter by one or more statuses (e.g., Done Failed Running)"
+    )
+    jobs_parser.add_argument(
+        "--include-archived",
+        type=str_to_bool,
+        default=False,
+        help="Include archived jobs (default: false)"
+    )
 
-            # YAML file with comments
-            --filters filters.yaml
+    # ───── MODULE FILTER GROUP ─────
+    module_group = jobs_parser.add_argument_group(
+        "module filter",
+        "Filter jobs based on module names."
+    )
+    module_group.add_argument(
+        "--module-operator",
+        choices=["and", "or"],
+        default="and",
+        help="Combine modules with logical 'and' (default) or 'or'"
+    )
+    module_group.add_argument(
+        "--module-list",
+        nargs="+",
+        help="List of module names to match (e.g., CFE-X Noah-OWP-Modular)"
+    )
 
-            # JSON file
-            --filters filters.json
+    # ───── DATE FILTER GROUP ─────
+    date_group = jobs_parser.add_argument_group(
+        "date filter",
+        "Filter jobs by creation date."
+    )
+    date_group.add_argument(
+        "--date-operator",
+        choices=["before", "after", "between"],
+        help="Select operator: 'before', 'after', or 'between'."
+    )
+    date_group.add_argument("--date", help="Single date (YYYY-MM-DD) for 'before' or 'after'.")
+    date_group.add_argument("--date-start", help="Start date (YYYY-MM-DD) for 'between'.")
+    date_group.add_argument("--date-end", help="End date (YYYY-MM-DD) for 'between'.")
 
-        :param arg: A string containing either inline JSON/YAML or a path to a file.
-        :return: Parsed dictionary or None if no argument provided.
-        """
-        if not arg:
-            return None
+    # ───── ID FILTER GROUP ─────
+    id_group = jobs_parser.add_argument_group(
+        "id filter",
+        "Filter jobs by calibration_run_id."
+    )
+    id_group.add_argument(
+        "--id-operator",
+        choices=["before", "after", "between"],
+        help="Select operator: 'before', 'after', or 'between'."
+    )
+    id_group.add_argument("--id", type=int, help="Single ID for 'before' or 'after'.")
+    id_group.add_argument("--id-start", type=int, help="Start ID for 'between'.")
+    id_group.add_argument("--id-end", type=int, help="End ID for 'between'.")
 
-        if os.path.isfile(arg):
-            with open(arg, "r", encoding="utf-8") as f:
-                content = f.read()
-            try:
-                # Try YAML first (safe and allows comments)
-                return yaml.safe_load(content)
-            except yaml.YAMLError:
-                # Fallback to JSON if YAML fails
-                return json.loads(content)
-        else:
-            # Inline content; try JSON first
-            try:
-                return json.loads(arg)
-            except json.JSONDecodeError:
-                return yaml.safe_load(arg)
+    # ───── SORT OPTIONS ─────
+    sort_group = jobs_parser.add_argument_group("sorting", "Sort job results.")
+    sort_group.add_argument(
+        "--sort-field",
+        choices=[
+            "gage_id",
+            "user_formulation_name",
+            "submit_date",
+            "created_at",
+            "job_genesis",
+            "status",
+            "calibration_start_period",
+            "calibration_end_period",
+            "stop_criteria",
+        ],
+        help="Field to sort by (default is 'id' descending if not provided)."
+    )
+    sort_group.add_argument(
+        "--sort-direction",
+        choices=["asc", "desc"],
+        default="desc",
+        help="Sort direction (default: desc)."
+    )
 
-    jobs_parser.set_defaults(func=lambda cmd_args: list_jobs(
-        output_path=cmd_args.output_path,
-        filters=_parse_json_arg(cmd_args.filters),
-        sort=_parse_json_arg(cmd_args.sort)
-    ))
+    jobs_parser.set_defaults(func=lambda cmd_args: list_jobs(cmd_args))
+
+    # ---- End of job parser
 
     lock_parser = add_parser("lock", "lock one or more jobs")
     lock_parser.add_argument(
