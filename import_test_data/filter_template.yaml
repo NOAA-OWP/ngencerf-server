@@ -4,31 +4,77 @@
 # Leave fields blank or empty for no filtering.
 # All fields are optional.
 
-gage_id: ""  # Example: "01544887"
+gage_id: ""             # Example: "01544887"
+status: []              # Case-insensitive valid values include:
+                        #   Done, Failed, Cancelled, Server_Error,
+                        #   Running, Queued, Submitted, Pending,
+                        #   Created, Validating, Initializing,
+                        #   Calibration, Completed, Uploaded, Archived
+                        #
+                        # Example:
+                        #   status: ["Done", "Failed"]
 
-status: []   # Valid values (case-insensitive):
-             #   - Done
-             #   - Failed
-             #   - Cancelled
-             #   - Server_Error
-             #   - Running
-             #   - Queued
-             #   - Submitted
-             #   - Pending
-             #   - Created
-             #   - Validating
-             #   - Initializing
-             #   - Calibration
-             #   - Completed
-             #   - Uploaded
-             #   - Archived
-
+# ────────────────
+# MODULE FILTER
+# ────────────────
 module_filter:
-  operator: "or"     # "or" (default) or "and"
-  modules: []      # Example: ["CFE-X", "Noah-OWP-Modular"]
+  operator: "and"       # "and"   (default) → must include ALL listed modules
+                        # "or"              → match ANY listed module
+  modules: []           # Example:
+                        #   modules: ["CFE-X", "Noah-OWP-Modular"]
 
+# ────────────────
+# DATE FILTER
+# ────────────────
+# Filters based on job creation date.
+# Applies to the "created_at" field on the server.
+#
+# operator:
+#   - "before"  → created_at < create_date
+#   - "after"   → created_at > create_date
+#   - "between" → start_date ≤ created_at ≤ end_date
+#
+# Only supply the relevant date(s) for the chosen operator.
+#
+# Examples:
+#   operator: "before"
+#   create_date: "2025-01-01"
+#
+#   operator: "between"
+#   start_date: "2025-01-01"
+#   end_date: "2025-03-31"
 date_filter:
-  operator: "before"     # "before" or "after"
-  date: null             # Format: "YYYY-MM-DD"
+  operator: "before"    # "before", "after", or "between"
+  create_date: null     # Used with "before" or "after"   Format: "YYYY-MM-DD"
+  start_date: null      # Used with "between"             Format: "YYYY-MM-DD"
+  end_date: null        # Used with "between"             Format: "YYYY-MM-DD"
 
-include_archived: false  # true = include archived jobs; false = exclude
+# ────────────────
+# ID FILTER
+# ────────────────
+# Filters jobs by their numeric calibration_run_id.
+#
+# operator:
+#   - "before"  → id < value
+#   - "after"   → id > value
+#   - "between" → start_id ≤ id ≤ end_id
+#
+# Examples:
+#   operator: "after"
+#   id: 100
+#
+#   operator: "between"
+#   start_id: 100
+#   end_id: 200
+id_filter:
+  operator: "before"    # "before", "after", or "between"
+  id: null              # Used with "before"/"after"      Format: 123
+  start_id: null        # Used with "between"             Format: 123
+  end_id: null          # Used with "between"             Format: 123
+
+# ────────────────
+# ARCHIVE CONTROL
+# ────────────────
+# false → only active jobs (default)
+# true  → include archived jobs in results
+include_archived: false

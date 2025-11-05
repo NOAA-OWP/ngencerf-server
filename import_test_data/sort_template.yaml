@@ -4,27 +4,44 @@
 # Leave blank for default sorting (descending by job ID).
 # The backend will use "-id" if no sort is provided.
 #
-# Valid field options (case-sensitive):
+# ────────────────
+# VALID FIELD OPTIONS (case-sensitive)
+# ────────────────
+# Common sort fields available for calibration jobs:
+#   id
 #   gage_id
-#   user_formulation_name
-#   submit_date
-#   created_at
-#   job_genesis
 #   status
+#   user_formulation_name
 #   calibration_start_period
 #   calibration_end_period
+#   submit_date
+#   created_at
+#   objective_function
+#   optimization_algorithm
 #   stop_criteria
+#   job_genesis
+#   archived
 #
-# Valid direction values:
+# ────────────────
+# VALID DIRECTION VALUES
+# ────────────────
 #   asc   → ascending order
 #   desc  → descending order
 #
-# Examples:
+# ────────────────
+# EXAMPLES
+# ────────────────
 #   field: submit_date
 #   direction: desc
 #
 #   field: gage_id
 #   direction: asc
+#
+#   field: objective_function
+#   direction: asc
+#
+#   field: calibration_end_period
+#   direction: desc
 
 field: ""        # One of the valid field names listed above
 direction: ""    # "asc" or "desc"
