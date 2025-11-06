@@ -271,6 +271,7 @@ class NgenLogging(AbstractEnum):
 
 
 class ForecastSortField(Enum):
+    ID = ("id", "id")
     GAGE_ID = ("gage_id", "calibration_run__gage__gage_id")
     SUBMIT_DATE = ("submit_date", "submit_date")
     CREATE_DATE = ("create_date", "created_at")
@@ -294,15 +295,22 @@ class ForecastSortField(Enum):
 
 
 class CalibrationSortField(Enum):
+    ID = ("id", "id")
     GAGE_ID = ("gage_id", "gage__gage_id")
+    DOMAIN_NAME = ("domain_name", "gage__domain__name")
     USER_FORMULATION_NAME = ("user_formulation_name", "user_formulation_name")
     SUBMIT_DATE = ("submit_date", "submit_date")
     CREATE_DATE = ("create_date", "created_at")
+    LAST_UPDATED_ON = ("last_updated_on", "updated_at")
     JOB_GENESIS = ("job_genesis", "job_genesis")
     STATUS = ("status", "status__name")
+    OBJECTIVE_FUNCTION = ("objective_function", "objective_function__name")
+    OPTIMIZATION_ALGORITHM = ("optimization_algorithm", "optimization__name")
     PERIOD = ("period", ["calibration_start_period", "calibration_end_period"])
     STOP_CRITERIA = ("stop_criteria", "calibrationstopcriteria__value")
-
+    IS_ARCHIVED = ("is_archived", "is_archived")
+    IS_LOCKED = ("is_locked", "is_locked")
+    VALIDATION_RUNS = ("validation_runs", "validation_run_count")
 
     @property
     def orm_field(self):
@@ -319,6 +327,7 @@ class CalibrationSortField(Enum):
 
 
 class VerificationSortField(Enum):
+    ID = ("id", "id")
     FORECAST_RUN_ID = ("forecast_run_id", "forecast_run__id")
     STATUS = ("status", "status__name")
     SUBMIT_DATE = ("submit_date", "submit_date")

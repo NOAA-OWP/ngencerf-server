@@ -30,6 +30,7 @@ User = get_user_model()
 Instructions for UI developer.  Will be deleted once we have this implemented
 
 UI Behavior Requirements for Job List (Calibration + Forecast Screens)
+=====================================================================
 
 All filter and sorting changes trigger a fresh API call:
 
@@ -42,21 +43,22 @@ All filter and sorting changes trigger a fresh API call:
   a single page of results almost instantly (well under one second in typical use).
 
 
-Pagination behavior:
-
+Pagination behavior
+-------------------
 - Next/Previous page or page number click updates offset
   to the appropriate value (e.g., offset = pageIndex * limit)
 - Changing limit resets offset to 0
 - Changing filters or sort always resets offset to 0
-- Implement **anticipatory loading (prefetching)**:
-  When fetching a page (e.g., limit = 25), request and locally cache the next page as well
-  (offset + limit). This ensures that when the user clicks “Next,”
-  data for the next page is already available and transitions are instantaneous.
-  Once the user advances to that next page, fetch the following one in the background.
+- Implement anticipatory loading (prefetching):
+  When fetching a page (e.g., limit = 25), request and locally cache
+  both the previous and next pages relative to the current one.
+  This ensures that when the user scrolls forward (Next) or backward (Previous),
+  data for those adjacent pages is already available.
+  Once the user navigates to a new page, prefetch the next one in that direction.
   This rolling prefetch avoids lag while keeping memory usage predictable.
 
-Request payload shape:
-
+Request payload shape
+---------------------
 Use this shape for every request (omit keys you’re not using):
 
     limit: integer page size (e.g., 25)
@@ -81,6 +83,7 @@ Use this shape for every request (omit keys you’re not using):
     sort: object with:
         field: one of the server-allowed fields
         direction: "asc" or "desc"
+    ids_only: boolean (false by default; when true, only job IDs are returned)
 
 Do NOT send empty/defaults.
 If there are no filters, omit "filters".
@@ -89,22 +92,27 @@ If there is no sort, omit "sort".
 Example request (as plain text):
 
     {
-      "limit": 25,
-      "offset": 0,
-      "filters": {
-          "gage_id": "01544887",
-          "status": ["Done", "Failed"],
-          "module_filter": {
-              "operator": "and",
-              "modules": ["CFE-X", "Noah-OWP-Modular"]
-          },
-          "date_filter": {
-              "operator": "after",
-              "create_date": "2025-01-01"
-          },
-          "include_archived": false
-      },
-      "sort": { "field": "submit_date", "direction": "asc" }
+        "limit": 25,
+        "offset": 0,
+        "filters": {
+            "gage_id": "01544887",
+            "status": ["Done", "Failed"],
+            "module_filter": {
+                "operator": "and",
+                "modules": ["CFE-X", "Noah-OWP-Modular"]
+            },
+            "date_filter": {
+                "operator": "after",
+                "create_date": "2025-01-01"
+            },
+            "id_filter": {
+                "operator": "before",
+                "id": 500
+            },
+            "include_archived": false
+        },
+        "sort": { "field": "submit_date", "direction": "asc" },
+        "ids_only": false
     }
 
 Example with date range filter:
@@ -127,10 +135,10 @@ Minimal example:
 
 Allowed sort fields (must match what backend supports):
 
-- Calibration: gage_id, user_formulation_name, submit_date, create_date,
-  job_genesis, status, period, stop_criteria
-- Forecast: gage_id, submit_date, create_date, cycle_date, configuration, domain_name, status
-- Verification: forecast_run_id, submit_date, create_date, status
+- Calibration: id, gage_id, user_formulation_name, submit_date, create_date,
+  job_genesis, status, period, stop_criteria, validation_runs
+- Forecast: id, gage_id, submit_date, create_date, cycle_date, configuration, domain_name, status
+- Verification: id, forecast_run_id, submit_date, create_date, status
 
 Default sort (when not provided): by -id on the server.
 
@@ -166,9 +174,10 @@ Performance guidance:
 - Don’t send the request if nothing actually changed.
 - Optimistically flip sort indicators during user interaction.
 - Optionally cache results by a hash of {limit, offset, filters, sort}.
-- Implement **rolling prefetch** for pagination (anticipatory loading):
-  Always keep one page ahead preloaded. Replace older pages when the user moves forward
-  to limit memory footprint.
+- Implement rolling prefetch for pagination (anticipatory loading):
+  Always keep both the previous and next pages of the current page preloaded.
+  Replace older cached pages as the user scrolls forward or backward
+  to keep memory footprint predictable.
 
 This ensures consistent behavior: any filter or sort change resets offset = 0
 and immediately fetches new server data. Pagination manipulates offset only,
@@ -726,7 +735,16 @@ def get_jobs(
 
         query = apply_calibration_filters(query, filters)
 
-        base_qs = CalibrationRun.objects.filter(query)
+
+        # ───── annotate validation_run_count for sorting ─────
+        base_qs = CalibrationRun.objects.filter(query).annotate(
+            validation_run_count=Count(
+                "validationrun",
+                filter=~Q(validationrun__validation_type=ValidationType.VALID_CONTROL.value),
+                distinct=True
+            )
+        )
+        # ──────────────────────────────────────────────────────────
 
         if ids_only:
             total_count = base_qs.count()
