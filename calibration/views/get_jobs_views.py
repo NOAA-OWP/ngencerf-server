@@ -128,7 +128,7 @@ Minimal example:
 Allowed sort fields (must match what backend supports):
 
 - Calibration: gage_id, user_formulation_name, submit_date, create_date,
-  job_genesis, status, calibration_start_period, calibration_end_period, stop_criteria
+  job_genesis, status, period, stop_criteria
 - Forecast: gage_id, submit_date, create_date, cycle_date, configuration, domain_name, status
 - Verification: forecast_run_id, submit_date, create_date, status
 
@@ -580,40 +580,55 @@ def apply_verification_filters(query: Q, filters: dict) -> Q:
     )
 
 
-def resolve_sort(sort: dict | None, enum_class: Type[CalibrationSortField | ForecastSortField | VerificationSortField]) -> str:
+def resolve_sort(sort: dict | None, enum_class: Type[CalibrationSortField | ForecastSortField | VerificationSortField]) -> list[str]:
     """
-    Convert the validated client-provided sort object into a Django `order_by` string.
+    Convert the validated client-provided sort object into a Django `order_by` argument list.
+
+    - Supports single- and multi-field sorting (e.g., 'period' maps to two ORM fields).
+    - If 'direction' is 'desc', all fields are prefixed with '-'.
+    - Defaults to ['-id'] if no sort provided.
 
     This function translates the UI-provided sort configuration into the corresponding ORM field
-    name used for ordering querysets. The mapping between user-facing fields and database columns
-    is defined by the respective Enum (e.g. CalibrationSortField, ForecastSortField, etc.).
+    name(s) used for ordering querysets. The mapping between user-facing fields and database columns
+    is defined by the respective Enum (e.g., CalibrationSortField, ForecastSortField, etc.).
 
     Assumptions (enforced by upstream serializers and enum validators):
       - `sort["field"]` is a valid string representation of an existing enum member.
       - It can be safely converted via `enum_class.from_name()`.
       - `enum_class` must be a subclass defining `.orm_field` mappings.
-      - If `sort` is missing or empty, the function defaults to `-id` (descending by primary key).
-      - If direction is `"desc"`, a leading "-" is applied.
+      - If `sort` is missing or empty, the function defaults to ['-id'] (descending by primary key).
+      - If direction is `"desc"`, a leading "-" is applied to each field.
 
     Examples:
       >>> resolve_sort({"field": "gage_id", "direction": "asc"}, CalibrationSortField)
-      'gage__gage_id'
-      >>> resolve_sort({"field": "created_at", "direction": "desc"}, ForecastSortField)
-      '-created_at'
+      ['gage__gage_id']
+      >>> resolve_sort({"field": "period", "direction": "desc"}, CalibrationSortField)
+      ['-calibration_start_period', '-calibration_end_period']
 
     :param sort: Dictionary with 'field' and optional 'direction' ('asc' or 'desc').
     :param enum_class: Enum class defining valid sort fields and their ORM column names.
-    :return: Django-compatible order_by string (e.g., "-submit_date" or "gage__gage_id").
+    :return: List of Django-compatible order_by fields (e.g., ['-submit_date'] or ['gage__gage_id']).
     """
     if not sort or "field" not in sort:
-        return "-id"
+        return ["-id"]
 
-    # Convert validated string → enum member (no try/except needed by design)
+    # Convert validated string → enum member
     member = enum_class.from_name(sort["field"])
 
     direction = sort.get("direction", "asc").lower()
     orm_field = member.orm_field
-    return orm_field if direction == "asc" else f"-{orm_field}"
+
+    # Normalize single vs multi-field sorts
+    if isinstance(orm_field, str):
+        orm_fields = [orm_field]
+    else:
+        orm_fields = orm_field  # already a list
+
+    # Apply direction prefix to all fields
+    if direction == "desc":
+        orm_fields = [f"-{f}" for f in orm_fields]
+
+    return orm_fields
 
 
 def get_jobs(
@@ -701,7 +716,7 @@ def get_jobs(
         # Base query for CalibrationRun (dict results, lighter than ORM instances)
         calibration_runs_qs = (
             base_qs
-            .order_by(order_by)
+            .order_by(*order_by)
             .values(
                 "id", "gage__gage_id", "gage__domain__name", "submit_date", "updated_at", "user_formulation_name",
                 "calibration_start_period", "calibration_end_period",

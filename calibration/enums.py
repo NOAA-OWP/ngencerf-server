@@ -300,9 +300,9 @@ class CalibrationSortField(Enum):
     CREATE_DATE = ("create_date", "created_at")
     JOB_GENESIS = ("job_genesis", "job_genesis")
     STATUS = ("status", "status__name")
-    CALIBRATION_START_PERIOD = ("calibration_start_period", "calibration_start_period")
-    CALIBRATION_END_PERIOD = ("calibration_end_period", "calibration_end_period")
+    PERIOD = ("period", ["calibration_start_period", "calibration_end_period"])
     STOP_CRITERIA = ("stop_criteria", "calibrationstopcriteria__value")
+
 
     @property
     def orm_field(self):
