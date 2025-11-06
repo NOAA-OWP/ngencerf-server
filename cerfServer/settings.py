@@ -15,6 +15,7 @@ import re
 from datetime import timedelta, datetime
 from enum import StrEnum, auto
 
+from datetimerange import DateTimeRange
 from dotenv import load_dotenv
 
 from calibration.enums_vanilla import NgenEnvironmentEnum, ScriptEnum, JobType
@@ -223,6 +224,9 @@ FORCING_DATA_DIRS_RETRO = {
     "NWM Retrospective": 's3://ngwpc-forcing/retrospective_2.2'
 }
 
+# Default time range for BMI forcing data
+FORCING_BMI_DATE_RANGE = DateTimeRange("2023-01-01T00:00:00", "2023-01-07T23:59:59")
+
 # Translate urls from the format s3://bucket-name to S3_MOUNT_POINT/bucket
 S3_MOUNT_POINT = os.getenv('S3_MOUNT_POINT', os.path.join(os.path.expanduser("~"), 's3'))
 
@@ -261,10 +265,10 @@ os.makedirs(NGEN_LOGGING_DIR, exist_ok=True)
 NGEN_STATIC_DIR = os.path.join(NGEN_CAL_MOUNT_POINT, 'ngen-static-files')
 NGEN_CAL_WORK_DIR = os.path.join(NGEN_CAL_MOUNT_POINT, 'ngen-cal-work')
 NGEN_VERIFICATION_WORK_DIR = os.path.join(NGEN_CAL_MOUNT_POINT, 'verification_work')
-NGEN_FORECAST_WORK_DIR = os.path.join(NGEN_CAL_MOUNT_POINT, 'forecast_work')
-os.makedirs(NGEN_FORECAST_WORK_DIR, exist_ok=True)
+NGEN_BMI_FORCING_WORK_DIR = os.path.join(NGEN_CAL_MOUNT_POINT, 'bmi_forcing_work')
+os.makedirs(NGEN_BMI_FORCING_WORK_DIR, exist_ok=True)
 # On PW, the server runs as root, but the Slurm jobs do not, so we need to adjust the permissions
-os.chmod(NGEN_FORECAST_WORK_DIR, 0o777)
+os.chmod(NGEN_BMI_FORCING_WORK_DIR, 0o777)
 
 # -----------------------------
 # Forcing environments

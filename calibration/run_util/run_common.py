@@ -16,7 +16,7 @@ from django.db import transaction
 from mswm.manager import build_fcst, build_calib
 from rest_framework.response import Response
 
-from calibration.enums import StatusEnum, ValidationType, SlurmStatusEnum, ForcingSourceEnum, ObservationalSourceEnum
+from calibration.enums import StatusEnum, ValidationType, SlurmStatusEnum, ForcingSourceEnum, ObservationalSourceEnum, DomainEnum
 from calibration.enums_vanilla import JobType
 from calibration.models import CalibrationRun, ValidationRun, Iteration, ForecastRun, ColdStartRun, VerificationRun
 from calibration.models.base_run import BaseRun
@@ -775,16 +775,19 @@ def final_preprocessing_for_calibration(run: CalibrationRun) -> list[str]:
     errors: list[str] = []
 
     # Subset forcing data
-    if run.forcing_source_requested != ForcingSourceEnum.UPLOAD.db_instance:
-        subset_directory_by_time_range(
-            run,
-            run.forcing_eds_dir_path,
-            get_forcing_dir_for_job(run),
-            DateTimeRange(
-                min(run.calibration_start_period, run.validation_start_period),
-                max(run.calibration_end_period, run.validation_end_period)
+    is_conus = run.gage.domain == DomainEnum.CONUS.db_instance
+    is_aorc = run.forcing_source_requested == ForcingSourceEnum.AORC.db_instance
+    if not is_conus or not is_aorc:
+        if run.forcing_source_requested != ForcingSourceEnum.UPLOAD.db_instance:
+            subset_directory_by_time_range(
+                run,
+                run.forcing_eds_dir_path,
+                get_forcing_dir_for_job(run),
+                DateTimeRange(
+                    min(run.calibration_start_period, run.validation_start_period),
+                    max(run.calibration_end_period, run.validation_end_period)
+                )
             )
-        )
 
     # Subset observational data
     if run.observational_source != ObservationalSourceEnum.UPLOAD.db_instance:

@@ -132,15 +132,15 @@ cd .. && rm -rf tmp-nwm-msw-mgr
 ```
 
 Copy the directory `https://github.com/NGWPC/ngen-forcing/tree/development/NextGen_Forcings_Engine_BMI/BMI_NextGen_Configs/config_templates` 
-and all its contents to the `/ngencerf/data/ngen-static-files` directory as `forecast_forcing_templates`
+and all its contents to the `/ngencerf/data/ngen-static-files` directory as `bmi_forcing_templates`
 
 ```
 cd /ngencerf/data/ngen-static-files (for PW, use /ngencerf-app/data/ngen-cal-data/ngen-static-files)
-rm -rf forecast_forcing_templates
+rm -rf bmi_forcing_templates
 git clone --depth 1 --filter=blob:none --sparse -b development https://github.com/NGWPC/ngen-forcing.git tmp-ngen-forcing && \
 cd tmp-ngen-forcing && \
 git sparse-checkout set NextGen_Forcings_Engine_BMI/BMI_NextGen_Configs/config_templates && \
-mv NextGen_Forcings_Engine_BMI/BMI_NextGen_Configs/config_templates ../forecast_forcing_templates && \
+mv NextGen_Forcings_Engine_BMI/BMI_NextGen_Configs/config_templates ../bmi_forcing_templates && \
 cd .. && rm -rf tmp-ngen-forcing
 ```
 
@@ -162,7 +162,7 @@ When done, your `ngen-static-files` directory should look something like this
 
 
 ngen-static-files/
-├── forecast_forcing_templates
+├── bmi_forcing_templates
 ├── module_parameter_files
 │  ├── lasam
 │  ├── noah-owp-modular

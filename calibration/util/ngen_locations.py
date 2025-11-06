@@ -15,7 +15,7 @@ static_dirs = [
     NWM_RETROSPECTIVE_DIR := os.path.join(settings.NGEN_STATIC_DIR, 'nwm_retrospective'),
     PARQUET_DIR := os.path.join(settings.NGEN_STATIC_DIR, 'parquet'),
     NGEN_MODULE_PARAMETERS := os.path.join(settings.NGEN_STATIC_DIR, 'module_parameter_files'),
-    FORECAST_FORCING_TEMPLATES := os.path.join(settings.NGEN_STATIC_DIR, 'forecast_forcing_templates'),
+    BMI_FORCING_TEMPLATES := os.path.join(settings.NGEN_STATIC_DIR, 'bmi_forcing_templates'),
     VERF_DATA := os.path.join(settings.NGEN_STATIC_DIR, 'verification_data')
 ]
 
@@ -279,10 +279,6 @@ def get_forecast_output_dir(forecast_run: ForecastRun) -> str:
 
 def get_forecast_forcing_config_file(forecast_run: ForecastRun) -> str:
     return os.path.join(get_forecast_dir(forecast_run), f'forecast_forcing_config.yaml')
-
-
-# def get_forecast_forcing_cycle_config_file(forecast_run: ForecastRun) -> str:
-#     return os.path.join(get_forecast_dir(forecast_run), f'{forecast_run.cycle.internal_name}_config.yaml')
 
 
 def get_cold_start_output_file(forecast_run: ForecastRun) -> str | None:

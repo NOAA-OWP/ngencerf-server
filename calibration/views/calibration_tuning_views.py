@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 import pandas as pd
 from datetimerange import DateTimeRange
+from django.conf import settings
 from django.db import transaction
 from django.db.models import QuerySet, Prefetch
 from drf_spectacular.utils import OpenApiParameter, extend_schema, OpenApiResponse
@@ -17,7 +18,7 @@ from rest_framework.decorators import api_view
 from rest_framework.request import Request
 from rest_framework.response import Response
 
-from calibration.enums import StatusEnum
+from calibration.enums import StatusEnum, DomainEnum, ForcingSourceEnum
 from calibration.enums_vanilla import JobType
 from calibration.models import CalibrationFormulation, CalibrationParameter, CalibrationRun
 from calibration.util import cloud_util
@@ -262,12 +263,15 @@ def compute_time_range(run: CalibrationRun) -> dict[str, datetime]:
         f"forcing_path={forcing_path}"
     )
 
-    if not observation_path or not forcing_path:
+    # TODO More cleanup when we are exclusively using bmi forcing
+    is_conus = run.gage.domain == DomainEnum.CONUS.db_instance
+    is_aorc = run.forcing_source_requested == ForcingSourceEnum.AORC.db_instance
+    if not observation_path or ((not is_conus or not is_aorc) and not forcing_path):
         return {}
 
     # If both paths are available, calculate intersection and update run
     daterange_intersection_start = time.time()
-    daterange = get_date_range_intersection(observation_path, forcing_path)
+    daterange = get_date_range_intersection(observation_path, None if is_conus and is_aorc else forcing_path)
     logger.info(f"Date range intersection completed in {time.time() - daterange_intersection_start:.2f}s")
 
     if daterange:
@@ -1102,7 +1106,6 @@ def get_forcing_date_range(forcing_dir_path: str) -> DateTimeRange | None:
     :param forcing_dir_path: Directory path or cloud URL containing forcing data files.
     :return: DateTimeRange covering all CSV files, or None if no files found.
     """
-    print('forcing_dir_path', forcing_dir_path)
     csv_files = cloud_util.list_files(forcing_dir_path, pattern="*.csv")
     if not csv_files:
         return None
@@ -1129,7 +1132,7 @@ def get_observation_date_range(observational_filepath: str) -> DateTimeRange:
     return get_csv_daterange(observational_filepath)
 
 
-def get_date_range_intersection(observational_file_path: str, forcing_dir_path: str) -> DateTimeRange | None:
+def get_date_range_intersection(observational_file_path: str, forcing_dir_path: str = None) -> DateTimeRange | None:
     """
     Calculates the intersection of date ranges between observational and forcing data.
     Supports both local paths and cloud URLs.
@@ -1143,7 +1146,7 @@ def get_date_range_intersection(observational_file_path: str, forcing_dir_path: 
     logger.debug(f"obs_range: {obs_range}")
 
     # Calculate the date range for the forcing data
-    forcing_range = get_forcing_date_range(forcing_dir_path)
+    forcing_range = get_forcing_date_range(forcing_dir_path) if forcing_dir_path else settings.FORCING_BMI_DATE_RANGE
     logger.debug(f"forcing_range: {forcing_range}")
 
     # Compute the intersection of the two ranges

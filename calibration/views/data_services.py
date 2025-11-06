@@ -7,7 +7,7 @@ from django.conf import settings
 from django.db import transaction
 from django.db.models import QuerySet
 
-from calibration.enums import ForcingSourceEnum
+from calibration.enums import ForcingSourceEnum, DomainEnum
 from calibration.models import CalibrationParameter, CalibrationFormulation, CalibrationRun
 from calibration.util.caching import get_cached_module_by_name, get_cached_modules_by_id
 from calibration.util.calibration_validators import ModuleDataListSerializer, S3FileValidator
@@ -207,6 +207,11 @@ def get_forcing_data_from_s3(run: CalibrationRun, forcing_source_name: str):
     :param forcing_source_name: The name of the forcing source to retrieve data for.
     :raises DataServicesException: If the forcing data cannot be found in the local S3 directories.
     """
+    # For now, use BMI Forcing only if Conus
+    if run.gage.domain == DomainEnum.CONUS.db_instance and run.forcing_source_requested == ForcingSourceEnum.AORC.db_instance:
+        print("Skipping forcing retrieval")
+        return
+
     forcing_containers = (
         settings.FORCING_DATA_DIRS_AORC
         if forcing_source_name == ForcingSourceEnum.AORC.value

@@ -11,7 +11,7 @@ from django.db import transaction
 from django.db.models import F
 from toml import TomlEncoder
 
-from calibration.enums import StatusEnum, ForcingSourceEnum, ObservationalSourceEnum, DataTypeEnum, GeopackageSourceEnum
+from calibration.enums import StatusEnum, ForcingSourceEnum, ObservationalSourceEnum, DataTypeEnum, GeopackageSourceEnum, DomainEnum
 from calibration.enums_vanilla import NgenEnvironmentEnum
 from calibration.models import CalibrationOptimizationInput, CalibrationStopCriteria, CalibrationSlothParam, \
     CalibrationParameter, CalibrationFormulation, CalibrationRun
@@ -22,13 +22,13 @@ from calibration.util.ngen_locations import CFE_LIB, TOPMD_LIB, SFT_LIB, SLOTH_L
     PARQUET_DIR, get_forcing_dir_for_job, get_observational_dir_for_job, \
     get_observational_file_for_job, get_geopackage_dir_for_job, \
     PET_LIB, SNOW17_LIB, SAC_LIB, NWM_RETROSPECTIVE_DIR, get_bmi_config_dir_for_module, get_bmi_config_key, UEB_LIB, NGEN_MODULE_PARAMETERS, \
-    PARALLEL_NGEN_EXE, PARTITION_GENERATOR_EXE
+    PARALLEL_NGEN_EXE, PARTITION_GENERATOR_EXE, BMI_FORCING_TEMPLATES
 from calibration.views.calibration_formulation_views import validate_formulation
 from calibration.views.calibration_secondary_data_views import should_generate_swe, should_generate_soil_moisture
 from calibration.views.calibration_tuning_views import get_full_evaluation_date_range, validate_time_range_against_data
 from calibration.views.called_from import called_from
 from calibration.views.common import TOKEN_NGEN_SCOPE, generate_custom_token, SLOTH, format_datetime, join_with_or, ErrorReport, readonly_transaction
-from cerfServer.settings import NGEN_ENVIRONMENT
+from cerfServer.settings import NGEN_ENVIRONMENT, NGEN_BMI_FORCING_WORK_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -101,8 +101,12 @@ CONFIG_TEMPLATE = {
     },
 
     "Forcing": {
-        "forcing_provider": "csv",
-        "forcing_dir": ""
+        "forcing_provider": "",
+        "root_dir": NGEN_BMI_FORCING_WORK_DIR,
+        "forcing_configuration": "",
+        "forcing_dir": "",
+        "forcing_template_dir": BMI_FORCING_TEMPLATES,
+
     },
 
     "DataFile": {
@@ -247,16 +251,31 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
 
             # Determine the source of the forcing data (user-uploaded or EDS)
             if not is_missing(run.forcing_source_requested, 'Forcing source', error_object):
-                forcing_dir = get_forcing_dir_for_job(run)
+                is_conus = run.gage.domain == DomainEnum.CONUS.db_instance
+                is_aorc = run.forcing_source_requested == ForcingSourceEnum.AORC.db_instance
+                if not is_conus or not is_aorc:
+                    print("Setting forcing dir for not Conus or not AORC")
+                    forcing_dir = get_forcing_dir_for_job(run)
+                    forcing_provider = 'csv'
+                    forcing_configuration = ""
+                else:
+                    print("Not setting forcing dir for Conus and AORC")
+                    forcing_dir = None
+                    forcing_provider = 'bmi'
+                    forcing_configuration = "aorc"
+
                 is_forcing_upload = run.forcing_source_requested == ForcingSourceEnum.UPLOAD.db_instance
 
                 if is_forcing_upload and (not forcing_dir or not os.path.exists(forcing_dir)):
                     error_object.add_warning('Forcing data must be uploaded')
                 else:
-                    if not is_missing(run.forcing_eds_dir_path, "Forcing directory", error_object):
-                        pass
+                    if not is_conus or not is_aorc:
+                        if not is_missing(run.forcing_eds_dir_path, "Forcing directory", error_object):
+                            pass
 
                 forcing['forcing_dir'] = forcing_dir
+                forcing['forcing_provider'] = forcing_provider
+                forcing['forcing_configuration'] = forcing_configuration
 
             # Determine the source of observational data (user-uploaded or EDS)
             if not is_missing(run.observational_source, 'Observational source', error_object):
@@ -401,7 +420,7 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
         # This field is not required from user
         calibration['save_output_iter'] = int(run.save_output_iteration or 0)
 
-        calibration['restart'] = 0  # TODO ???
+        calibration['restart'] = 0
 
         stop_criteria = CalibrationStopCriteria.objects.filter(calibration_run=run).first()
         if not is_missing(stop_criteria, 'Stop criteria (number of iterations)', error_object, have_LSTM_flag=have_LSTM_flag):
@@ -412,7 +431,7 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
             error_object.add_warning(
                 f"The plot iteration frequency, {run.save_plot_iteration_frequency}, must be <= the stop criteria (number of iteration) {stop_criteria.value}")
 
-        calibration['start_iteration'] = 0  # TODO ????'
+        calibration['start_iteration'] = 0
 
         if run.streamflow_threshold:
             calibration['streamflow_threshold'] = run.streamflow_threshold

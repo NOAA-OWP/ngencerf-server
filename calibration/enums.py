@@ -115,6 +115,7 @@ class DomainEnum(AbstractEnum):
     """
 
     PUERTO_RICO = 'Puerto_Rico'
+    CONUS = 'CONUS'
 
     @classmethod
     def get_aliases(cls):
