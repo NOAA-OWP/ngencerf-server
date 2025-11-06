@@ -999,7 +999,7 @@ def get_forecast_jobs_internal(
         rows = list(
             ForecastRun.objects
             .filter(query)
-            .order_by(order_by)
+            .order_by(*order_by)
             .values(
                 'id',
                 'calibration_run_id',
@@ -1214,7 +1214,7 @@ def get_verification_jobs_internal(
         rows = list(
             VerificationRun.objects
             .filter(query)
-            .order_by(order_by)
+            .order_by(*order_by)
             .values(
                 "id",
                 "forecast_run_id",
