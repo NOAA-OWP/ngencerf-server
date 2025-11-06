@@ -16,7 +16,7 @@ from calibration.util.caching import get_cached_modules_by_id
 from calibration.util.calibration_validators import GetCalibrationJobsForEvaluationResponseSerializer, ErrorResponseSerializer, \
     GetCalibrationJobsResponseSerializer, CalibrationRunSerializer, GetValidationJobsResponseSerializer, \
     GetForecastJobsResponseSerializer, GetVerificationJobsResponseSerializer, CalibrationPaginationSerializer, \
-    ForecastPaginationSerializer, VerificationPaginationSerializer
+    ForecastPaginationSerializer, VerificationPaginationSerializer, GetCalibrationJobIDsResponseSerializer
 from calibration.views.calibration_evaluation_views import downloadable_statuses
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import handle_exceptions, validate_request, validate_response, truncate_large_fields, get_calibration_run, \
@@ -179,7 +179,15 @@ while prefetching makes transitions instantaneous.
 @extend_schema(
     request=CalibrationPaginationSerializer,
     responses={
-        200: GetCalibrationJobsForEvaluationResponseSerializer,
+        200: OpenApiResponse(
+            response={
+                "oneOf": [
+                    GetCalibrationJobsForEvaluationResponseSerializer,
+                    GetCalibrationJobIDsResponseSerializer,
+                ]
+            },
+            description="Full job list or ID-only list depending on ids_only flag"
+        ),
         400: OpenApiResponse(
             response=ErrorResponseSerializer,
             description="Validation error or parsing error"
@@ -211,6 +219,7 @@ def get_calibration_jobs_for_evaluation(request: Request) -> Response:
     offset = validator.get("offset", 0)
     filters = validator.get("filters") or {}
     sort = validator.get("sort")
+    ids_only = validator.get("ids_only")
     filters, sort = _normalize_filters_and_sort(filters, sort)
 
     jobs, total_count = get_jobs(
@@ -221,7 +230,8 @@ def get_calibration_jobs_for_evaluation(request: Request) -> Response:
         limit=limit,
         offset=offset,
         filters=filters,
-        sort=sort
+        sort=sort,
+        ids_only=ids_only
     )
 
     response = {
@@ -229,7 +239,12 @@ def get_calibration_jobs_for_evaluation(request: Request) -> Response:
         "total_count": total_count
     }
 
-    response_validator, error_response = validate_response(GetCalibrationJobsForEvaluationResponseSerializer, response, fields_to_truncate=['jobs'])
+    if ids_only:
+        serializer_class = GetCalibrationJobIDsResponseSerializer
+    else:
+        serializer_class = GetCalibrationJobsForEvaluationResponseSerializer
+
+    response_validator, error_response = validate_response(serializer_class, response, fields_to_truncate=['jobs'])
     if error_response:
         return error_response
 
@@ -275,6 +290,7 @@ def get_calibration_jobs_for_forecast(request: Request) -> Response:
     offset = validator.get("offset", 0)
     filters = validator.get("filters") or {}
     sort = validator.get("sort")
+    ids_only = validator.get("ids_only")
     filters, sort = _normalize_filters_and_sort(filters, sort)
 
     jobs, total_count = get_jobs(
@@ -285,7 +301,8 @@ def get_calibration_jobs_for_forecast(request: Request) -> Response:
         limit=limit,
         offset=offset,
         filters=filters,
-        sort=sort
+        sort=sort,
+        ids_only=ids_only
     )
 
     response = {
@@ -293,7 +310,12 @@ def get_calibration_jobs_for_forecast(request: Request) -> Response:
         "total_count": total_count
     }
 
-    response_validator, error_response = validate_response(GetCalibrationJobsResponseSerializer, response, fields_to_truncate=['jobs'], max_length=10)
+    if ids_only:
+        serializer_class = GetCalibrationJobIDsResponseSerializer
+    else:
+        serializer_class = GetCalibrationJobsResponseSerializer
+
+    response_validator, error_response = validate_response(serializer_class, response, fields_to_truncate=['jobs'], max_length=10)
     if error_response:
         return error_response
 
@@ -307,7 +329,15 @@ def get_calibration_jobs_for_forecast(request: Request) -> Response:
 @extend_schema(
     request=CalibrationPaginationSerializer,
     responses={
-        200: GetCalibrationJobsResponseSerializer,
+        200: OpenApiResponse(
+            response={
+                "oneOf": [
+                    GetCalibrationJobsResponseSerializer,
+                    GetCalibrationJobIDsResponseSerializer,
+                ]
+            },
+            description="Full job list or ID-only list depending on ids_only flag"
+        ),
         400: OpenApiResponse(
             response=ErrorResponseSerializer,
             description="Validation error or parsing error"
@@ -337,6 +367,7 @@ def get_calibration_jobs(request):
     offset = validator.get("offset", 0)
     filters = validator.get("filters") or {}
     sort = validator.get("sort")
+    ids_only = validator.get("ids_only")
     filters, sort = _normalize_filters_and_sort(filters, sort)
 
     jobs, total_count = get_jobs(
@@ -347,7 +378,8 @@ def get_calibration_jobs(request):
         limit=limit,
         offset=offset,
         filters=filters,
-        sort=sort
+        sort=sort,
+        ids_only=ids_only
     )
 
     response = {
@@ -355,7 +387,12 @@ def get_calibration_jobs(request):
         "total_count": total_count
     }
 
-    response_validator, error_response = validate_response(GetCalibrationJobsResponseSerializer, response, fields_to_truncate=['jobs'], max_length=10)
+    if ids_only:
+        serializer_class = GetCalibrationJobIDsResponseSerializer
+    else:
+        serializer_class = GetCalibrationJobsResponseSerializer
+
+    response_validator, error_response = validate_response(serializer_class, response, fields_to_truncate=['jobs'], max_length=10)
     if error_response:
         return error_response
 
@@ -639,7 +676,8 @@ def get_jobs(
         limit: int | None = None,
         offset: int = 0,
         filters: dict[str, Any] | None = None,
-        sort: dict[str, str] | None = None
+        sort: dict[str, str] | None = None,
+        ids_only: bool = False,
 ) -> tuple[list[dict[str, Any]], int]:
     """
     Retrieves calibration jobs for the given user with optional status filtering,
@@ -658,6 +696,7 @@ def get_jobs(
     :param offset: Optional number of rows to skip before returning results (for pagination).
     :param filters: Optional dict of filter criteria (e.g. gage_id, status, modules).
     :param sort: Optional dict { "field": "created_at", "direction": "asc" or "desc" }.
+    :param ids_only: Only return the ids of the calibration jobs
     :return: Tuple (results, total_count). total_count reflects total rows BEFORE pagination.
     """
     filters = filters or {}
@@ -688,6 +727,16 @@ def get_jobs(
         query = apply_calibration_filters(query, filters)
 
         base_qs = CalibrationRun.objects.filter(query)
+
+        if ids_only:
+            total_count = base_qs.count()
+
+            # Apply sorting and pagination if specified
+            ids_qs = base_qs.order_by(*order_by).values_list("id", flat=True)
+            if limit:
+                ids_qs = ids_qs[offset: offset + limit]
+
+            return list(ids_qs), total_count
 
         # Only include jobs where both Valid_control and Valid_best jobs are DONE
         if include_validation_data == GetValidationJobsScope.DONE:

@@ -438,6 +438,11 @@ class GetCalibrationJobsResponseSerializer(BaseSerializer):
     total_count = serializers.IntegerField(required=True)
 
 
+class GetCalibrationJobIDsResponseSerializer(BaseSerializer):
+    jobs = serializers.ListField(child=serializers.IntegerField(), required=True, allow_empty=True)
+    total_count = serializers.IntegerField(required=True)
+
+
 class GetCalibrationJobsForEvaluationResponseSerializer(BaseSerializer):
     jobs = serializers.ListSerializer(child=CalibrationJobsForValidationResponseSerializer(), required=True, allow_empty=True)
     total_count = serializers.IntegerField(required=True)
@@ -609,6 +614,7 @@ class PaginationSerializer(BaseSerializer):
 
 class CalibrationPaginationSerializer(PaginationSerializer):
     sort = CalibrationSortSerializer(required=False, allow_null=True)
+    ids_only = serializers.BooleanField(required=False, default=False)
 
 
 class ForecastPaginationSerializer(PaginationSerializer):
