@@ -210,7 +210,6 @@ def get_parameters_for_export(run: CalibrationRun) -> list[dict]:
             "calibration_formulation__module_id"
         )
     )
-    print('params', params)
 
     result = []
     for p in params:
@@ -223,7 +222,6 @@ def get_parameters_for_export(run: CalibrationRun) -> list[dict]:
             "maximum": p["maximum"],
             "module": module_name,
         })
-    print('result', result)
     return result
 
 

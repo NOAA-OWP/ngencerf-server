@@ -209,7 +209,7 @@ def get_forcing_data_from_s3(run: CalibrationRun, forcing_source_name: str):
     """
     # For now, use BMI Forcing only if Conus
     if run.gage.domain == DomainEnum.CONUS.db_instance and run.forcing_source_requested == ForcingSourceEnum.AORC.db_instance:
-        print("Skipping forcing retrieval")
+        logger.info("Skipping forcing retrieval for CONUS and AORC")
         return
 
     forcing_containers = (

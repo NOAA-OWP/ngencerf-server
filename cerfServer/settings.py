@@ -225,7 +225,7 @@ FORCING_DATA_DIRS_RETRO = {
 }
 
 # Default time range for BMI forcing data
-FORCING_BMI_DATE_RANGE = DateTimeRange("2023-01-01T00:00:00", "2023-01-07T23:59:59")
+FORCING_BMI_DATE_RANGE = DateTimeRange("1980-01-01T00:00:00", "2024-12-31T23:59:59")
 
 # Translate urls from the format s3://bucket-name to S3_MOUNT_POINT/bucket
 S3_MOUNT_POINT = os.getenv('S3_MOUNT_POINT', os.path.join(os.path.expanduser("~"), 's3'))

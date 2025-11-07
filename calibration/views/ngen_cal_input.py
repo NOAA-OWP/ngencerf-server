@@ -254,12 +254,12 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
                 is_conus = run.gage.domain == DomainEnum.CONUS.db_instance
                 is_aorc = run.forcing_source_requested == ForcingSourceEnum.AORC.db_instance
                 if not is_conus or not is_aorc:
-                    print("Setting forcing dir for not Conus or not AORC")
+                    logger.info("Using CSV forcing for not Conus or not AORC")
                     forcing_dir = get_forcing_dir_for_job(run)
                     forcing_provider = 'csv'
                     forcing_configuration = ""
                 else:
-                    print("Not setting forcing dir for Conus and AORC")
+                    logger.info("Using BMI forcing for Conus and AORC")
                     forcing_dir = None
                     forcing_provider = 'bmi'
                     forcing_configuration = "aorc"
