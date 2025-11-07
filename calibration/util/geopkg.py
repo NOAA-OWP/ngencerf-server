@@ -338,40 +338,47 @@ def normalize_gpkg(gpkg_path: str, output_path: str, *, output_is_dir: bool = Fa
             logger.info(f"Overwriting existing file: {output_path}")
             os.remove(output_path)
 
-        layers = list_layers(local_path)
+        # --- Show layers before normalization ---
+        try:
+            before_layers = list_layers(local_path)
+            logger.info(f"Layers before normalization ({len(before_layers)}): {before_layers}")
+        except Exception as e:
+            logger.warning(f"Could not list layers before normalization for {_pp(orig_path, local_path)}: {e}")
+            before_layers = []
 
         spatial_layers = []
         non_spatial_layers = []
 
         # First pass: identify spatial vs non-spatial and write spatial layers
-        for layer_name in layers:
-            try:
-                gdf = safe_read_gpkg(local_path, layer=layer_name)
-            except Exception as e:
-                logger.error(f"Could not read layer '{layer_name}' from {_pp(orig_path, local_path)}. Error: {e}")
-                traceback.print_exc()
-                continue
+        with fiona.Env():  # ensures GDAL handles close at block exit
+            for layer_name in before_layers:
+                try:
+                    gdf = safe_read_gpkg(local_path, layer=layer_name)
+                except Exception as e:
+                    logger.error(f"Could not read layer '{layer_name}' from {_pp(orig_path, local_path)}. Error: {e}")
+                    traceback.print_exc()
+                    continue
 
-            # Detect whether it's non-spatial
-            if not isinstance(gdf, gpd.GeoDataFrame) or gdf.geometry.name not in gdf.columns:
-                non_spatial_layers.append(layer_name)
-                continue
+                # Detect whether it's non-spatial
+                if not isinstance(gdf, gpd.GeoDataFrame) or gdf.geometry.name not in gdf.columns:
+                    non_spatial_layers.append(layer_name)
+                    continue
 
-            # Reproject or copy as-is
-            if gdf.crs is None:
-                logger.warning(f"Layer '{layer_name}' has no CRS in {_pp(orig_path, local_path)}. Saving as-is.")
-                gdf_out = gdf
-            elif gdf.crs.to_epsg() == 5070:
-                logger.info(f"Layer '{layer_name}' is already EPSG:5070 in {_pp(orig_path, local_path)}. Saving as-is.")
-                gdf_out = gdf
-            else:
-                logger.info(f"Reprojecting layer '{layer_name}' from EPSG:{gdf.crs.to_epsg()} to EPSG:4326 "
-                            f"for {_pp(orig_path, local_path)}.")
-                gdf_out = gdf.to_crs(epsg=4326)
+                # Reproject or copy as-is
+                if gdf.crs is None:
+                    logger.warning(f"Layer '{layer_name}' has no CRS in {_pp(orig_path, local_path)}. Saving as-is.")
+                    gdf_out = gdf
+                elif gdf.crs.to_epsg() == 5070:
+                    logger.info(f"Layer '{layer_name}' is already EPSG:5070 in {_pp(orig_path, local_path)}. Saving as-is.")
+                    gdf_out = gdf
+                else:
+                    logger.info(f"Reprojecting layer '{layer_name}' from EPSG:{gdf.crs.to_epsg()} to EPSG:4326 "
+                                f"for {_pp(orig_path, local_path)}.")
+                    gdf_out = gdf.to_crs(epsg=4326)
 
-            gdf_out.to_file(Path(output_path), layer=layer_name, driver="GPKG")
+                gdf_out.to_file(Path(output_path), layer=layer_name, driver="GPKG")
 
-            spatial_layers.append(layer_name)
+                spatial_layers.append(layer_name)
 
         # Second pass: copy non-spatial tables using SQLite
         with sqlite3.connect(local_path) as src_conn, sqlite3.connect(output_path) as dst_conn:
@@ -382,6 +389,14 @@ def normalize_gpkg(gpkg_path: str, output_path: str, *, output_is_dir: bool = Fa
                 except Exception as e:
                     logger.error(f"Failed to copy non-spatial table '{table}' from {_pp(orig_path, local_path)}. Error: {e}")
                     traceback.print_exc()
+
+        # --- Show layers after normalization ---
+        try:
+            after_layers = list_layers(output_path)
+            logger.info(f"Layers after normalization ({len(after_layers)}): {after_layers}")
+        except Exception as e:
+            logger.warning(f"Could not list layers after normalization for '{output_path}': {e}")
+
 
         logger.info(f"Normalized GeoPackage written to: {output_path}")
 
