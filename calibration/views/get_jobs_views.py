@@ -135,7 +135,7 @@ Minimal example:
 
 Allowed sort fields (must match what backend supports):
 
-- Calibration: id, gage_id, user_formulation_name, submit_date, create_date,
+- Calibration: id, gage_id, formulation_name, submit_date, create_date,
   job_genesis, status, period, stop_criteria, validation_runs
 - Forecast: id, gage_id, submit_date, create_date, cycle_date, configuration, domain_name, status
 - Verification: id, forecast_run_id, submit_date, create_date, status
@@ -735,12 +735,11 @@ def get_jobs(
 
         query = apply_calibration_filters(query, filters)
 
-
         # ───── annotate validation_run_count for sorting ─────
         base_qs = CalibrationRun.objects.filter(query).annotate(
             validation_run_count=Count(
-                "validationrun",
-                filter=~Q(validationrun__validation_type=ValidationType.VALID_CONTROL.value),
+                "validations",
+                filter=~Q(validations__validation_type=ValidationType.VALID_CONTROL.value),
                 distinct=True
             )
         )

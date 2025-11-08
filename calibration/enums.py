@@ -271,14 +271,17 @@ class NgenLogging(AbstractEnum):
 
 
 class ForecastSortField(Enum):
-    ID = ("id", "id")
+    FORECAST_RUN_ID = ("forecast_run_id", "id")
     GAGE_ID = ("gage_id", "calibration_run__gage__gage_id")
+    CALIBRATION_RUN_ID = ("calibration_run_id", "calibration_run__id")
     SUBMIT_DATE = ("submit_date", "submit_date")
-    CREATE_DATE = ("create_date", "created_at")
     CYCLE_DATE = ("cycle_date", "cycle_date")
     CONFIGURATION = ("configuration", "configuration__name")
     DOMAIN_NAME = ("domain_name", "configuration__domain__name")
-    STATUS = ("status", "status__name")
+    FORECAST_STATUS = ("forecast_status", "status__name")
+    COLD_START_DATE = ("cold_start_date", "cold_start_run__cold_start_date")
+    COLD_START_STATUS = ("cold_start_status", "cold_start_run__status__name")
+    COLD_START_SUBMIT_DATE = ("cold_start_submit_date", "cold_start_run__submit_date")
 
     @property
     def orm_field(self):
@@ -295,12 +298,12 @@ class ForecastSortField(Enum):
 
 
 class CalibrationSortField(Enum):
-    ID = ("id", "id")
+    CALIBRATION_RUN_ID = ("calibration_run_id", "id")
     GAGE_ID = ("gage_id", "gage__gage_id")
     DOMAIN_NAME = ("domain_name", "gage__domain__name")
-    USER_FORMULATION_NAME = ("user_formulation_name", "user_formulation_name")
+    FORMULATION_NAME = ("formulation_name", "user_formulation_name")
     SUBMIT_DATE = ("submit_date", "submit_date")
-    CREATE_DATE = ("create_date", "created_at")
+    CREATED_AT = ("created_at", "created_at")
     LAST_UPDATED_ON = ("last_updated_on", "updated_at")
     JOB_GENESIS = ("job_genesis", "job_genesis")
     STATUS = ("status", "status__name")
@@ -327,11 +330,11 @@ class CalibrationSortField(Enum):
 
 
 class VerificationSortField(Enum):
-    ID = ("id", "id")
+    VERIFICATION_RUN_ID = ("verification_run_id", "id")
     FORECAST_RUN_ID = ("forecast_run_id", "forecast_run__id")
     STATUS = ("status", "status__name")
     SUBMIT_DATE = ("submit_date", "submit_date")
-    CREATE_DATE = ("create_date", "created_at")
+    CREATED_AT = ("created_at", "created_at")
 
     @property
     def orm_field(self):

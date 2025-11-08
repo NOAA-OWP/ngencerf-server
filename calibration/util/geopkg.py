@@ -397,7 +397,6 @@ def normalize_gpkg(gpkg_path: str, output_path: str, *, output_is_dir: bool = Fa
         except Exception as e:
             logger.warning(f"Could not list layers after normalization for '{output_path}': {e}")
 
-
         logger.info(f"Normalized GeoPackage written to: {output_path}")
 
 
