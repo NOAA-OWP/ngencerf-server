@@ -51,7 +51,7 @@ class CalibrationRun(BaseRun):  # Inherit from BaseRun
             models.Index(fields=['owner', 'status', 'is_archived'], name='idx_run_owner_status_archived'),
             models.Index(fields=['owner', 'is_archived'], name='idx_run_owner_archived'),
             models.Index(fields=['owner', 'is_archived', 'status', '-id'], name='idx_run_owner_arch_stat_id'),
-
+            models.Index(fields=['owner', 'is_archived', 'created_at'], name='idx_run_owner_arch_created'),
         ]
 
     def __str__(self):
