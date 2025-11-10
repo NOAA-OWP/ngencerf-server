@@ -1072,21 +1072,29 @@ def _build_filters(cmd_args) -> dict:
     # ───────────── Module filter ─────────────
     module_op = getattr(cmd_args, "module_operator", None)
     module_list = getattr(cmd_args, "module_list", None)
-    if module_op or module_list:
-        if not module_op or not module_list:
-            print("Error: --module-operator and --module-list must be used together.")
+
+    # Only proceed if the user actually provided a module list
+    if module_list:
+        if not module_op:
+            print("Error: --module-operator is required when using --module-list.")
             sys.exit(1)
         filters["module_filter"] = {
             "operator": module_op,
             "modules": module_list,
         }
+    # If neither provided, skip adding module_filter entirely
 
     # ───────────── Date filter ─────────────
     date_op = getattr(cmd_args, "date_operator", None)
     date = getattr(cmd_args, "date", None)
     date_start = getattr(cmd_args, "date_start", None)
     date_end = getattr(cmd_args, "date_end", None)
-    if date_op:
+
+    if any([date_op, date, date_start, date_end]):
+        if not date_op:
+            print("Error: --date-operator is required when specifying date filters.")
+            sys.exit(1)
+
         match date_op:
             case "before" | "after":
                 if not date:
@@ -1108,7 +1116,12 @@ def _build_filters(cmd_args) -> dict:
     id_val = getattr(cmd_args, "id", None)
     id_start = getattr(cmd_args, "id_start", None)
     id_end = getattr(cmd_args, "id_end", None)
-    if id_op:
+
+    if any([id_op, id_val, id_start, id_end]):
+        if not id_op:
+            print("Error: --id-operator is required when specifying ID filters.")
+            sys.exit(1)
+
         match id_op:
             case "before" | "after":
                 if id_val is None:
