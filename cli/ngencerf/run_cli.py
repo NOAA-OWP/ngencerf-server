@@ -7,7 +7,14 @@ for managing calibration jobs via a REST API.
 """
 
 import argparse
+import json
+import os
 import sys
+
+import yaml
+
+from ngencerf.calibration_sort_fields import CalibrationSortField
+
 
 from ngencerf.cli_functions import (
     import_job,
@@ -415,18 +422,11 @@ def main():
     sort_group = jobs_parser.add_argument_group("sorting", "Sort job results.")
     sort_group.add_argument(
         "--sort-field",
-        choices=[
-            "gage_id",
-            "user_formulation_name",
-            "submit_date",
-            "created_at",
-            "job_genesis",
-            "status",
-            "calibration_start_period",
-            "calibration_end_period",
-            "stop_criteria",
-        ],
-        help="Field to sort by (default is 'id' descending if not provided)."
+        choices=CalibrationSortField.get_names(),
+        help=(
+            "Field to sort results by. "
+            f"Valid options: {', '.join(CalibrationSortField.get_names())}"
+        ),
     )
     sort_group.add_argument(
         "--sort-direction",
@@ -435,7 +435,13 @@ def main():
         help="Sort direction (default: desc)."
     )
 
-    jobs_parser.set_defaults(func=lambda cmd_args: list_jobs(cmd_args))
+    jobs_parser.set_defaults(
+        func=lambda cmd_args: list_jobs(
+            output_path=getattr(cmd_args, "output_path", "__DEFAULT__"),
+            filters=_build_filters(cmd_args),
+            sort=_build_sort(cmd_args),
+        )
+    )
 
     # ---- End of job parser
 
@@ -571,6 +577,165 @@ def main():
         print(f"No handler found for command: {args.command}")
         parser.print_help()
         sys.exit(1)
+
+
+def _build_filters(cmd_args) -> dict:
+    """
+    Construct the filters dictionary for the /calibration/get_calibration_jobs/ API.
+
+    Validates and merges filter-related CLI arguments into a single structured dict.
+    Ensures grouped options are complete (e.g., --module-operator must be paired
+    with --module-list, date and ID filters require all relevant fields).
+
+    - Produces the same structure as filter_template.yaml.
+    - Exits with an error message if incomplete or inconsistent filter options are provided.
+
+    :param cmd_args: argparse.Namespace containing CLI arguments.
+    :return: dict of filters suitable for API POST to /get_calibration_jobs/.
+    """
+    filters = {}
+
+    # ───────────── Basic filters ─────────────
+    if getattr(cmd_args, "gage_id", None):
+        filters["gage_id"] = cmd_args.gage_id
+    if getattr(cmd_args, "status", None):
+        filters["status"] = cmd_args.status
+    if getattr(cmd_args, "include_archived", False):
+        filters["include_archived"] = cmd_args.include_archived
+
+    # ───────────── Module filter ─────────────
+    module_op = getattr(cmd_args, "module_operator", None)
+    module_list = getattr(cmd_args, "module_list", None)
+
+    # Only proceed if the user actually provided a module list
+    if module_list:
+        if not module_op:
+            print("Error: --module-operator is required when using --module-list.")
+            sys.exit(1)
+        filters["module_filter"] = {
+            "operator": module_op,
+            "modules": module_list,
+        }
+    # If neither provided, skip adding module_filter entirely
+
+    # ───────────── Date filter ─────────────
+    date_op = getattr(cmd_args, "date_operator", None)
+    date = getattr(cmd_args, "date", None)
+    date_start = getattr(cmd_args, "date_start", None)
+    date_end = getattr(cmd_args, "date_end", None)
+
+    if any([date_op, date, date_start, date_end]):
+        if not date_op:
+            print("Error: --date-operator is required when specifying date filters.")
+            sys.exit(1)
+
+        match date_op:
+            case "before" | "after":
+                if not date:
+                    print(f"Error: --date is required when using --date-operator {date_op}.")
+                    sys.exit(1)
+                filters["date_filter"] = {"operator": date_op, "create_date": date}
+            case "between":
+                if not (date_start and date_end):
+                    print("Error: --date-start and --date-end are required for --date-operator between.")
+                    sys.exit(1)
+                filters["date_filter"] = {
+                    "operator": "between",
+                    "start_date": date_start,
+                    "end_date": date_end,
+                }
+
+    # ───────────── ID filter ─────────────
+    id_op = getattr(cmd_args, "id_operator", None)
+    id_val = getattr(cmd_args, "id", None)
+    id_start = getattr(cmd_args, "id_start", None)
+    id_end = getattr(cmd_args, "id_end", None)
+
+    if any([id_op, id_val, id_start, id_end]):
+        if not id_op:
+            print("Error: --id-operator is required when specifying ID filters.")
+            sys.exit(1)
+
+        match id_op:
+            case "before" | "after":
+                if id_val is None:
+                    print(f"Error: --id is required when using --id-operator {id_op}.")
+                    sys.exit(1)
+                filters["id_filter"] = {"operator": id_op, "id": id_val}
+            case "between":
+                if id_start is None or id_end is None:
+                    print("Error: --id-start and --id-end are required for --id-operator between.")
+                    sys.exit(1)
+                filters["id_filter"] = {
+                    "operator": "between",
+                    "start_id": id_start,
+                    "end_id": id_end,
+                }
+
+    return filters
+
+
+def _build_sort(cmd_args) -> dict | None:
+    """
+    Build the sort dictionary for /get_calibration_jobs/.
+
+    Supports:
+      - --sort: a path to a YAML/JSON file or inline JSON string (no validation)
+      - --sort-field / --sort-direction flags (validated)
+
+    Validates --sort-field against CalibrationSortField.get_names().
+
+    Returns:
+        dict with {"field": ..., "direction": ...}, or None if no sorting specified.
+    """
+    sort_data = None
+
+    # ───────────── Option 1: Inline JSON or YAML file ─────────────
+    if getattr(cmd_args, "sort", None):
+        try:
+            sort_data = _parse_json_arg(cmd_args.sort)
+        except Exception as e:
+            print(f"Error parsing sort definition: {e}")
+            sys.exit(1)
+        return sort_data
+
+    # ───────────── Option 2: CLI flags ─────────────
+    field = getattr(cmd_args, "sort_field", None)
+    if not field:
+        return None  # no sort specified
+
+    valid_fields = CalibrationSortField.get_names()
+    if field not in valid_fields:
+        print(f"Error: Invalid sort field '{field}'.")
+        print(f"Allowed fields: {', '.join(valid_fields)}")
+        sys.exit(1)
+
+    return {
+        "field": field,
+        "direction": getattr(cmd_args, "sort_direction", "desc")
+    }
+
+
+def _parse_json_arg(arg):
+    """
+    Parses either a file path (YAML/JSON) or an inline JSON/YAML string.
+    Returns a dict or None.
+    """
+    if not arg:
+        return None
+
+    if os.path.isfile(arg):
+        with open(arg, "r", encoding="utf-8") as f:
+            content = f.read()
+        try:
+            return yaml.safe_load(content)
+        except yaml.YAMLError:
+            return json.loads(content)
+    else:
+        try:
+            return json.loads(arg)
+        except json.JSONDecodeError:
+            return yaml.safe_load(arg)
 
 
 if __name__ == "__main__":

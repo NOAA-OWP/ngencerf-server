@@ -17,6 +17,16 @@ cleanup() {
 trap cleanup EXIT
 
 echo "==> Creating build virtual environment..."
+#=======================================================================
+# Verify CLI and server enums are in sync before building
+#=======================================================================
+echo "==> Checking CalibrationSortField consistency..."
+python3 "$(dirname "$0")/check_enum_consistency.py" || {
+    echo "Enum consistency check failed. Fix mismatch before building."
+    exit 1
+}
+
+
 python3.11 -m venv "$BUILD_VENV"
 source "$BUILD_VENV/bin/activate"
 

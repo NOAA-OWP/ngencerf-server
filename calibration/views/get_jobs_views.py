@@ -9,7 +9,8 @@ from rest_framework.decorators import api_view
 from rest_framework.request import Request
 from rest_framework.response import Response
 
-from calibration.enums import GetValidationJobsScope, StatusEnum, ValidationType, CalibrationSortField, ForecastSortField, VerificationSortField
+from calibration.enums import GetValidationJobsScope, StatusEnum, ValidationType
+from calibration.enums_vanilla import CalibrationSortField, ForecastSortField, VerificationSortField
 from calibration.models import CalibrationFormulation, CalibrationRun, CalibrationStopCriteria, \
     ValidationRun, IterationParameter, ForecastRun, VerificationRun
 from calibration.util.caching import get_cached_modules_by_id
