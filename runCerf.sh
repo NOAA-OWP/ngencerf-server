@@ -18,20 +18,6 @@ SCRIPT_DIR="$(dirname "$(realpath "${BASH_SOURCE[0]}")")"
 source "$SCRIPT_DIR/cerfserver.env"
 
 #=======================================================================
-# Set predictable umask only when running in Docker + Gunicorn context
-#=======================================================================
-if [ "${CERF_VENV}" = "Docker" ]; then
-    if [ "${CERF_ASGI}" = "1" ] || [ "${CERF_PRODUCTION}" = "1" ]; then
-        echo "[INFO] Docker + Gunicorn detected; setting umask to 022"
-        umask 022
-    else
-        echo "[INFO] Docker detected but not Gunicorn; keeping existing umask ($(umask))"
-    fi
-else
-    echo "[INFO] Non-Docker environment; keeping existing umask ($(umask))"
-fi
-
-#=======================================================================
 # Validate RUN_CERF_FLAG_DIRECTORY
 #=======================================================================
 if [ -z "${RUN_CERF_FLAG_DIRECTORY}" ]; then

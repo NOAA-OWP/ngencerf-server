@@ -27,16 +27,10 @@ def log_worker_info():
 
 
 def print_banner():
-    RED = "\33[91m"
-    BLUE = "\33[94m"
-    GREEN = "\033[32m"
-    YELLOW = "\033[93m"
-    PURPLE = '\033[0;35m'
-    CYAN = "\033[36m"
-    END = "\033[0m"
 
-    banner = f"""
-    {CYAN}
+
+    banner = """
+
 ███╗   ██╗ ██████╗ ███████╗███╗   ██╗ ██████╗███████╗██████╗ ███████╗
 ████╗  ██║██╔════╝ ██╔════╝████╗  ██║██╔════╝██╔════╝██╔══██╗██╔════╝
 ██╔██╗ ██║██║  ███╗█████╗  ██╔██╗ ██║██║     █████╗  ██████╔╝█████╗  
@@ -49,7 +43,7 @@ def print_banner():
 ███████╗█████╗  ██████╔╝██║   ██║█████╗  ██████╔╝                    
 ╚════██║██╔══╝  ██╔══██╗╚██╗ ██╔╝██╔══╝  ██╔══██╗                    
 ███████║███████╗██║  ██║ ╚████╔╝ ███████╗██║  ██║                    
-╚══════╝╚══════╝╚═╝  ╚═╝  ╚═══╝  ╚══════╝╚═╝  ╚═╝ {END}"""
+╚══════╝╚══════╝╚═╝  ╚═╝  ╚═══╝  ╚══════╝╚═╝  ╚═╝ """
 
     logger.info(banner)
 
@@ -102,13 +96,19 @@ class CalibrationConfig(AppConfig):
             logger.info('')
             print_git_info_all()
 
+        try:
+            os.umask(0o022)
+            logger.info("Set process umask to 0o22.")
+        except Exception as e:
+            logger.warning(f"Failed to set umask: {e}")
+
         logger.info('')
         print_db_info()
         logger.info('')
         logger.info(f'NGWPC Enterprise Data Server url: {settings.ENTERPRISE_DATA_URL}\n')
-        logger.info(f'NGEN_CAL_MOUNT_POINT - {settings.NGEN_CAL_MOUNT_POINT}')
-        logger.info(f'NGEN_STATIC_DIR - {settings.NGEN_STATIC_DIR}')
-        logger.info(f'DJANGO DEBUG - {settings.DEBUG}')
+        logger.info(f'NGEN_CAL_MOUNT_POINT: {settings.NGEN_CAL_MOUNT_POINT}')
+        logger.info(f'NGEN_STATIC_DIR: {settings.NGEN_STATIC_DIR}')
+        logger.info(f'DJANGO DEBUG: {settings.DEBUG}')
 
         from calibration.util.ngen_locations import check_files
 
