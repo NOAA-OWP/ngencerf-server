@@ -46,11 +46,6 @@ RUN set -eux && \
     echo $CACHE_BUST && pip3 install "git+https://github.com/${DATA_ASSIMILATION_ORG}/data-assimilation-engine.git@${DATA_ASSIMILATION_BRANCH}" && \
     pip3 cache purge
 
-COPY cli /ngencerf/ngencerf-server/cli
-
-# Build CLI executable in cli/dist
-RUN cli/build_cli.sh
-
 # Should parallel similar functionality in the run_cerf.sh
 COPY .git .git
 
@@ -101,11 +96,16 @@ RUN set -eux && \
       > $GIT_INFO_PATH && \
     cd / && rm -rf "$tmpdir"
 
+# Remove .git directory
+RUN rm -rf .git
+
+COPY cli /ngencerf/ngencerf-server/cli
+
 # Copy application code
 COPY . /ngencerf/ngencerf-server/
 
-# Remove .git directory
-RUN rm -rf .git
+# Build CLI executable in cli/dist
+RUN cli/build_cli.sh
 
 # Copy additional configuration files
 COPY ./cerfserver-docker.env /ngencerf/ngencerf-server/cerfserver.env
