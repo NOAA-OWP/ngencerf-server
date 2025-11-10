@@ -50,7 +50,7 @@ cerfServer="$SCRIPT_DIR"
 # Bootstrap logging
 #=======================================================================
 mkdir -p "$cerfServer/logs"
-LOGFILE_DEV="$cerfServer/logs/ngencerf_dev.log"
+LOGFILE_DEV="$cerfServer/logs/ngencerf.log"
 printf "\n------- Server starting at %s --------\n" "$(date)" | tee -a "$LOGFILE_DEV"
 
 # Save original stdout/stderr
