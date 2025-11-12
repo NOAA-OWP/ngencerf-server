@@ -196,6 +196,10 @@ def execute_job(run: BaseRun, cmd_line_args: dict[str, str], stdout_file: str, s
     else:
         raise CerfException(f"Unsupported environment: {settings.NGEN_ENVIRONMENT}")
 
+    run.sent_date = datetime.now(timezone.utc)
+    run.save(update_fields=['sent_date'])
+
+
 
 def cancel_job_common(run: BaseRun) -> bool:
     """

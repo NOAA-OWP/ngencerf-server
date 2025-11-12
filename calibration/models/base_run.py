@@ -4,7 +4,11 @@ from calibration.models.base_model import BaseModel
 
 
 class BaseRun(BaseModel):
+    # Time that the job is actually submitted from the UI
     submit_date = models.DateTimeField(null=True)
+    # Time that we send the Slurm request
+    sent_date = models.DateTimeField(null=True)
+    # Time that the job actually starts running
     run_start = models.DateTimeField(null=True)
     run_end = models.DateTimeField(null=True)
     slurm_job_id = models.IntegerField(null=True)

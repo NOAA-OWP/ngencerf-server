@@ -131,6 +131,7 @@ def get_status(request: Request) -> Response:
             'validation_type': run.validation_type,
             'iteration_num': run.iteration_num,
             'submit_date': run.submit_date,
+            'sent_date': run.sent_date,
             'run_start': run.run_start,
             'run_end': run.run_end
         }
@@ -160,6 +161,7 @@ def get_status(request: Request) -> Response:
             'configuration': run.configuration.name,
             'cycle_date': run.cycle_date,
             'submit_date': run.submit_date,
+            'sent_date': run.sent_date,
             'run_start': run.run_start,
             'run_end': run.run_end
         }
@@ -185,6 +187,7 @@ def get_status(request: Request) -> Response:
                 'cold_start_run_id': cold_start_run.id,
                 'status': cold_start_run.status.name,
                 'submit_date': cold_start_run.submit_date,
+                'sent_date': cold_start_run.sent_date,
                 'run_start': cold_start_run.run_start,
                 'run_end': cold_start_run.run_end,
             }
@@ -213,6 +216,7 @@ def get_status(request: Request) -> Response:
         'calibration_run_id': calibration_run.id,
         'status': calibration_run.status.name,
         'submit_date': calibration_run.submit_date,
+        'sent_date': calibration_run.sent_date,
         'run_start': calibration_run.run_start,
         'run_end': calibration_run.run_end,
         'validations': validation_response,
