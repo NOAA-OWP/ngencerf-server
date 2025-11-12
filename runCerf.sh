@@ -536,12 +536,11 @@ if [ "$ASGI_FLAG" = "1" ] || [ "$PROD_FLAG" = "1" ]; then
             --name ngencerf \
             --workers ${WORKERS} \
             --worker-class uvicorn.workers.UvicornWorker \
+            --preload \
             --bind ${BIND_ADDR} \
-            --log-level ${GUNICORN_LOG_LEVEL:-info} \
             --timeout ${TIMEOUT} \
             --graceful-timeout ${GUNICORN_GRACEFUL_TIMEOUT:-30} \
-            --access-logfile - \
-            --error-logfile -
+            --config "$(dirname "$0")/gunicorn_conf.py"
 else
     echo "Launching Django development server (runserver)"
     python "$cerfServer"/manage.py runserver 0.0.0.0:8000 --noreload

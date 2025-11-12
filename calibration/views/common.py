@@ -265,11 +265,22 @@ def create_calibration_run_internal(user: User, genesis: JobGenesis | None = Non
         new_name = f"{run.job_data_dir}_{datetime.now().isoformat()}"
         os.rename(run.job_data_dir, new_name)
 
-    os.makedirs(run.job_data_dir, exist_ok=True)
-    mode = os.stat(run.job_data_dir).st_mode
-    perm_str = oct(mode & 0o777)
+    pid = os.getpid()
 
-    logger.info(f"Directory {run.job_data_dir} created - Permissions: {perm_str}")
+    # Determine and restore the effective umask
+    current_umask = os.umask(0)
+    os.umask(current_umask)
+
+    # Create the directory
+    os.makedirs(run.job_data_dir, exist_ok=True)
+
+    # Determine actual permissions on disk
+    mode = os.stat(run.job_data_dir).st_mode & 0o777
+
+    logger.info(
+        f"Directory created: {run.job_data_dir} | perms={oct(mode)} | "
+        f"PID={pid} | umask={oct(current_umask)}"
+    )
 
     # This is always true
     run.automatic_validation = True
