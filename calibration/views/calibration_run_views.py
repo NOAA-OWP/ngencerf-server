@@ -15,7 +15,7 @@ from rest_framework.response import Response
 
 from calibration.enums import StatusEnum
 from calibration.enums_vanilla import JobType, SecondaryDataEnum
-from calibration.models import Iteration, ValidationRun, ForecastRun, CalibrationRun, Status
+from calibration.models import Iteration, ValidationRun, ForecastRun, CalibrationRun, Status, ColdStartRun
 from calibration.run_util.run_common import cancel_job_common, submit_job
 from calibration.run_util.run_ngen_cal_pw import SlurmStatusEnum, run_calibration_job_callback_pw, run_validation_job_callback_pw, \
     run_forecast_job_callback_pw, run_cold_start_job_callback_pw, run_verification_job_callback_pw
@@ -23,16 +23,16 @@ from calibration.util.calibration_validators import CalibrationRunSerializer, Ge
     ErrorResponseSerializer, ReportIterationSerializer, SubmitCalibrationJobResponseSerializer, GetIterationsResponseSerializer, \
     CalibrationJobSlurmCallbackRequestSerializer, ValidationJobSlurmCallbackRequestSerializer, EmptySerializer, \
     GetStatusRequestSerializer, GetStatusResponseSerializer, GetStatusForComparisonRequestSerializer, GetStatusForComparisonResponseSerializer, \
-    CalibrationOrValidationOrForecastOrVerificationRunSerializer, ForecastJobSlurmCallbackRequestSerializer, CancelJobResponseSerializer, \
-    ValidationRunSerializer, \
-    GenericResponseSerializerWithValidator, RunCalibrationJob, MPINodesRulesSerializer, MPINodesRulesResponseSerializer, \
+    CalibrationOrValidationOrColdStartOrForecastOrVerificationRunSerializer, ForecastJobSlurmCallbackRequestSerializer, CancelJobResponseSerializer, \
+    ValidationRunSerializer, GenericResponseSerializerWithValidator, RunCalibrationJob, MPINodesRulesSerializer, MPINodesRulesResponseSerializer, \
     ColdStartJobSlurmCallbackRequestSerializer, VerificationJobSlurmCallbackRequestSerializer
 from calibration.views import ngen_cal_input
 from calibration.views.calibration_secondary_data_views import generate_secondary_ts_data
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import ResponseError, get_calibration_run, handle_exceptions, validate_response, validate_request, \
     generate_custom_token, TOKEN_SLURM_SCOPE, get_validation_run, get_forecast_run, get_user_email, \
-    get_job_description, get_elapsed_str, readonly_transaction, truncate_large_fields, auth_scope_required, get_cold_start_run, get_verification_run
+    get_job_description, get_elapsed_str, readonly_transaction, truncate_large_fields, auth_scope_required, get_cold_start_run, get_verification_run, \
+    join_with_or
 from calibration.views.end_of_job_processing import read_calibration_output
 
 logger = logging.getLogger(__name__)
@@ -748,7 +748,7 @@ def get_iteration(request: Request) -> Response:
 
 
 @extend_schema(
-    request=CalibrationOrValidationOrForecastOrVerificationRunSerializer,
+    request=CalibrationOrValidationOrColdStartOrForecastOrVerificationRunSerializer,
     responses={
         200: GenericResponseSerializer,
         400: OpenApiResponse(
@@ -774,7 +774,7 @@ def cancel_job(request: Request) -> Response:
     data = request.data if request.method == 'POST' else request.query_params.dict()
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
 
-    validator, error_return = validate_request(CalibrationOrValidationOrForecastOrVerificationRunSerializer, data)
+    validator, error_return = validate_request(CalibrationOrValidationOrColdStartOrForecastOrVerificationRunSerializer, data)
     if error_return:
         return error_return
 
@@ -790,41 +790,27 @@ def cancel_job(request: Request) -> Response:
         run_type = JobType.VALIDATION.value
         run, error_return = get_validation_run(validation_run_id, request.user, run_status=[StatusEnum.RUNNING, StatusEnum.SUBMITTED])
     else:
-        run_type = JobType.FORECAST.value
-        run, error_return = get_forecast_run(forecast_run_id, request.user, run_status=list(StatusEnum))
+        forecast_run, error_return = get_forecast_run(forecast_run_id, request.user, run_status=list(StatusEnum))
 
-        # forecast_forcing_download_run, forcing_error = get_forecast_forcing_download_run(
-        #     forecast_run_unfiltered.forcing_download_run.id,
-        #     request.user,
-        #     run_status=list(StatusEnum)
-        # )
-        # if forcing_error:
-        #     return forcing_error
-
-        # # Check the status of the forcing download run.
-        # if forecast_forcing_download_run.status in [StatusEnum.RUNNING.db_instance, StatusEnum.SUBMITTED.db_instance]:
-        #     # Forcing download run is running: cancel it.
-        #     run = forecast_forcing_download_run
-        #     # Call it a Forecast job and not Forcing Download
-        #     run_type = JobType.FORECAST.value
-        # elif forecast_forcing_download_run.status == StatusEnum.DONE.db_instance:
-        #     # Forcing download run is done.
-        #     # Retrieve the forecast run from the forcing run.
-        #     forecast_run = forecast_forcing_download_run.forecast_run
-        #     if forecast_run.status in [StatusEnum.RUNNING.db_instance, StatusEnum.SUBMITTED.db_instance]:
-        #         run = forecast_run
-        #         run_type = JobType.FORECAST.value
-        #
-        #     else:
-        #         error = (f'{ForecastRun.__name__} {forecast_run.id} is not in an allowed status: '
-        #                  f'{join_with_or([StatusEnum.RUNNING.value, StatusEnum.SUBMITTED.value])}. '
-        #                  f'Current status: {forecast_run.status.name}')
-        #         return ResponseError(error)
-        # else:
-        #     error = (f'{ForecastForcingDownloadRun.__name__} {forecast_forcing_download_run.id} is not in an allowed status: '
-        #              f'{join_with_or([StatusEnum.RUNNING.value, StatusEnum.SUBMITTED.value, StatusEnum.DONE.value])}. '
-        #              f'Current status: {forecast_forcing_download_run.status.name}')
-        #     return ResponseError(error)
+        if forecast_run.cold_start_run.status in [StatusEnum.RUNNING.db_instance, StatusEnum.SUBMITTED.db_instance]:
+            # Cold start job is running, so cancel it
+            run_type = JobType.COLD_START.value
+            run = forecast_run.cold_start_run
+        elif forecast_run.cold_start_run.status == StatusEnum.DONE.db_instance:
+            # Cold start is done, check the status of the forecast job
+            if forecast_run.status in [StatusEnum.RUNNING.db_instance, StatusEnum.SUBMITTED.db_instance]:
+                run_type = JobType.FORECAST.value
+                run = forecast_run
+            else:
+                error = (f'{ForecastRun.__name__} {forecast_run.id} is not in an allowed status: '
+                         f'{join_with_or([StatusEnum.RUNNING.value, StatusEnum.SUBMITTED.value])}. '
+                         f'Current status: {forecast_run.status.name}')
+                return ResponseError(error)
+        else:
+            error = (f'{ColdStartRun.__name__} {forecast_run.cold_start_run.id} is not in an allowed status: '
+                     f'{join_with_or([StatusEnum.RUNNING.value, StatusEnum.SUBMITTED.value])}. '
+                     f'Current status: {forecast_run.cold_start_run.status.name}')
+            return ResponseError(error)
 
     if not cancel_job_common(run):
         return ResponseError(f"Unable to cancel {run_type.capitalize()} Job {run.id}")
@@ -833,7 +819,7 @@ def cancel_job(request: Request) -> Response:
     run.save(update_fields=['status'])
 
     response = {
-        'message': f"{run_type.capitalize()} Job {run.id} has been canceled",
+        'message': f"{get_job_description(run)} has been canceled",
         f"{run_type}_run_id": run.id,
         'status': run.status.name  # type: ignore[attr-defined]
     }

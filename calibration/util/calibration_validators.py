@@ -152,38 +152,40 @@ class CalibrationOrValidationRunSerializer(BaseSerializer):
         return data
 
 
-class CalibrationOrValidationOrForecastOrVerificationRunSerializer(BaseSerializer):
+class CalibrationOrValidationOrColdStartOrForecastOrVerificationRunSerializer(BaseSerializer):
     calibration_run_id = serializers.IntegerField(required=False, allow_null=False)
     validation_run_id = serializers.IntegerField(required=False, allow_null=False)
     forecast_run_id = serializers.IntegerField(required=False, allow_null=False)
+    cold_start_run_id = serializers.IntegerField(required=False, allow_null=False)
     verification_job_id = serializers.IntegerField(required=False, allow_null=False)
 
     def validate(self, data):
         """
-        Ensure that only one of calibration_run_id, validation_run_id, forecast_run_id, or verification_job_id is specified.
+        Ensure that only one of calibration_run_id, validation_run_id, cold_start_run_id, forecast_run_id, or verification_job_id is specified.
         """
         calibration_run_id = data.get('calibration_run_id')
         validation_run_id = data.get('validation_run_id')
+        cold_start_run_id = data.get('cold_start_run_id')
         forecast_run_id = data.get('forecast_run_id')
         verification_job_id = data.get('verification_job_id')
 
         # Collect the IDs that are specified (non-null and non-zero values)
         specified_ids = [
             id_value
-            for id_value in [calibration_run_id, validation_run_id, forecast_run_id, verification_job_id]
+            for id_value in [calibration_run_id, validation_run_id, cold_start_run_id, forecast_run_id, verification_job_id]
             if id_value is not None
         ]
 
         # Check that exactly one ID is specified
         if len(specified_ids) != 1:
             raise serializers.ValidationError(
-                "You must specify exactly one of 'calibration_run_id', 'validation_run_id', 'forecast_run_id' or 'verification_job_id'."
+                "You must specify exactly one of 'calibration_run_id', 'validation_run_id', 'cold_start_run_id', 'forecast_run_id' or 'verification_job_id'."
             )
 
         return data
 
 
-class CancelJobResponseSerializer(GenericMessageAndStatusResponseSerializer, CalibrationOrValidationOrForecastOrVerificationRunSerializer):
+class CancelJobResponseSerializer(GenericMessageAndStatusResponseSerializer, CalibrationOrValidationOrColdStartOrForecastOrVerificationRunSerializer):
     def validate(self, data):
         # Call the parent validate method to include its logic
         return super().validate(data)

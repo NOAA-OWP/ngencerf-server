@@ -140,7 +140,7 @@ def get_cold_start_run(
         cold_start_run_id: int,
         user: User | None,
         run_status: list[StatusEnum] | None = None
-) -> tuple[ForecastRun | None, Response | None]:
+) -> tuple[ColdStartRun | None, Response | None]:
     """
     Retrieve a ColdStartRun by ID, optionally filtering by owner and status.
 
