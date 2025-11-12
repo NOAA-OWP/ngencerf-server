@@ -213,6 +213,8 @@ class LoggingConfigSerializer(BaseSerializer):
         valid_modules = {m.name.lower() for m in get_cached_modules_with_groups().values()}
         valid_modules.add('ngen')  # Special case
         valid_modules.add('forcing')  # Special case
+        # From Oct 20 through Nov 4, 2025, we were using ngen-forcing.  We need to keep accepting the legacy name
+        valid_modules.add('ngen-forcing')  # Special case
 
         errors = {}
         normalized = {}
