@@ -561,13 +561,13 @@ def check_completeness(module_names: set[str], fatal_errors: list[str], nonfatal
     produced_output_vars = sorted(included_output_vars)
 
     if missing_output_vars:
-        nonfatal_errors.append('Formulation Incomplete. Not all NWM v3 Output Variables can be produced.')
-        nonfatal_errors.append('Missing NWM v3 Output Variables: ' + ", ".join(missing_output_vars))
+        nonfatal_errors.append('Formulation Incomplete. Not all NWM v3 Output Variables can be produced by the selected formulation.')
+        nonfatal_errors.append('The following NWM v3 Output Variables cannot be produced:\n' + ", ".join(missing_output_vars))
     else:
         info_messages.append('Formulation Complete. All NWM v3 Output Variables can be produced.')
 
     if produced_output_vars:
-        info_messages.append('NWM v3 Output Variables Produced: ' + ", ".join(produced_output_vars))
+        info_messages.append('The following NWM v3 Output Variables can be produced:\n' + ", ".join(produced_output_vars))
 
 
 def add_sloth_parameters(run: CalibrationRun, sloth_parameters: list[dict], module_names: set[str]) -> str | None:
