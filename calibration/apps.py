@@ -51,6 +51,7 @@ class CalibrationConfig(AppConfig):
     name = 'calibration'
 
     def ready(self):
+
         # Detect local dev server (runserver)
         running_dev_server = (
                 'runserver' in sys.argv
@@ -90,12 +91,12 @@ class CalibrationConfig(AppConfig):
             except Exception as e:
                 logger.error(f'Django cache failed during dev init: {e}')
 
-            logger.info('')
-            print_git_info_all()
+        # ------------------------------------------------------------------
+        # ALWAYS display Git, DB and environment info
+        # ------------------------------------------------------------------
+        logger.info('')
+        print_git_info_all()
 
-        # ------------------------------------------------------------------
-        # ALWAYS display DB + environment info
-        # ------------------------------------------------------------------
         logger.info('')
         print_db_info()
         logger.info('')

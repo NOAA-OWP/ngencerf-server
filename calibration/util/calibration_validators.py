@@ -710,13 +710,6 @@ class DomainResponseSerializer(BaseSerializer):
     description = serializers.CharField(required=True, allow_blank=False)
 
 
-class GagesSerializer(BaseSerializer):
-    gage_id = serializers.CharField(required=True, allow_blank=False)
-    nws_id = serializers.CharField(required=False, allow_null=True, allow_blank=False)
-    domain = serializers.CharField(required=True, validators=[enum_validator(DomainEnum)])
-    headwater_calibration = serializers.BooleanField(required=True)
-
-
 class ForcingSourceSerializer(BaseSerializer):
     name = serializers.CharField(required=True, validators=[enum_validator(ForcingSourceEnum)])
     description = serializers.CharField(required=True)
@@ -732,13 +725,44 @@ class GeopackageSourceSerializer(BaseSerializer):
     description = serializers.CharField(required=True)
 
 
+#
+# class GagesSerializer(BaseSerializer):
+#     gage_id = serializers.CharField(required=True, allow_blank=False)
+#     nws_id = serializers.CharField(required=False, allow_null=True, allow_blank=False)
+#     domain = serializers.CharField(required=True, validators=[enum_validator(DomainEnum)])
+#     headwater_calibration = serializers.BooleanField(required=True)
+
+
+class FastGagesSerializer(serializers.Field):
+    """
+    Fast validation for huge gage lists:
+    - ensures it's a list
+    - ensures each element is a dict
+    - DOES NOT deeply validate fields
+    """
+
+    def to_internal_value(self, data):
+        if not isinstance(data, list):
+            raise serializers.ValidationError("gages must be a list")
+
+        # Light validation: each item must be a dict
+        for i, item in enumerate(data):
+            if not isinstance(item, dict):
+                raise serializers.ValidationError(f"gages[{i}] must be an object")
+
+        return data  # return untouched
+
+    def to_representation(self, value):
+        return value  # no transformation
+
+
 class LoadGageResponseSerializer(BaseSerializer):
     status = serializers.CharField(required=True, validators=[enum_validator(StatusEnum)])
     calibration_run_id = serializers.IntegerField(required=True)
     forcing_source_values = ForcingSourceSerializer(many=True)
     observational_source_values = ObservationalSourceSerializer(many=True)
     geopackage_source_values = GeopackageSourceSerializer(many=True)
-    gages = GagesSerializer(required=True, many=True)
+    gages = FastGagesSerializer(required=True)
     gage = GageSerializer(required=False)
     geopackage_image_url = serializers.CharField(required=False)
     domain_values = DomainResponseSerializer(many=True)
