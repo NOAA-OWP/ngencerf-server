@@ -124,64 +124,60 @@ def get_status(request: Request) -> Response:
 
     # --- Validation responses ---
     validation_response = []
-    for run in validation_runs:
+    for validation_run in validation_runs:
         validation_data = {
-            'validation_run_id': run.id,
-            'status': run.status.name,
-            'validation_type': run.validation_type,
-            'iteration_num': run.iteration_num,
-            'submit_date': run.submit_date,
-            'sent_date': run.sent_date,
-            'run_start': run.run_start,
-            'run_end': run.run_end
+            'validation_run_id': validation_run.id,
+            'status': validation_run.status.name,
+            'validation_type': validation_run.validation_type,
+            'iteration_num': validation_run.iteration_num,
+            'submit_date': validation_run.submit_date,
+            'sent_date': validation_run.sent_date,
+            'run_start': validation_run.run_start,
+            'run_end': validation_run.run_end
         }
 
-        fm = parse_failure_messages(run.failure_messages)
+        fm = parse_failure_messages(validation_run.failure_messages)
         if fm:
             validation_data['failure_messages'] = fm
 
-        if run.performance_metrics:
-            validation_data['elapsed_time'] = run.performance_metrics.elapsed_time
-        elif run.run_start and run.run_end:
-            validation_data['elapsed_time'] = run.run_end - run.run_start
+        if validation_run.run_end and validation_run.submit_date:
+            validation_data['elapsed_time'] = validation_run.run_end - validation_run.submit_date
         else:
             validation_data['elapsed_time'] = None
 
-        if should_include_metrics(run.status, include_performance_metrics):
-            validation_data['performance_metrics'] = get_performance_metrics(run.performance_metrics)
+        if should_include_metrics(validation_run.status, include_performance_metrics):
+            validation_data['performance_metrics'] = get_performance_metrics(validation_run.performance_metrics)
 
         validation_response.append(validation_data)
 
     # --- Forecast responses ---
     forecast_response = []
-    for run in forecast_runs:
+    for forecast_run in forecast_runs:
         forecast_data = {
-            'forecast_run_id': run.id,
-            'status': run.status.name,
-            'configuration': run.configuration.name,
-            'cycle_date': run.cycle_date,
-            'submit_date': run.submit_date,
-            'sent_date': run.sent_date,
-            'run_start': run.run_start,
-            'run_end': run.run_end
+            'forecast_run_id': forecast_run.id,
+            'status': forecast_run.status.name,
+            'configuration': forecast_run.configuration.name,
+            'cycle_date': forecast_run.cycle_date,
+            'submit_date': forecast_run.submit_date,
+            'sent_date': forecast_run.sent_date,
+            'run_start': forecast_run.run_start,
+            'run_end': forecast_run.run_end
         }
 
-        fm = parse_failure_messages(run.failure_messages)
+        fm = parse_failure_messages(forecast_run.failure_messages)
         if fm:
             forecast_data['failure_messages'] = fm
 
-        if run.performance_metrics:
-            forecast_data['elapsed_time'] = run.performance_metrics.elapsed_time
-        elif run.run_start and run.run_end:
-            forecast_data['elapsed_time'] = run.run_end - run.run_start
+        if forecast_run.run_end and forecast_run.submit_date:
+            forecast_data['elapsed_time'] = forecast_run.run_end - forecast_run.submit_date
         else:
             forecast_data['elapsed_time'] = None
 
-        if should_include_metrics(run.status, include_performance_metrics):
-            forecast_data['performance_metrics'] = get_performance_metrics(run.performance_metrics)
+        if should_include_metrics(forecast_run.status, include_performance_metrics):
+            forecast_data['performance_metrics'] = get_performance_metrics(forecast_run.performance_metrics)
 
         # --- Cold start ---
-        cold_start_run = getattr(run, "cold_start_run", None)
+        cold_start_run = getattr(forecast_run, "cold_start_run", None)
         if cold_start_run:
             cold_start_data = {
                 'cold_start_run_id': cold_start_run.id,
@@ -196,10 +192,8 @@ def get_status(request: Request) -> Response:
             if fm_cs:
                 cold_start_data['failure_messages'] = fm_cs
 
-            if cold_start_run.performance_metrics:
-                cold_start_data['elapsed_time'] = cold_start_run.performance_metrics.elapsed_time
-            elif cold_start_run.run_start and cold_start_run.run_end:
-                cold_start_data['elapsed_time'] = cold_start_run.run_end - cold_start_run.run_start
+            if cold_start_run.run_end and cold_start_run.submit_date:
+                cold_start_data['elapsed_time'] = cold_start_run.run_end - cold_start_run.submit_date
             else:
                 cold_start_data['elapsed_time'] = None
 
@@ -227,10 +221,8 @@ def get_status(request: Request) -> Response:
     if fm_cal:
         response['failure_messages'] = fm_cal
 
-    if calibration_run.performance_metrics:
-        response['elapsed_time'] = calibration_run.performance_metrics.elapsed_time
-    elif calibration_run.run_start and calibration_run.run_end:
-        response['elapsed_time'] = calibration_run.run_end - calibration_run.run_start
+    if calibration_run.run_end and calibration_run.submit_date:
+        response['elapsed_time'] = calibration_run.run_end - calibration_run.submit_date
     else:
         response['elapsed_time'] = None
 
