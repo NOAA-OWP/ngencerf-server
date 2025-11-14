@@ -19,7 +19,7 @@ from calibration.util.caching import get_cached_gages, get_gage_by_id, update_an
 from calibration.util.calibration_validators import SaveGageRequestSerializer, GageIdSerializer, CalibrationRunSerializer, UploadForcingSerializer, \
     SaveGageResponseSerializer, LoadGageResponseSerializer, GageSerializer, GenericResponseSerializer, ErrorResponseSerializer, \
     UploadObservationalSerializer, UploadGeopackageSerializer, UploadGeopackageResponseSerializer, UpdateGageStatusRequestSerializer, \
-    UpdateGageStatusResponseSerializer
+    UpdateGageStatusResponseSerializer, EmptySerializer
 from calibration.util.cloud_util import path_exists
 from calibration.util.file_util import delete_all_files_in_directory, get_single_file
 from calibration.util.geopkg import gpkg_to_png_selected_layers, get_geometry_from_gpkg
@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 
 @extend_schema(
-    request=CalibrationRunSerializer,
+    request=EmptySerializer,
     responses={
         200: LoadGageResponseSerializer,
         400: OpenApiResponse(
@@ -70,13 +70,7 @@ def load_gage_tab(request: Request) -> Response:
 
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
 
-    validator, error_return = validate_request(CalibrationRunSerializer, data)
-    if error_return:
-        return error_return
-
-    calibration_run_id = validator.get('calibration_run_id')
-
-    run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=list(StatusEnum))
+    validator, error_return = validate_request(EmptySerializer, data)
     if error_return:
         return error_return
 
@@ -100,11 +94,7 @@ def load_gage_tab(request: Request) -> Response:
         'domain': gage.get('domain').replace('_', ' ') if gage.get('domain') else None
     } for gage in get_cached_gages().values() if gage.get('is_active')]
 
-    ngen_cal_input.ready_to_run(run)
-
     response = {
-        'calibration_run_id': run.id,
-        'status': run.status.name,
         'domain_values': domain_values,
         'forcing_source_values': forcing_source_values,
         'observational_source_values': observational_source_values,
@@ -118,7 +108,7 @@ def load_gage_tab(request: Request) -> Response:
     response_validator, error_response = validate_response(
         LoadGageResponseSerializer,
         response,
-        fields_to_truncate=["gages", "geopackage_image_url"],
+        fields_to_truncate=["gages"],
         max_length=50
     )
     if error_response:
@@ -126,7 +116,7 @@ def load_gage_tab(request: Request) -> Response:
 
     logger.debug(
         f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - '
-        f'{json.dumps(truncate_large_fields(response_validator.data, fields_to_truncate=["gages", "geopackage_image_url"], max_length=50))}'
+        f'{json.dumps(truncate_large_fields(response_validator.data, fields_to_truncate=["gages"], max_length=50))}'
     )
 
     return Response(response_validator.data)

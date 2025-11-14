@@ -748,14 +748,12 @@ class FastGagesSerializer(serializers.Field):
 
 
 class LoadGageResponseSerializer(BaseSerializer):
-    status = serializers.CharField(required=True, validators=[enum_validator(StatusEnum)])
-    calibration_run_id = serializers.IntegerField(required=True)
     forcing_source_values = ForcingSourceSerializer(many=True)
     observational_source_values = ObservationalSourceSerializer(many=True)
     geopackage_source_values = GeopackageSourceSerializer(many=True)
     gages = FastGagesSerializer(required=True)
     gage = GageSerializer(required=False)
-    geopackage_image_url = serializers.CharField(required=False)
+    # geopackage_image_url = serializers.CharField(required=False)
     domain_values = DomainResponseSerializer(many=True)
 
 
@@ -1039,8 +1037,6 @@ class OptimizationStaticSerializer(serializers.Serializer):
 
 
 class LoadOptimizationResponseSerializer(serializers.Serializer):
-    calibration_run_id = serializers.IntegerField(required=True)
-    status = serializers.CharField(required=True, validators=[enum_validator(StatusEnum)])
     metrics = MetricSerializer(many=True)
     optimizations = OptimizationStaticSerializer(many=True)
 
