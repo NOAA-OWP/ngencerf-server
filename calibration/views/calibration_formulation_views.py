@@ -564,7 +564,7 @@ def check_completeness(module_names: set[str], fatal_errors: list[str], nonfatal
         nonfatal_errors.append('Formulation Incomplete. Not all NWM v3 Output Variables can be produced by the selected formulation.')
         nonfatal_errors.append('The following NWM v3 Output Variables cannot be produced:\n' + ", ".join(missing_output_vars))
     else:
-        info_messages.append('Formulation Complete. All NWM v3 Output Variables can be produced.')
+        info_messages.append('Formulation Complete. All NWM v3 Output Variables can be produced by the selected formulation.')
 
     if produced_output_vars:
         info_messages.append('The following NWM v3 Output Variables can be produced:\n' + ", ".join(produced_output_vars))
