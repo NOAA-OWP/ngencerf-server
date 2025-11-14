@@ -789,33 +789,79 @@ def cancel_job(request: Request) -> Response:
     # Determine job type and retrieve the appropriate run instance
     if calibration_run_id:
         run_type = JobType.CALIBRATION.value
-        run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=[StatusEnum.RUNNING, StatusEnum.SUBMITTED])
+        run, error_return = get_calibration_run(
+            calibration_run_id, request.user, run_status=[StatusEnum.RUNNING, StatusEnum.SUBMITTED]
+        )
+        if error_return:
+            return error_return
+
     elif validation_run_id:
         run_type = JobType.VALIDATION.value
-        run, error_return = get_validation_run(validation_run_id, request.user, run_status=[StatusEnum.RUNNING, StatusEnum.SUBMITTED])
-    else:
-        forecast_run, error_return = get_forecast_run(forecast_run_id, request.user, run_status=list(StatusEnum))
+        run, error_return = get_validation_run(
+            validation_run_id, request.user, run_status=[StatusEnum.RUNNING, StatusEnum.SUBMITTED]
+        )
+        if error_return:
+            return error_return
 
-        if forecast_run.cold_start_run.status in [StatusEnum.RUNNING.db_instance, StatusEnum.SUBMITTED.db_instance]:
-            # Cold start job is running, so cancel it
-            run_type = JobType.COLD_START.value
-            run = forecast_run.cold_start_run
-        elif forecast_run.cold_start_run.status == StatusEnum.DONE.db_instance:
-            # Cold start is done, check the status of the forecast job
-            if forecast_run.status in [StatusEnum.RUNNING.db_instance, StatusEnum.SUBMITTED.db_instance]:
+    else:
+        # --------------------
+        # FORECAST LOGIC ONLY
+        # --------------------
+        forecast_run, error_return = get_forecast_run(
+            forecast_run_id, request.user, run_status=list(StatusEnum)
+        )
+        if error_return:
+            return error_return
+
+        cold_start_run = forecast_run.cold_start_run
+
+        # --- CASE 1: No cold start at all → cancel forecast directly ---
+        if cold_start_run is None:
+            if forecast_run.status in [StatusEnum.RUNNING.db_instance,
+                                       StatusEnum.SUBMITTED.db_instance]:
                 run_type = JobType.FORECAST.value
                 run = forecast_run
             else:
-                error = (f'{ForecastRun.__name__} {forecast_run.id} is not in an allowed status: '
-                         f'{join_with_or([StatusEnum.RUNNING.value, StatusEnum.SUBMITTED.value])}. '
-                         f'Current status: {forecast_run.status.name}')
+                error = (
+                    f'{ForecastRun.__name__} {forecast_run.id} is not in an allowed status: '
+                    f'{join_with_or([StatusEnum.RUNNING.value, StatusEnum.SUBMITTED.value])}. '
+                    f'Current status: {forecast_run.status.name}'
+                )
                 return ResponseError(error)
-        else:
-            error = (f'{ColdStartRun.__name__} {forecast_run.cold_start_run.id} is not in an allowed status: '
-                     f'{join_with_or([StatusEnum.RUNNING.value, StatusEnum.SUBMITTED.value])}. '
-                     f'Current status: {forecast_run.cold_start_run.status.name}')
-            return ResponseError(error)
 
+        else:
+            # --- CASE 2: Cold start is running/submitted → cancel cold start ---
+            if cold_start_run.status in [StatusEnum.RUNNING.db_instance, StatusEnum.SUBMITTED.db_instance]:
+                # Cold start job is running, so cancel it
+                run_type = JobType.COLD_START.value
+                run = cold_start_run
+
+            # --- CASE 3: Cold start DONE → cancel forecast (if running/submitted) ---
+            elif cold_start_run.status == StatusEnum.DONE.db_instance:
+                # Cold start is done, check the status of the forecast job
+                if forecast_run.status in [StatusEnum.RUNNING.db_instance, StatusEnum.SUBMITTED.db_instance]:
+                    run_type = JobType.FORECAST.value
+                    run = forecast_run
+                else:
+                    error = (
+                        f'{ForecastRun.__name__} {forecast_run.id} is not in an allowed status: '
+                        f'{join_with_or([StatusEnum.RUNNING.value, StatusEnum.SUBMITTED.value])}. '
+                        f'Current status: {forecast_run.status.name}'
+                    )
+                    return ResponseError(error)
+
+            # --- CASE 4: Cold start exists but in an invalid state ---
+            else:
+                error = (
+                    f'{ColdStartRun.__name__} {cold_start_run.id} is not in an allowed status: '
+                    f'{join_with_or([StatusEnum.RUNNING.value, StatusEnum.SUBMITTED.value])}. '
+                    f'Current status: {cold_start_run.status.name}'
+                )
+                return ResponseError(error)
+
+    # --------------------
+    # COMMON CANCEL LOGIC
+    # --------------------
     if not cancel_job_common(run):
         return ResponseError(f"Unable to cancel {run_type.capitalize()} Job {run.id}")
 
