@@ -410,13 +410,14 @@ formulation_validations = {
 }
 
 
-def validate_formulation(module_names: set[str]) -> tuple[list[str], list[str], list[str]]:
+def validate_formulation(module_names: set[str], return_group_info: bool = False) -> tuple[list[str], list[str], list[str]]:
     """
     Validate formulation rules based on group requirements and exclusions.
 
     Uses cached modules/groups to avoid repeated DB hits.
 
     :param module_names: A set of module names to validate.
+    :param return_group_info: If true, then include a message about the groups in Info messages
     :return: A tuple of lists (fatal_errors, nonfatal_errors, info_messages).
              Each list contains validation messages of the corresponding severity.
              If there are no messages of a given severity, that list will be empty.
@@ -462,6 +463,12 @@ def validate_formulation(module_names: set[str]) -> tuple[list[str], list[str], 
 
         if not fatal_errors:
             info_messages.append('Formulation is Calibratable.')
+
+            if return_group_info:
+                # Add group summary
+                msg = get_represented_groups_message(module_names)
+                if msg:
+                    info_messages.append(msg)
         else:
             fatal_errors.append('Formulation is not Calibratable.')
 
@@ -525,10 +532,36 @@ def validate_formulation(module_names: set[str]) -> tuple[list[str], list[str], 
     # 4) If no fatal errors, indicate that the formulation is Calibratable
     if not fatal_errors:
         info_messages.append('Formulation is Calibratable.')
+
+        if return_group_info:
+            # Add group summary
+            msg = get_represented_groups_message(module_names)
+            if msg:
+                info_messages.append(msg)
     else:
         fatal_errors.append('Formulation is not Calibratable.')
 
     return fatal_errors, nonfatal_errors, info_messages
+
+
+def get_represented_groups_message(module_names: set[str]) -> str | None:
+    """
+    Return a formatted message listing all groups represented by the given modules.
+    """
+    cached_modules = get_cached_modules_with_groups()
+
+    represented_groups = set()
+    for name in module_names:
+        module = cached_modules.get(name)
+        if not module:
+            continue
+        for g in module.groups.all():
+            represented_groups.add(g.name)
+
+    if not represented_groups:
+        return None
+
+    return "Groups represented by this formulation: " + ", ".join(sorted(represented_groups))
 
 
 def check_completeness(module_names: set[str], fatal_errors: list[str], nonfatal_errors: list[str], info_messages: list[str]) -> None:

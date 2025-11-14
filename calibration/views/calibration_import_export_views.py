@@ -43,7 +43,8 @@ logger = logging.getLogger(__name__)
 def import_calibration_run_data(request: Request,
                                 calibration_run_data: dict,
                                 genesis: JobGenesis,
-                                run: CalibrationRun = None
+                                run: CalibrationRun = None,
+                                is_cli: bool = False
                                 ) -> tuple[CalibrationRun | None, dict | None, Response | None]:
     """
     Imports calibration run data and creates a new CalibrationRun instance if successful.  Also used in cloning
@@ -57,6 +58,7 @@ def import_calibration_run_data(request: Request,
     :param calibration_run_data: Dictionary with calibration run data.
     :param genesis: Enum indicating the origin of the job.
     :param run: Optional CalibrationRun to update. If None, a new CalibrationRun is created.
+    :param is_cli: true if running from the cli
     :return: Tuple containing CalibrationRun instance, response_dict, and optional ResponseError.
     """
     # ---------------------------------------------------------------------
@@ -67,6 +69,7 @@ def import_calibration_run_data(request: Request,
     eds_errors: list[dict] = []
     formulation_errors: list[str] = []
     formulation_warnings: list[str] = []
+    formulation_info: list[str] = []
     have_lstm = False
 
     # Inputs pulled once
@@ -117,9 +120,10 @@ def import_calibration_run_data(request: Request,
                 return None, None, ResponseError(error_message)
 
             # Formulation-level checks (read-only)
-            f_errors, f_warnings, _ = validate_formulation(module_names)
+            f_errors, f_warnings, f_info = validate_formulation(module_names, return_group_info=is_cli)
             formulation_errors.extend(f_errors or [])
             formulation_warnings.extend(f_warnings or [])
+            formulation_info.extend(f_info or [])
             have_lstm = 'LSTM' in module_names
 
         # LSTM exclusivity checks
@@ -348,6 +352,7 @@ def import_calibration_run_data(request: Request,
         messages['warnings'] = formulation_warnings
     if warnings:
         messages.setdefault('warnings', []).extend(warnings)
+    messages['info'] = formulation_info
     if eds_errors:
         messages['eds_errors'] = eds_errors
 

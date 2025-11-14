@@ -799,6 +799,8 @@ def import_job(request: Request) -> Response:
     """
     data = request.data
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
+    user_agent = request.META.get('HTTP_USER_AGENT', '')
+    is_cli = user_agent.startswith(('curl', 'python-requests'))
 
     validator, error_return = validate_request(ImportSerializer, data)
     if error_return:
@@ -815,7 +817,7 @@ def import_job(request: Request) -> Response:
     else:
         calibration_run = None
 
-    run, messages, errors = import_calibration_run_data(request, data, JobGenesis.IMPORT, run=calibration_run)
+    run, messages, errors = import_calibration_run_data(request, data, JobGenesis.IMPORT, run=calibration_run, is_cli=is_cli)
     if errors:
         return errors
 

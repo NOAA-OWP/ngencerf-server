@@ -719,12 +719,14 @@ def _submit_job_data(job_file: str, action: str, calibration_run_id: int | None 
     # Collect errors into one list
     combined_errors = []
     combined_warnings = []
+    info_messages = []
 
     # Nested messages block
     if messages := response_json.get("messages"):
         combined_errors.extend(messages.get("errors", []))
         combined_errors.extend(e.get("message", str(e)) for e in messages.get("eds_errors", []))
         combined_warnings.extend(messages.get("warnings", []))
+        info_messages.extend(messages.get("info", []))
 
     # Top-level blocks
     if errors := response_json.get("errors"):
@@ -741,6 +743,11 @@ def _submit_job_data(job_file: str, action: str, calibration_run_id: int | None 
     if combined_warnings:
         print("Warnings:")
         for w in combined_warnings:
+            print('  ', w)
+
+    if info_messages:
+        print("Info:")
+        for w in info_messages:
             print('  ', w)
 
     return 0

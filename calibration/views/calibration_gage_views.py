@@ -510,7 +510,7 @@ def upload_observational_data(request: Request) -> Response:
     data = request.data
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
     user_agent = request.META.get('HTTP_USER_AGENT', '')
-    cli = user_agent.startswith('curl')
+    is_cli = user_agent.startswith(('curl', 'python-requests'))
 
     validator, error_return = validate_request(UploadObservationalSerializer, data, context={'request': request})
     if error_return:
@@ -538,7 +538,7 @@ def upload_observational_data(request: Request) -> Response:
     logger.info(f"Saving user-uploaded observational file to {os.path.join(fs.location, user_observational_file.name)}")
     fs.save(user_observational_file.name, user_observational_file)
 
-    clear_times(run, cli)
+    clear_times(run, is_cli)
 
     with transaction.atomic():
         run.save()
@@ -586,7 +586,7 @@ def upload_forcing_data(request: Request) -> Response:
     data = request.data
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
     user_agent = request.META.get('HTTP_USER_AGENT', '')
-    cli = user_agent.startswith('curl')
+    is_cli = user_agent.startswith(('curl', 'python-requests'))
 
     validator, error_return = validate_request(UploadForcingSerializer, data, context={'request': request})
     if error_return:
@@ -622,7 +622,7 @@ def upload_forcing_data(request: Request) -> Response:
         else:
             logger.warning(f'Skipping forcing file {forcing_file.name} - does not match naming convention')
 
-    clear_times(run, cli)
+    clear_times(run, is_cli)
 
     if number_of_files == 0:
         return ResponseError(f'No valid forcing files found')
