@@ -1278,8 +1278,7 @@ class CreateVerificationJobRequestSerializer(BaseSerializer):
 
 
 class CreateVerificationJobResponseSerializer(GenericMessageResponseSerializer):
-    verification_job_id = serializers.IntegerField(required=True)
-    job_data_dir = serializers.CharField(required=True)
+    verification_run_id = serializers.IntegerField(required=True)
 
 
 class GetVerificationStatusRequestSerializer(VerificationJobSerializer):

@@ -159,10 +159,9 @@ def create_verification_job(request: Request) -> Response:
         return error_return
 
     with transaction.atomic():
-        run = create_verification_job_internal(request.user, forecast_run)
+        run = create_verification_job_internal(forecast_run)
 
-        response = {'message': f'Verification Job {run.id} created', 'verification_job_id': run.id,
-                    'job_data_dir': get_verification_run_dir(run)}
+        response = {'message': f'Verification Job {run.id} created', 'verification_run_id': run.id}
 
         response_validator, error_response = validate_response(CreateVerificationJobResponseSerializer, response)
         if error_response:
