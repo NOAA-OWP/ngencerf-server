@@ -369,18 +369,15 @@ def create_forecast_run_internal(
     return forecast_run
 
 
-def create_verification_job_internal(user: User, forecast_run: ForecastRun) -> VerificationRun | Response:
+def create_verification_job_internal(forecast_run: ForecastRun) -> VerificationRun | Response:
     """
     Create a new VerificationRun for the given user.
 
-    :param user: Owner of the verification job.
     :param forecast_run Forecast Job to associate with this verification run
     :return: New VerificationRun instance.
     """
     verification_run = VerificationRun.objects.create(
-        owner=user,
-        forecast_run=forecast_run,
-        status=StatusEnum.SAVED.db_instance)
+        forecast_run=forecast_run)
 
     os.makedirs(get_verification_run_dir(verification_run))
     logger.info(f"Creating {get_job_description(verification_run)}")
