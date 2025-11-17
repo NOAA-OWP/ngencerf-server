@@ -73,7 +73,7 @@ def submit_job_to_slurm(run: BaseRun, owner: User, arguments: dict[str, str], st
     elif isinstance(run, VerificationRun):
         url_endpoint = settings.SLURM_SUBMIT_VERIFICATION_JOB_ENDPOINT
         payload = {
-            'verification_job_id': (None, run.id),
+            'verification_run_id': (None, run.id),
             'verification_config': (None, arguments['verification_config']),
             'stdout_file': (None, stdout_file),
         }

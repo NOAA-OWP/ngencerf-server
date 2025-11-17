@@ -169,19 +169,19 @@ def get_forecast_run(
 
 
 def get_verification_run(
-        verification_job_id: int,
+        verification_run_id: int,
         user: User | None,
         run_status: list[StatusEnum] | None = None
 ) -> tuple[VerificationRun | None, Response | None]:
     """
     Retrieve a VerificationRun by ID, optionally filtering by owner and status.
 
-    :param verification_job_id: The ID of the VerificationRun.
+    :param verification_run_id: The ID of the VerificationRun.
     :param user: User requesting the VerificationRun; if None, no owner filtering.
     :param run_status: Allowed statuses for the VerificationRun.
     :return: Tuple of VerificationRun or None, and Response if error or None.
     """
-    return get_run_instance(VerificationRun, verification_job_id, user, run_status, 'owner', 'is_archived')
+    return get_run_instance(VerificationRun, verification_run_id, user, run_status, 'forecast_run__calibration_run__owner', 'is_archived')
 
 
 def join_with_or(items: list[str]) -> str:
@@ -377,6 +377,7 @@ def create_verification_job_internal(forecast_run: ForecastRun) -> VerificationR
     :return: New VerificationRun instance.
     """
     verification_run = VerificationRun.objects.create(
+        status=StatusEnum.READY.db_instance,
         forecast_run=forecast_run)
 
     os.makedirs(get_verification_run_dir(verification_run))
