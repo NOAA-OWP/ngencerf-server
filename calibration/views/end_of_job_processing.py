@@ -176,9 +176,9 @@ def create_performance_metrics(run: BaseRun, performance_metrics_file: str) -> N
     performance_metrics = parse_performance_metrics(performance_metrics_file)
 
     if not performance_metrics:
-        # Fallback to calculate elapsed_time manually
-        elapsed_time = now() - run.run_start
-        performance_metrics = PerformanceMetrics.objects.create(elapsed_time=elapsed_time)
+        # Fallback to calculate run_time manually
+        run_time = now() - run.run_start
+        performance_metrics = PerformanceMetrics.objects.create(run_time=run_time)
 
     run.performance_metrics = performance_metrics
     run.save(update_fields=['performance_metrics', 'run_start'])
@@ -747,7 +747,7 @@ def parse_performance_metrics(file_path: str) -> PerformanceMetrics | None:
                 # Collect data from the .batch line with fallback to None for missing fields
                 batch_metrics = {
                     'slurm_job_id': job_id,
-                    'elapsed_time': parse_duration(row.get('Elapsed')),
+                    'run_time': parse_duration(row.get('Elapsed')),
                     'num_cpus': int(row.get('NCPUS')) if row.get('NCPUS') else None,
                     'cpu_time': parse_duration(row.get('CPUTime')),
                     'max_rss': parse_size_to_kb(row.get('MaxRSS')),

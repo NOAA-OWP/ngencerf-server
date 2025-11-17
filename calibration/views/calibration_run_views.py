@@ -320,7 +320,7 @@ def get_status_for_comparison(request: Request) -> Response:
                     'run_start': calibration_run.run_start,
                     'run_end': calibration_run.run_end,
                     'elapsed_time': (
-                        calibration_run.performance_metrics.elapsed_time
+                        calibration_run.performance_metrics.run_time
                         if calibration_run.performance_metrics
                         else (
                             calibration_run.run_end - calibration_run.run_start
@@ -413,12 +413,12 @@ def get_performance_metrics(performance_metrics) -> dict[str, str | int | float 
     """
     if not performance_metrics:
         return {field: None for field in [
-            "elapsed_time", "num_cpus", "cpu_time", "max_rss", "max_disk_read", "max_disk_write", "reserved_time", "io_throughput"
+            "run_time", "num_cpus", "cpu_time", "max_rss", "max_disk_read", "max_disk_write", "reserved_time", "io_throughput"
         ]}
 
     # Convert numeric fields to kilobytes
     metrics_dict = model_to_dict(performance_metrics, fields=[
-        "elapsed_time", "num_cpus", "cpu_time", "max_rss", "max_disk_read", "max_disk_write", "reserved_time"
+        "run_time", "num_cpus", "cpu_time", "max_rss", "max_disk_read", "max_disk_write", "reserved_time"
     ])
     # Manually add io_throughput since it's a generated field
     metrics_dict["io_throughput"] = performance_metrics.io_throughput

@@ -277,8 +277,12 @@ def get_verification_status(request: Request) -> Response:
         'submit_date': verification_job.submit_date,
         'run_start': verification_job.run_start,
         'run_end': verification_job.run_end,
-        'elapsed_time': verification_job.performance_metrics.elapsed_time if verification_job.performance_metrics else None
     }
+
+    if verification_job.run_end and verification_job.submit_date:
+        response['elapsed_time'] = verification_job.run_end - verification_job.submit_date
+    else:
+        response['elapsed_time'] = None
 
     # Conditionally retrieve verification performance metrics
     verification_metrics = get_performance_metrics(verification_job.performance_metrics) if should_include_metrics(verification_job.status,

@@ -1050,7 +1050,7 @@ class LoadOptimizationResponseSerializer(serializers.Serializer):
 ##################################
 
 class PerformanceMetricsSerializer(BaseSerializer):
-    elapsed_time = serializers.DurationField(required=True, allow_null=True)
+    run_time = serializers.DurationField(required=True, allow_null=True)
     num_cpus = serializers.IntegerField(required=True, allow_null=True)
     cpu_time = serializers.DurationField(required=True, allow_null=True)
     max_rss = serializers.CharField(required=True, allow_null=True)
