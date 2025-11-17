@@ -157,29 +157,29 @@ class CalibrationOrValidationOrColdStartOrForecastOrVerificationRunSerializer(Ba
     validation_run_id = serializers.IntegerField(required=False, allow_null=False)
     forecast_run_id = serializers.IntegerField(required=False, allow_null=False)
     cold_start_run_id = serializers.IntegerField(required=False, allow_null=False)
-    verification_job_id = serializers.IntegerField(required=False, allow_null=False)
+    verification_run_id = serializers.IntegerField(required=False, allow_null=False)
 
     def validate(self, data):
         """
-        Ensure that only one of calibration_run_id, validation_run_id, cold_start_run_id, forecast_run_id, or verification_job_id is specified.
+        Ensure that only one of calibration_run_id, validation_run_id, cold_start_run_id, forecast_run_id, or verification_run_id is specified.
         """
         calibration_run_id = data.get('calibration_run_id')
         validation_run_id = data.get('validation_run_id')
         cold_start_run_id = data.get('cold_start_run_id')
         forecast_run_id = data.get('forecast_run_id')
-        verification_job_id = data.get('verification_job_id')
+        verification_run_id = data.get('verification_run_id')
 
         # Collect the IDs that are specified (non-null and non-zero values)
         specified_ids = [
             id_value
-            for id_value in [calibration_run_id, validation_run_id, cold_start_run_id, forecast_run_id, verification_job_id]
+            for id_value in [calibration_run_id, validation_run_id, cold_start_run_id, forecast_run_id, verification_run_id]
             if id_value is not None
         ]
 
         # Check that exactly one ID is specified
         if len(specified_ids) != 1:
             raise serializers.ValidationError(
-                "You must specify exactly one of 'calibration_run_id', 'validation_run_id', 'cold_start_run_id', 'forecast_run_id' or 'verification_job_id'."
+                "You must specify exactly one of 'calibration_run_id', 'validation_run_id', 'cold_start_run_id', 'forecast_run_id' or 'verification_run_id'."
             )
 
         return data
@@ -1250,7 +1250,7 @@ class GetForecastJobsResponseSerializer(BaseSerializer):
 # Verification Tab
 ##################################
 class VerificationJobSerializer(BaseSerializer):
-    verification_job_id = serializers.IntegerField(required=True)
+    verification_run_id = serializers.IntegerField(required=True)
 
 
 class VerificationJobsResponseSerializer(BaseSerializer):
@@ -1290,12 +1290,12 @@ class RunVerificationJob(VerificationJobSerializer):
 
 
 class SubmitVerificationJobResponseSerializer(GenericMessageAndStatusResponseSerializer):
-    verification_job_id = serializers.IntegerField(required=True)
+    verification_run_id = serializers.IntegerField(required=True)
     submit_date = serializers.DateTimeField(required=True, allow_null=False)
 
 
 class GetVerificationStatusResponseSerializer(GenericMessageAndStatusResponseSerializer):
-    verification_job_id = serializers.IntegerField(required=True)
+    verification_run_id = serializers.IntegerField(required=True)
     status = serializers.CharField(validators=[enum_validator(StatusEnum)], required=True)
     warnings = serializers.ListField(required=False, child=serializers.CharField(required=True))
     errors = serializers.ListField(required=False, child=serializers.CharField(required=True))
@@ -1308,25 +1308,25 @@ class GetVerificationStatusResponseSerializer(GenericMessageAndStatusResponseSer
 
 
 class GetVerificationPlotNamesResponseSerializer(BaseSerializer):
-    verification_job_id = serializers.IntegerField(required=True)
+    verification_run_id = serializers.IntegerField(required=True)
     plot_names = PlotListStaticSerializer(many=True)
     status = serializers.CharField(required=True, validators=[enum_validator(StatusEnum)])
 
 
 class GetVerificationPlotRequestSerializer(BaseSerializer):
-    verification_job_id = serializers.IntegerField(required=True)
+    verification_run_id = serializers.IntegerField(required=True)
     plot_name = serializers.CharField(required=True, allow_null=False)
 
 
 class GetVerificationPlotResponseSerializer(BaseSerializer):
-    verification_job_id = serializers.IntegerField(required=True)
+    verification_run_id = serializers.IntegerField(required=True)
     plot_name = serializers.CharField(required=True, allow_null=False)
     plot_file_path = serializers.CharField(required=False, allow_null=False)
     plot_url = serializers.CharField(required=False, allow_null=False)
 
 
 class DeleteVerificationJobResponseSerializer(GenericMessageResponseSerializer):
-    verification_job_id = serializers.IntegerField(required=True)
+    verification_run_id = serializers.IntegerField(required=True)
 
 
 ##################################

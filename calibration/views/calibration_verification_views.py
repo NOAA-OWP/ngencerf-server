@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
         )
     },
     parameters=[
-        OpenApiParameter(name='verification_job_id', description='ID of the verification run', required=True, type=int)
+        OpenApiParameter(name='verification_run_id', description='ID of the verification run', required=True, type=int)
     ],
     description="Load verification job data"
 )
@@ -58,9 +58,9 @@ def load_verification_job(request: Request) -> Response:
     """
     Load data for a verification job.
 
-    - Calls create_verification_input(verification_job) to generate the config
+    - Calls create_verification_input(verification_run) to generate the config
 
-    :param request: HTTP request containing verification_job_id
+    :param request: HTTP request containing verification_run_id
     :return: JSON response with forecast cycle values.
     """
     data = request.data if request.method == 'POST' else request.query_params.dict()
@@ -70,33 +70,33 @@ def load_verification_job(request: Request) -> Response:
     if error_return:
         return error_return
 
-    verification_job_id = validator.get('verification_job_id')
+    verification_run_id = validator.get('verification_run_id')
 
-    verification_job, error_return = get_verification_run(verification_job_id, request.user, run_status=list(StatusEnum))
+    verification_run, error_return = get_verification_run(verification_run_id, request.user, run_status=list(StatusEnum))
     if error_return:
         return error_return
 
-    if not os.path.exists(get_verification_yaml_config_file(verification_job)):
+    if not os.path.exists(get_verification_yaml_config_file(verification_run)):
         try:
-            error = create_verification_input(verification_job)
+            error = create_verification_input(verification_run)
             if error.has_errors():
                 return ResponseError(error)
             # Set status to Ready if YAML file is created successfully
-            verification_job.status = StatusEnum.READY.db_instance
-            verification_job.save()
+            verification_run.status = StatusEnum.READY.db_instance
+            verification_run.save()
         except Exception as e:
             return ResponseError(f"Error: {e}")
 
     response = {
-        'verification_job_id': verification_job.id,
-        'status': verification_job.status.name,
-        'created_at': verification_job.created_at,
-        'submit_date': verification_job.submit_date,
-        'run_start': verification_job.run_start,
-        'run_end': verification_job.run_end
+        'verification_run_id': verification_run.id,
+        'status': verification_run.status.name,
+        'created_at': verification_run.created_at,
+        'submit_date': verification_run.submit_date,
+        'run_start': verification_run.run_start,
+        'run_end': verification_run.run_end
     }
 
-    forecast_run, error_return = get_forecast_run(verification_job.forecast_run.id, request.user, run_status=list(StatusEnum))
+    forecast_run, error_return = get_forecast_run(verification_run.forecast_run.id, request.user, run_status=list(StatusEnum))
     if error_return:
         return error_return
     response['forecast_run'] = {
@@ -104,7 +104,7 @@ def load_verification_job(request: Request) -> Response:
         'domain_name': forecast_run.calibration_run.gage.domain.name,
         'forecast_run_id': forecast_run.id,
         'configuration': forecast_run.configuration.name,
-        'cycle_date': verification_job.forecast_run.cycle_date,
+        'cycle_date': verification_run.forecast_run.cycle_date,
         'gage_id': forecast_run.calibration_run.gage_id,
         'forecast_status': forecast_run.status.name,
         'submit_date': forecast_run.submit_date
@@ -203,10 +203,10 @@ def run_verification(request: Request) -> Response:
     if error_return:
         return error_return
 
-    verification_job_id = validator.get('verification_job_id')
+    verification_run_id = validator.get('verification_run_id')
     logging_config = validator.get('logging_config')
 
-    run, error_return = get_verification_run(verification_job_id, request.user)
+    run, error_return = get_verification_run(verification_run_id, request.user)
     if error_return:
         return error_return
 
@@ -215,7 +215,7 @@ def run_verification(request: Request) -> Response:
         return error_response
 
     response = {'message': f'Verification Job {run.id} has been submitted',
-                'verification_job_id': verification_job_id,
+                'verification_run_id': verification_run_id,
                 'status': run.status.name,
                 'submit_date': run.submit_date}
 
@@ -261,21 +261,22 @@ def get_verification_status(request: Request) -> Response:
     if error_return:
         return error_return
 
-    verification_job_id = validator.get('verification_job_id')
+    verification_run_id = validator.get('verification_run_id')
     include_performance_metrics = validator.get('include_performance_metrics')
 
-    verification_job, error_return = get_verification_run(verification_job_id, request.user, run_status=list(StatusEnum))
+    verification_run, error_return = get_verification_run(verification_run_id, request.user, run_status=list(StatusEnum))
     if error_return:
         return error_return
 
     # Prepare the main response
     response = {
-        'message': f'Verification Job {verification_job.id}, status is {verification_job.status.name}',
-        'verification_job_id': verification_job.id,
-        'status': verification_job.status.name,
-        'submit_date': verification_job.submit_date,
-        'run_start': verification_job.run_start,
-        'run_end': verification_job.run_end,
+        'message': f'Verification Job {verification_run.id}, status is {verification_run.status.name}',
+        'verification_run_id': verification_run.id,
+        'status': verification_run.status.name,
+        'submit_date': verification_run.submit_date,
+        'run_start': verification_run.run_start,
+        'run_end': verification_run.run_end,
+        'elapsed_time': verification_run.performance_metrics.elapsed_time if verification_run.performance_metrics else None
     }
 
     if verification_job.run_end and verification_job.submit_date:
@@ -284,14 +285,14 @@ def get_verification_status(request: Request) -> Response:
         response['elapsed_time'] = None
 
     # Conditionally retrieve verification performance metrics
-    verification_metrics = get_performance_metrics(verification_job.performance_metrics) if should_include_metrics(verification_job.status,
+    verification_metrics = get_performance_metrics(verification_run.performance_metrics) if should_include_metrics(verification_run.status,
                                                                                                                    include_performance_metrics) else None
 
     # Conditionally add verification run performance metrics to response if requested and status is DONE or FAIL
     if verification_metrics:
         response['performance_metrics'] = verification_metrics
 
-    fm_ver = parse_failure_messages(verification_job.failure_messages)
+    fm_ver = parse_failure_messages(verification_run.failure_messages)
     if fm_ver is not None:
         response['failure_messages'] = fm_ver
 
@@ -340,9 +341,9 @@ def get_verification_plot_names(request: Request) -> Response:
     if error_return:
         return error_return
 
-    verification_job_id = validator.get('verification_job_id')
+    verification_run_id = validator.get('verification_run_id')
 
-    run, error_return = get_verification_run(verification_job_id, request.user,
+    run, error_return = get_verification_run(verification_run_id, request.user,
                                              run_status=[StatusEnum.RUNNING, StatusEnum.DONE, StatusEnum.CANCELLED, StatusEnum.FAILED,
                                                          StatusEnum.SERVER_ERROR])
     if error_return:
@@ -369,7 +370,7 @@ def get_verification_plot_names(request: Request) -> Response:
         logger.warning(f"Unable to get plots for {get_job_description(run)} due to error: {e}")
 
     response = {
-        "verification_job_id": run.id,
+        "verification_run_id": run.id,
         'plot_names': plot_names,
         'status': run.status.name
     }
@@ -423,17 +424,17 @@ def get_verification_plot(request: Request) -> Response:
     if error_return:
         return error_return
 
-    verification_job_id = validator.get('verification_job_id')
+    verification_run_id = validator.get('verification_run_id')
 
     plot_name = validator.get('plot_name')
 
     # Replace spaces with underscores in plot_name to avoid CacheKeyWarning
     sanitized_plot_name = plot_name.replace(" ", "_").replace("/", "_")
     # Base cache key common part
-    cache_key_base = f"{sanitized_plot_name}_{verification_job_id}"
+    cache_key_base = f"{sanitized_plot_name}_{verification_run_id}"
     cache_key_plot_url = f"plot_url_{cache_key_base}"
 
-    run, error_return = get_verification_run(verification_job_id, request.user, run_status=[StatusEnum.RUNNING, StatusEnum.DONE])
+    run, error_return = get_verification_run(verification_run_id, request.user, run_status=[StatusEnum.RUNNING, StatusEnum.DONE])
     if error_return:
         return error_return
 
@@ -454,7 +455,7 @@ def get_verification_plot(request: Request) -> Response:
         'plot_name': plot_name,
         'plot_url': plot_url,
         'plot_file_path': plot_file_path,
-        'verification_job_id': verification_job_id
+        'verification_run_id': verification_run_id
     }
 
     # Validate and return response
@@ -504,9 +505,9 @@ def delete_verification_job(request: Request) -> Response:
     if error_return:
         return error_return
 
-    verification_job_id = validator.get('verification_job_id')
+    verification_run_id = validator.get('verification_run_id')
 
-    run, error_return = get_verification_run(verification_job_id, request.user, run_status=list(StatusEnum))
+    run, error_return = get_verification_run(verification_run_id, request.user, run_status=list(StatusEnum))
     if error_return:
         return error_return
 
@@ -518,7 +519,7 @@ def delete_verification_job(request: Request) -> Response:
     # Proceed with deletion
     hard_delete(run)
 
-    response = {'message': f'Verification Job {run.id} and associated records have been deleted', 'verification_job_id': run_id}
+    response = {'message': f'Verification Job {run.id} and associated records have been deleted', 'verification_run_id': run_id}
 
     response_validator, error_response = validate_response(DeleteVerificationJobResponseSerializer, response)
     if error_response:
