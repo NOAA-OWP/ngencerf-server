@@ -29,7 +29,6 @@ from calibration.views.called_from import get_caller_name
 from calibration.views.common import handle_exceptions, validate_response, validate_request, \
     get_forecast_run, get_verification_run, ResponseError, get_user_email, get_elapsed_str, \
     create_verification_job_internal, png_to_base64_url, truncate_large_fields, get_job_description
-from calibration.views.verification_input import create_verification_input
 
 logger = logging.getLogger(__name__)
 
@@ -58,8 +57,6 @@ def load_verification_job(request: Request) -> Response:
     """
     Load data for a verification job.
 
-    - Calls create_verification_input(verification_run) to generate the config
-
     :param request: HTTP request containing verification_run_id
     :return: JSON response with forecast cycle values.
     """
@@ -75,17 +72,6 @@ def load_verification_job(request: Request) -> Response:
     verification_run, error_return = get_verification_run(verification_run_id, request.user, run_status=list(StatusEnum))
     if error_return:
         return error_return
-
-    if not os.path.exists(get_verification_yaml_config_file(verification_run)):
-        try:
-            error = create_verification_input(verification_run)
-            if error.has_errors():
-                return ResponseError(error)
-            # Set status to Ready if YAML file is created successfully
-            verification_run.status = StatusEnum.READY.db_instance
-            verification_run.save()
-        except Exception as e:
-            return ResponseError(f"Error: {e}")
 
     response = {
         'verification_run_id': verification_run.id,
@@ -157,10 +143,12 @@ def create_verification_job(request: Request) -> Response:
     forecast_run, error_return = get_forecast_run(forecast_run_id, request.user, run_status=[StatusEnum.DONE])
     if error_return:
         return error_return
+    
+    run, error_response = create_verification_job_internal(forecast_run)
+    if error_response:
+      return error_response
 
     with transaction.atomic():
-        run = create_verification_job_internal(forecast_run)
-
         response = {'message': f'Verification Job {run.id} created', 'verification_run_id': run.id}
 
         response_validator, error_response = validate_response(CreateVerificationJobResponseSerializer, response)
