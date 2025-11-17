@@ -264,11 +264,11 @@ def get_verification_status(request: Request) -> Response:
         'submit_date': verification_run.submit_date,
         'run_start': verification_run.run_start,
         'run_end': verification_run.run_end,
-        'elapsed_time': verification_run.performance_metrics.elapsed_time if verification_run.performance_metrics else None
+        'elapsed_time': verification_run.run_end - verification_run.submit_date if verification_run.run_end and verification_run.submit_date else None
     }
 
-    if verification_job.run_end and verification_job.submit_date:
-        response['elapsed_time'] = verification_job.run_end - verification_job.submit_date
+    if verification_run.run_end and verification_run.submit_date:
+        response['elapsed_time'] = verification_run.run_end - verification_run.submit_date
     else:
         response['elapsed_time'] = None
 
