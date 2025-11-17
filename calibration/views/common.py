@@ -1113,20 +1113,16 @@ def create_verification_input(run: VerificationRun) -> ErrorReport | None:
 
     error_object = ErrorReport()
     config = copy.deepcopy(CONFIG_TEMPLATE)
-
-    # -----------------------------
-    # READ-ONLY PHASE
-    # -----------------------------
-    with readonly_transaction():
-        allowed_status_names = [StatusEnum.SAVED.value, StatusEnum.READY.value]
-        if run.status.name not in allowed_status_names:
-            job_name = 'Verification'
-            error_object.add_warning(
-                f'{job_name} Job {run.id} is not in an allowed status: '
-                f'{join_with_or(allowed_status_names)}. '
-                f'Current status: {run.status.name}'
-            )
-            return error_object
+    
+    allowed_status_names = [StatusEnum.SAVED.value, StatusEnum.READY.value]
+    if run.status.name not in allowed_status_names:
+        job_name = 'Verification'
+        error_object.add_warning(
+            f'{job_name} Job {run.id} is not in an allowed status: '
+            f'{join_with_or(allowed_status_names)}. '
+            f'Current status: {run.status.name}'
+        )
+        return error_object
 
     # Add hard-coded file paths to YAML
     config['file_paths'] = {
