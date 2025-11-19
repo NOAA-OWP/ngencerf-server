@@ -1146,8 +1146,8 @@ def create_verification_input(run: VerificationRun) -> None:
     general['nwm_configuration'] = run.forecast_run.configuration.internal_name
     general['dataset_name'] = [run.forecast_run.calibration_run.user_formulation_name]
     general['nwm_version'] = ['ngen']
-    general['forecast_start_date'] = [run.forecast_run.cycle_date.strftime("%Y-%m-%d")]
-    general['forecast_end_date'] = [run.forecast_run.cycle_date.strftime("%Y-%m-%d")]
+    general['forecast_start_date'] = [format_datetime(run.forecast_run.cycle_date)]
+    general['forecast_end_date'] = [format_datetime(run.forecast_run.cycle_date)]
     config['nwm_forecast']['data_source'] = 'ngenCERF'
     file_paths['crosswalk_file'] = {'ngen': VERF_CROSSWALK_NGEN_FILE}
     file_paths['fcst_data_file'] = {}

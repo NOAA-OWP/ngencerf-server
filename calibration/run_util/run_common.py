@@ -23,8 +23,10 @@ from calibration.models.base_run import BaseRun
 from calibration.util.git_util import get_git_info_internal
 from calibration.util.ngen_locations import get_calibration_input_file, get_validation_best_stdout_file, get_validation_control_stdout_file, \
     get_calibration_stdout_file, get_validation_best_input_file, get_validation_control_input_file, get_validation_iteration_stdout_file, \
-    get_forecast_stdout_file, get_forecast_dir, get_validation_iteration_git_info_file, get_validation_special_git_info_file, get_calibration_git_info_file, \
-    get_forecast_git_info_file, get_forcing_dir_for_job, get_verification_yaml_config_file, get_verification_git_info_file, get_verification_stdout_file, \
+    get_forecast_stdout_file, get_forecast_dir, get_validation_iteration_git_info_file, get_validation_special_git_info_file, \
+    get_calibration_git_info_file, \
+    get_forecast_git_info_file, get_forcing_dir_for_job, get_verification_yaml_config_file, get_verification_git_info_file, \
+    get_verification_stdout_file, \
     get_observational_file_for_job, get_forecast_realization_file, get_cold_start_realization_file, get_cold_start_stdout_file, get_cold_start_dir, \
     get_cold_start_git_info_file
 from calibration.views import ngen_cal_input
@@ -198,7 +200,6 @@ def execute_job(run: BaseRun, cmd_line_args: dict[str, str], stdout_file: str, s
 
     run.sent_date = datetime.now(timezone.utc)
     run.save(update_fields=['sent_date'])
-
 
 
 def cancel_job_common(run: BaseRun) -> bool:

@@ -478,7 +478,7 @@ def get_verification_plot(request: Request) -> Response:
 @handle_exceptions
 def delete_verification_job(request: Request) -> Response:
     """
-    Delete a verification job. Performs a hard delete if the run status is SAVED or READY, 
+    Delete a verification job. Performs a hard delete if the run status is SAVED or READY,
     and a soft delete otherwise.
 
     :param request: The HTTP request object.
