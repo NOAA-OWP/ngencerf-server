@@ -37,7 +37,7 @@ from calibration.util.cloud_util import path_exists
 from calibration.util.ngen_locations import get_forecast_dir, get_output_calibration_run_dir, \
     get_output_validation_run_dir, get_cold_start_dir, get_ngen_logging_file, \
     get_ngen_logging_basename, get_forecast_output_file, get_verification_run_dir, \
-    get_verification_yaml_config_file, VERF_CROSSWALK_NGEN_FILE, VERF_GAGE_HYDROFABRIC_FILE
+    get_verification_yaml_config_file, VERF_CROSSWALK_NGEN_FILE
 from calibration.views.called_from import called_from
 
 logger = logging.getLogger(__name__)
@@ -1125,7 +1125,6 @@ def create_verification_input(run: VerificationRun) -> None:
     config['file_paths'] = {
         'base_dir': get_verification_run_dir(run),
         'fcst_config_file': generate_forecast_config_yaml(),
-        'gage_hydrofabric_file': VERF_GAGE_HYDROFABRIC_FILE,
         'output_dir': get_verification_run_dir(run),
     }
 

@@ -35,7 +35,6 @@ files = [
     SAC_LIB := os.path.join(settings.NGEN_REPO_ROOT, 'extern', 'sac-sma', 'cmake_build', 'libsacbmi.so'),
     UEB_LIB := os.path.join(settings.NGEN_REPO_ROOT, 'extern', 'ueb-bmi', 'cmake_build', 'src', 'libbmiuebcxx.so'),
     VERF_CROSSWALK_NGEN_FILE := os.path.join(VERF_DATA, 'usgs_ngen_crosswalk_all_domains.parquet'),
-    VERF_GAGE_HYDROFABRIC_FILE := os.path.join(VERF_DATA, 'gage_hydrofabric_all_domains.parquet'),
 ]
 
 
