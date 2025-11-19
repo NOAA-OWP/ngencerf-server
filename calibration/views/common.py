@@ -6,13 +6,13 @@ import logging
 import os
 import re
 import time
-import yaml
 from contextlib import contextmanager
 from datetime import timedelta, datetime
 from functools import wraps
 from typing import Type, Any, Callable, cast
 
 import numpy as np
+import yaml
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import transaction, connection
@@ -35,7 +35,7 @@ from calibration.util.caching import get_cached_modules_by_id, generate_forecast
 from calibration.util.calibration_validators import ErrorResponseSerializer, BaseSerializer
 from calibration.util.cloud_util import path_exists
 from calibration.util.ngen_locations import get_forecast_dir, get_output_calibration_run_dir, \
-    get_output_validation_run_dir, get_cold_start_dir, get_verification_run_dir, get_ngen_logging_file, \
+    get_output_validation_run_dir, get_cold_start_dir, get_ngen_logging_file, \
     get_ngen_logging_basename, get_forecast_output_file, get_verification_run_dir, \
     get_verification_yaml_config_file, VERF_CROSSWALK_NGEN_FILE, VERF_GAGE_HYDROFABRIC_FILE
 from calibration.views.called_from import called_from
@@ -373,7 +373,7 @@ def create_forecast_run_internal(
     return forecast_run
 
 
-def create_verification_job_internal(forecast_run: ForecastRun) -> VerificationRun | Response:
+def create_verification_run_internal(forecast_run: ForecastRun) -> VerificationRun | Response:
     """
     Create a new VerificationRun for the given user.
 
@@ -383,20 +383,15 @@ def create_verification_job_internal(forecast_run: ForecastRun) -> VerificationR
     :return: New VerificationRun instance.
     """
     verification_run = VerificationRun.objects.create(
-        status=StatusEnum.READY.db_instance,
+        status=StatusEnum.SAVED.db_instance,
         forecast_run=forecast_run)
 
     os.makedirs(get_verification_run_dir(verification_run))
     logger.info(f"Creating {get_job_description(verification_run)}")
-    
-    try:
-        error = create_verification_input(verification_run)
-        if error.has_errors():
-            return None, ResponseError(error)
-    except Exception as e:
-        return None, ResponseError(f"Error: {e}")
-    
-    return verification_run, None
+
+    create_verification_input(verification_run)
+
+    return verification_run
 
 
 TOKEN_SLURM_SCOPE = 'slurm_callback'
@@ -1037,6 +1032,7 @@ def readonly_transaction():
             cursor.execute("SET TRANSACTION READ ONLY")
         yield
 
+
 # putting this here for now to avoid circular import
 # DO NOT MODIFY THIS TEMPLATE IN-PLACE.
 # Use `copy.deepcopy(CONFIG_TEMPLATE)` to safely create per-thread instances.
@@ -1102,7 +1098,8 @@ CONFIG_TEMPLATE = {
 
 }
 
-def create_verification_input(run: VerificationRun) -> ErrorReport | None:
+
+def create_verification_input(run: VerificationRun) -> None:
     """
     :param run: The VerificationRun instance to validate and prepare.
     :return: A tuple (ErrorReport, config_file_path):
@@ -1111,18 +1108,18 @@ def create_verification_input(run: VerificationRun) -> ErrorReport | None:
     """
     logger.info(called_from())
 
-    error_object = ErrorReport()
+    # error_object = ErrorReport()
     config = copy.deepcopy(CONFIG_TEMPLATE)
-    
-    allowed_status_names = [StatusEnum.SAVED.value, StatusEnum.READY.value]
-    if run.status.name not in allowed_status_names:
-        job_name = 'Verification'
-        error_object.add_warning(
-            f'{job_name} Job {run.id} is not in an allowed status: '
-            f'{join_with_or(allowed_status_names)}. '
-            f'Current status: {run.status.name}'
-        )
-        return error_object
+
+    # allowed_status_names = [StatusEnum.SAVED.value, StatusEnum.READY.value]
+    # if run.status.name not in allowed_status_names:
+    #     job_name = 'Verification'
+    #     error_object.add_warning(
+    #         f'{job_name} Job {run.id} is not in an allowed status: '
+    #         f'{join_with_or(allowed_status_names)}. '
+    #         f'Current status: {run.status.name}'
+    #     )
+    #     return error_object
 
     # Add hard-coded file paths to YAML
     config['file_paths'] = {
@@ -1142,20 +1139,18 @@ def create_verification_input(run: VerificationRun) -> ErrorReport | None:
     general['nwm_configuration'] = run.forecast_run.configuration.internal_name
     general['dataset_name'] = [run.forecast_run.calibration_run.user_formulation_name]
     general['nwm_version'] = ['ngen']
-    general['forecast_start_date'] = [run.forecast_run.cycle_date.strftime("%Y-%m-%d")]
-    general['forecast_end_date'] = [run.forecast_run.cycle_date.strftime("%Y-%m-%d")]
+    general['forecast_start_date'] = [format_datetime(run.forecast_run.cycle_date)]
+    general['forecast_end_date'] = [format_datetime(run.forecast_run.cycle_date)]
     config['nwm_forecast']['data_source'] = 'ngenCERF'
     file_paths['crosswalk_file'] = {'ngen': VERF_CROSSWALK_NGEN_FILE}
     file_paths['fcst_data_file'] = {}
     file_paths['fcst_data_file'][run.forecast_run.calibration_run.user_formulation_name] = get_forecast_output_file(run.forecast_run)
-    
+
     # -----------------------------
     # FILE WRITE PHASE
     # -----------------------------
     config_location = get_verification_yaml_config_file(run)
-    if not error_object.has_errors() and not error_object.has_warnings():
-        with open(config_location, 'w') as config_file:
-            yaml.dump(config, config_file, default_flow_style=False)
-            logger.info(f"Writing new YAML file to {config_location}")
-
-    return error_object
+    # if not error_object.has_errors() and not error_object.has_warnings():
+    with open(config_location, 'w') as config_file:
+        yaml.dump(config, config_file, default_flow_style=False)
+        logger.info(f"Writing new YAML file to {config_location}")

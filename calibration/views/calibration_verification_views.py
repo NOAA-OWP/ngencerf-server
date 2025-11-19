@@ -28,7 +28,7 @@ from calibration.views.calibration_run_views import get_performance_metrics, sho
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import handle_exceptions, validate_response, validate_request, \
     get_forecast_run, get_verification_run, ResponseError, get_user_email, get_elapsed_str, \
-    create_verification_job_internal, png_to_base64_url, truncate_large_fields, get_job_description
+    create_verification_run_internal, png_to_base64_url, truncate_large_fields, get_job_description
 
 logger = logging.getLogger(__name__)
 
@@ -143,10 +143,8 @@ def create_verification_job(request: Request) -> Response:
     forecast_run, error_return = get_forecast_run(forecast_run_id, request.user, run_status=[StatusEnum.DONE])
     if error_return:
         return error_return
-    
-    run, error_response = create_verification_job_internal(forecast_run)
-    if error_response:
-      return error_response
+
+    run = create_verification_run_internal(forecast_run)
 
     with transaction.atomic():
         response = {'message': f'Verification Job {run.id} created', 'verification_run_id': run.id}
@@ -480,7 +478,7 @@ def get_verification_plot(request: Request) -> Response:
 @handle_exceptions
 def delete_verification_job(request: Request) -> Response:
     """
-    Delete a verification job. Performs a hard delete if the run status is SAVED or READY, 
+    Delete a verification job. Performs a hard delete if the run status is SAVED or READY,
     and a soft delete otherwise.
 
     :param request: The HTTP request object.
