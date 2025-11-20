@@ -29,69 +29,59 @@ logger = logging.getLogger(__name__)
 User = get_user_model()
 
 """
-Instructions for UI developer.  Will be deleted once we have this implemented
+Job Retrieval Endpoints for Calibration, Forecast, and Verification
+===================================================================
 
-UI Behavior Requirements for Job List (Calibration + Forecast Screens)
-=====================================================================
+This module provides a unified, consistent interface for retrieving job
+records across the CERF workflow, including Calibration, Forecast, and
+Verification runs. All endpoints support:
 
-All filter and sorting changes trigger a fresh API call:
+  • Server-side filtering
+  • Server-side sorting
+  • Pagination with offset + limit
+  • Optional ID-only responses
+  • Optional gage list retrieval
+  • Consistent date and ID ranges for client-side filtering
+  • Read-only execution to reduce database contention
 
-- When the user changes any filter (gage_id, status, modules, include_archived, etc.),
-  immediately request data with offset = 0.
-- When the user changes sorting (either field or direction),
-  immediately request data with offset = 0.
-- No “Apply” button is required; auto-submit on change is acceptable.
-  The server is optimized for this pattern — each response should return
-  a single page of results almost instantly (well under one second in typical use).
-
-
-Pagination behavior
--------------------
-- Next/Previous page or page number click updates offset
-  to the appropriate value (e.g., offset = pageIndex * limit)
-- Changing limit resets offset to 0
-- Changing filters or sort always resets offset to 0
-- Implement anticipatory loading (prefetching):
-  When fetching a page (e.g., limit = 25), request and locally cache
-  both the previous and next pages relative to the current one.
-  This ensures that when the user scrolls forward (Next) or backward (Previous),
-  data for those adjacent pages is already available.
-  Once the user navigates to a new page, prefetch the next one in that direction.
-  This rolling prefetch avoids lag while keeping memory usage predictable.
+The central function `get_jobs()` implements Calibration job retrieval.
+Forecast and Verification endpoints follow the same pattern.
 
 Request payload shape
 ---------------------
-Use this shape for every request (omit keys you’re not using):
+Use this general shape for every request (omit keys you are not using):
 
     limit: integer page size (e.g., 25)
     offset: integer row offset (0-based)
     filters: object with any of:
         gage_id: string
-        status: array of validated status names (e.g. ["Done", "Failed"])
-        module_filter: object with:
-            operator: "and" | "or"       (default = "and")
-            modules: array of module names
-        date_filter: object with:
+        status: array of status labels (e.g. ["Done", "Failed"])
+        module_filter:
+            operator: "and" | "or"
+            modules: list of module names
+        date_filter:
             operator: "before" | "after" | "between"
-            create_date: "YYYY-MM-DD"    # used for 'before' or 'after'
-            start_date: "YYYY-MM-DD"     # used for 'between'
-            end_date: "YYYY-MM-DD"       # used for 'between'
-        id_filter: object with:
+            create_date: YYYY-MM-DD     # before/after
+            start_date: YYYY-MM-DD      # between
+            end_date: YYYY-MM-DD        # between
+        id_filter:
             operator: "before" | "after" | "between"
-            id: integer                  # used for 'before' or 'after'
-            start_id: integer            # used for 'between'
-            end_id: integer              # used for 'between'
-        include_archived: boolean (false by default on backend)
-    sort: object with:
-        field: one of the server-allowed fields
+            id: integer                 # before/after
+            start_id: integer           # between
+            end_id: integer             # between
+        include_archived: boolean
+    sort:
+        field: allowed sort field name
         direction: "asc" or "desc"
-    ids_only: boolean (false by default; when true, only job IDs are returned)
+    ids_only: boolean
+    get_gages: boolean
 
-Do NOT send empty/defaults.
-If there are no filters, omit "filters".
-If there is no sort, omit "sort".
+Do not send empty/default filters or sort objects.
 
-Example request (as plain text):
+Examples
+--------
+
+Full example:
 
     {
         "limit": 25,
@@ -113,79 +103,55 @@ Example request (as plain text):
             },
             "include_archived": false
         },
-        "sort": { "field": "submit_date", "direction": "asc" },
-        "ids_only": false
+        "sort": { "field": "submit_date", "direction": "asc" }
     }
 
-Example with date range filter:
+Date range example:
 
     {
-      "limit": 25,
-      "offset": 0,
-      "filters": {
-          "date_filter": {
-              "operator": "between",
-              "start_date": "2025-01-01",
-              "end_date": "2025-02-01"
-          }
-      }
+        "limit": 25,
+        "offset": 0,
+        "filters": {
+            "date_filter": {
+                "operator": "between",
+                "start_date": "2025-01-01",
+                "end_date": "2025-02-01"
+            }
+        }
     }
 
 Minimal example:
 
     { "limit": 25, "offset": 0 }
 
-Allowed sort fields (must match what backend supports):
+Key concepts
+------------
 
-- Calibration: id, gage_id, formulation_name, submit_date, create_date,
-  job_genesis, status, period, stop_criteria, validation_runs
-- Forecast: id, gage_id, submit_date, create_date, cycle_date, configuration, domain_name, status
-- Verification: id, forecast_run_id, submit_date, create_date, status
+Status handling
+    Calibration jobs include both their own status and the statuses of their
+    associated validation runs. The module computes a deterministic
+    combined_status, and all user-supplied status filters apply to this value.
 
-Default sort (when not provided): by -id on the server.
+Filtering
+    All job types support gage filters, status filters, module membership,
+    date filters, ID filters, and archive toggles.
 
-Client UI Interaction:
+Sorting
+    Sorting uses server-approved fields defined in Enum classes
+    (e.g., CalibrationSortField). Multi-field sorts are supported.
 
-- Single “Sort by” select for field, plus a toggle for asc/desc
-  (default asc when field is first selected).
-- gage_id: free-text input with debounce (250–400 ms). Pressing Enter or blur
-  immediately triggers request (offset = 0). Include a clear/reset button.
-- status: multi-select with backend-approved label values.
-- modules: multi-select from server-provided list.
-- include_archived: checkbox (unchecked by default).
-- All filter changes immediately fetch data with offset = 0.
-- Debounce text filters, but not dropdowns or checkboxes.
+Pagination
+    Offset/limit pagination applies after filtering and sorting.
+    The module always returns total_count before pagination.
 
-UX expectations:
+Range metadata
+    Each endpoint returns:
+        • date_range = [min_created_at, max_created_at]
+        • id_range   = [min_id, max_id]
 
-- Show loading indicator while fetching. Disable pagination controls during load.
-- Always display total_count from server.
-- Always allow date filtering based on date_range from server.
-- Always allow id filtering based on id_range from server.
-- Show “Showing 26–50 of 137” style summary.
-- Keep filters + sort visibly summarized.
-- URL query string SHOULD reflect current limit/offset/filters/sort
-  (optional but recommended).
-
-Error / Empty States:
-
-- If total_count = 0, show “No jobs match your filters. Clear filters?”.
-- If API error, show toast/banner, allow retry, keep last good data visible.
-- Ensure ARIA + keyboard accessibility.
-
-Performance guidance:
-
-- Don’t send the request if nothing actually changed.
-- Optimistically flip sort indicators during user interaction.
-- Optionally cache results by a hash of {limit, offset, filters, sort}.
-- Implement rolling prefetch for pagination (anticipatory loading):
-  Always keep both the previous and next pages of the current page preloaded.
-  Replace older cached pages as the user scrolls forward or backward
-  to keep memory footprint predictable.
-
-This ensures consistent behavior: any filter or sort change resets offset = 0
-and immediately fetches new server data. Pagination manipulates offset only,
-while prefetching makes transitions instantaneous.
+Read-only execution
+    All retrieval runs inside a read-only transaction wrapper to reduce
+    lock contention.
 """
 
 
