@@ -759,9 +759,11 @@ def get_jobs(
         base_qs = CalibrationRun.objects.filter(query)
 
         # ─────────────────────────────────────────────────────────────
-        # Always annotate validation_control_status + validation_best_status
-        # because both ids_only and full mode require these for filtering.
-        # Only skip validation_run_count when ids_only=True.
+        # Always annotate validation_control_status + validation_best_status.
+        # combined_status depends on these values, so they must be present
+        # for BOTH ids_only and full-detail modes.
+        # The only thing skipped in ids_only mode is validation_run_count,
+        # because it is not needed for combined_status or filtering.
         # ─────────────────────────────────────────────────────────────
         base_qs = base_qs.annotate(
             validation_control_status=Subquery(
@@ -798,13 +800,16 @@ def get_jobs(
             )
 
         # ───── Combined status computation ─────
-        # The Case/When sequence below defines deterministic precedence among statuses.
-        # Django’s Case() evaluates conditions in order and stops at the first match.
-        #     in descending order of severity. There’s no built-in way to compute
-        #     the “worst” status across multiple columns dynamically.
+        # Combined status computation:
+        # Django’s Case() evaluates WHEN clauses in order and stops at the first match.
+        # This explicit ordering defines the severity precedence manually.
         #
         # Precedence (highest → lowest):
         #   Running → Server_Error → Failed → Cancelled → Submitted → Done → Saved/Ready
+        #
+        # combined_status is ALWAYS computed (even when ids_only=True) so that:
+        #   • status filters behave consistently in both modes
+        #   • pagination and filtering always operate on the same rows
         #
         # Rules:
         #   • If calibration is not Done → combined = calibration status
@@ -817,83 +822,80 @@ def get_jobs(
         #       – If all existing validations are Done → combined = Done
         #   • Missing validations are ignored.
         # ------------------------------------------------------------------
-        if ids_only:
-            base_qs = base_qs.annotate(combined_status=F("status__name"))
-        else:
-            base_qs = base_qs.annotate(
-                combined_status=Case(
-                    # Calibration not done → use calibration status directly
-                    When(~Q(status__name=StatusEnum.DONE.value), then=F("status__name")),
+        base_qs = base_qs.annotate(
+            combined_status=Case(
+                # Calibration not done → use calibration status directly
+                When(~Q(status__name=StatusEnum.DONE.value), then=F("status__name")),
 
-                    # Calibration done but any validation running
-                    When(
-                        Q(status__name=StatusEnum.DONE.value)
-                        & (
-                                Q(validation_control_status=StatusEnum.RUNNING.value)
-                                | Q(validation_best_status=StatusEnum.RUNNING.value)
-                        ),
-                        then=Value(StatusEnum.RUNNING.value),
+                # Calibration done but any validation running
+                When(
+                    Q(status__name=StatusEnum.DONE.value)
+                    & (
+                            Q(validation_control_status=StatusEnum.RUNNING.value)
+                            | Q(validation_best_status=StatusEnum.RUNNING.value)
                     ),
+                    then=Value(StatusEnum.RUNNING.value),
+                ),
 
-                    # Calibration done but any validation server error
-                    When(
-                        Q(status__name=StatusEnum.DONE.value)
-                        & (
-                                Q(validation_control_status=StatusEnum.SERVER_ERROR.value)
-                                | Q(validation_best_status=StatusEnum.SERVER_ERROR.value)
-                        ),
-                        then=Value(StatusEnum.SERVER_ERROR.value),
+                # Calibration done but any validation server error
+                When(
+                    Q(status__name=StatusEnum.DONE.value)
+                    & (
+                            Q(validation_control_status=StatusEnum.SERVER_ERROR.value)
+                            | Q(validation_best_status=StatusEnum.SERVER_ERROR.value)
                     ),
+                    then=Value(StatusEnum.SERVER_ERROR.value),
+                ),
 
-                    # Calibration done but any validation failed
-                    When(
-                        Q(status__name=StatusEnum.DONE.value)
-                        & (
-                                Q(validation_control_status=StatusEnum.FAILED.value)
-                                | Q(validation_best_status=StatusEnum.FAILED.value)
-                        ),
-                        then=Value(StatusEnum.FAILED.value),
+                # Calibration done but any validation failed
+                When(
+                    Q(status__name=StatusEnum.DONE.value)
+                    & (
+                            Q(validation_control_status=StatusEnum.FAILED.value)
+                            | Q(validation_best_status=StatusEnum.FAILED.value)
                     ),
+                    then=Value(StatusEnum.FAILED.value),
+                ),
 
-                    # Calibration done but any validation cancelled
-                    When(
-                        Q(status__name=StatusEnum.DONE.value)
-                        & (
-                                Q(validation_control_status=StatusEnum.CANCELLED.value)
-                                | Q(validation_best_status=StatusEnum.CANCELLED.value)
-                        ),
-                        then=Value(StatusEnum.CANCELLED.value),
+                # Calibration done but any validation cancelled
+                When(
+                    Q(status__name=StatusEnum.DONE.value)
+                    & (
+                            Q(validation_control_status=StatusEnum.CANCELLED.value)
+                            | Q(validation_best_status=StatusEnum.CANCELLED.value)
                     ),
+                    then=Value(StatusEnum.CANCELLED.value),
+                ),
 
-                    # Calibration done but any validation submitted
-                    When(
-                        Q(status__name=StatusEnum.DONE.value)
-                        & (
-                                Q(validation_control_status=StatusEnum.SUBMITTED.value)
-                                | Q(validation_best_status=StatusEnum.SUBMITTED.value)
-                        ),
-                        then=Value(StatusEnum.SUBMITTED.value),
+                # Calibration done but any validation submitted
+                When(
+                    Q(status__name=StatusEnum.DONE.value)
+                    & (
+                            Q(validation_control_status=StatusEnum.SUBMITTED.value)
+                            | Q(validation_best_status=StatusEnum.SUBMITTED.value)
                     ),
+                    then=Value(StatusEnum.SUBMITTED.value),
+                ),
 
-                    # Calibration done and all validations done (or missing)
-                    When(
-                        Q(status__name=StatusEnum.DONE.value)
-                        & (Q(validation_control_status__isnull=True) | Q(validation_control_status=StatusEnum.DONE.value))
-                        & (Q(validation_best_status__isnull=True) | Q(validation_best_status=StatusEnum.DONE.value)),
-                        then=Value(StatusEnum.DONE.value),
-                    ),
+                # Calibration done and all validations done (or missing)
+                When(
+                    Q(status__name=StatusEnum.DONE.value)
+                    & (Q(validation_control_status__isnull=True) | Q(validation_control_status=StatusEnum.DONE.value))
+                    & (Q(validation_best_status__isnull=True) | Q(validation_best_status=StatusEnum.DONE.value)),
+                    then=Value(StatusEnum.DONE.value),
+                ),
 
-                    # Calibration job Saved or Ready → combined = calibration status
-                    When(
-                        Q(status__name__in=[StatusEnum.SAVED.value, StatusEnum.READY.value]),
-                        then=F("status__name"),
-                    ),
+                # Calibration job Saved or Ready → combined = calibration status
+                When(
+                    Q(status__name__in=[StatusEnum.SAVED.value, StatusEnum.READY.value]),
+                    then=F("status__name"),
+                ),
 
-                    # Fallback (covers any future status additions)
-                    default=F("status__name"),
-                    output_field=CharField(),
-                )
+                # Fallback (covers any future status additions)
+                default=F("status__name"),
+                output_field=CharField(),
             )
+        )
 
         # ─────────────────────────────────────────────────────────────
         # Apply DONE-validation enforcement (VALID_CONTROL and VALID_BEST)
@@ -929,8 +931,10 @@ def get_jobs(
             )
 
         # ─────────────────────────────────────────────────────────────
-        # APPLY USER STATUS FILTER — ALWAYS AFTER combined_status exists
-        # and after any DONE enforcement from above.
+        # Apply user-supplied status filter LAST.
+        # Must come AFTER combined_status, because filtering is done on the
+        # derived combined_status value, not the raw calibration status.
+        # This ensures ids_only and full-detail return the same job set.
         # ─────────────────────────────────────────────────────────────
         if "status" in filters and filters["status"]:
             # Normalize to lowercase for case-insensitive matching
