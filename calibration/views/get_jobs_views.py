@@ -755,9 +755,28 @@ def get_jobs(
         query = apply_calibration_filters(query, filters)
 
         # ───── Build base queryset ─────
-        # If only IDs are requested, skip expensive annotations.
-        # Keep this lightweight unless we need full job detail.
+        # Build base queryset; validation-status annotations will be applied next.
         base_qs = CalibrationRun.objects.filter(query)
+
+        # ─────────────────────────────────────────────────────────────
+        # Always annotate validation_control_status + validation_best_status
+        # because both ids_only and full mode require these for filtering.
+        # Only skip validation_run_count when ids_only=True.
+        # ─────────────────────────────────────────────────────────────
+        base_qs = base_qs.annotate(
+            validation_control_status=Subquery(
+                ValidationRun.objects.filter(
+                    calibration_run_id=OuterRef("pk"),
+                    validation_type=ValidationType.VALID_CONTROL.value
+                ).values("status__name")[:1]
+            ),
+            validation_best_status=Subquery(
+                ValidationRun.objects.filter(
+                    calibration_run_id=OuterRef("pk"),
+                    validation_type=ValidationType.VALID_BEST.value
+                ).values("status__name")[:1]
+            )
+        )
 
         if not ids_only:
             # ───── Annotate validation and status fields used for sorting and combined logic ─────
@@ -775,18 +794,6 @@ def get_jobs(
                     "validations",
                     filter=~Q(validations__validation_type=ValidationType.VALID_CONTROL.value),
                     distinct=True
-                ),
-                validation_control_status=Subquery(
-                    ValidationRun.objects.filter(
-                        calibration_run_id=OuterRef("pk"),
-                        validation_type=ValidationType.VALID_CONTROL.value
-                    ).values("status__name")[:1]
-                ),
-                validation_best_status=Subquery(
-                    ValidationRun.objects.filter(
-                        calibration_run_id=OuterRef("pk"),
-                        validation_type=ValidationType.VALID_BEST.value
-                    ).values("status__name")[:1]
                 )
             )
 
