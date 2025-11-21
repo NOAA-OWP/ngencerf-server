@@ -433,16 +433,16 @@ class CalibrationJobsResponseSerializer(BaseSerializer):
 class GetCalibrationJobsResponseSerializer(BaseSerializer):
     jobs = serializers.ListSerializer(child=CalibrationJobsResponseSerializer(), required=True, allow_empty=True)
     total_count = serializers.IntegerField(required=True)
-    date_range = serializers.ListSerializer(child=serializers.DateTimeField(required=True, allow_null=False), max_length = 2, required=False)
-    id_range = serializers.ListSerializer(child=serializers.IntegerField(required=True, allow_null=False), max_length = 2, required=False)
+    date_range = serializers.ListSerializer(child=serializers.DateTimeField(required=True, allow_null=True), max_length = 2, required=False)
+    id_range = serializers.ListSerializer(child=serializers.IntegerField(required=True, allow_null=True), max_length = 2, required=False)
     gages = serializers.ListField(child=serializers.CharField(), required=False, allow_empty=True)
 
 
 class GetCalibrationJobIDsResponseSerializer(BaseSerializer):
     jobs = serializers.ListField(child=serializers.IntegerField(), required=True, allow_empty=True)
     total_count = serializers.IntegerField(required=True)
-    date_range = serializers.ListSerializer(child=serializers.DateTimeField(required=True, allow_null=False), max_length = 2, required=False)
-    id_range = serializers.ListSerializer(child=serializers.IntegerField(required=True, allow_null=False), max_length = 2, required=False)
+    date_range = serializers.ListSerializer(child=serializers.DateTimeField(required=True, allow_null=True), max_length = 2, required=False)
+    id_range = serializers.ListSerializer(child=serializers.IntegerField(required=True, allow_null=True), max_length = 2, required=False)
     gages = serializers.ListField(child=serializers.CharField(), required=False, allow_empty=True)
 
 
@@ -1249,8 +1249,8 @@ class ForecastJobsResponseSerializer(BaseSerializer):
 class GetForecastJobsResponseSerializer(BaseSerializer):
     forecast_jobs = serializers.ListSerializer(child=ForecastJobsResponseSerializer(), required=True, allow_empty=True)
     total_count = serializers.IntegerField(required=True)
-    date_range = serializers.ListSerializer(child=serializers.DateTimeField(required=True, allow_null=False), max_length = 2, required=False)
-    id_range = serializers.ListSerializer(child=serializers.IntegerField(required=True, allow_null=False), max_length = 2, required=False)
+    date_range = serializers.ListSerializer(child=serializers.DateTimeField(required=True, allow_null=True), max_length = 2, required=False)
+    id_range = serializers.ListSerializer(child=serializers.IntegerField(required=True, allow_null=True), max_length = 2, required=False)
 
 
 ##################################
@@ -1278,8 +1278,8 @@ class VerificationJobDetailsResponseSerializer(VerificationJobsResponseSerialize
 class GetVerificationJobsResponseSerializer(BaseSerializer):
     verification_jobs = serializers.ListSerializer(child=VerificationJobsResponseSerializer(), required=True, allow_empty=True)
     total_count = serializers.IntegerField(required=True)
-    date_range = serializers.ListSerializer(child=serializers.DateTimeField(required=True, allow_null=False), max_length = 2, required=False)
-    id_range = serializers.ListSerializer(child=serializers.IntegerField(required=True, allow_null=False), max_length = 2, required=False)
+    date_range = serializers.ListSerializer(child=serializers.DateTimeField(required=True, allow_null=True), max_length = 2, required=False)
+    id_range = serializers.ListSerializer(child=serializers.IntegerField(required=True, allow_null=True), max_length = 2, required=False)
 
 
 class CreateVerificationJobRequestSerializer(BaseSerializer):

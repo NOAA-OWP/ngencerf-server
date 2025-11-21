@@ -217,12 +217,13 @@ def get_calibration_jobs_for_evaluation(request: Request) -> Response:
 
     response = {
         "jobs": jobs,
-        "total_count": total_count,
-        "date_range": date_range,
-        "id_range": id_range
+        "total_count": total_count
     }
     if get_gages:
         response["gages"] = gage_list  # type: ignore[assignment]
+    if total_count > 0:
+        response['date_range'] = date_range
+        response['id_range'] = id_range
 
     if ids_only:
         serializer_class = GetCalibrationJobIDsResponseSerializer
@@ -294,12 +295,13 @@ def get_calibration_jobs_for_forecast(request: Request) -> Response:
 
     response = {
         "jobs": jobs,
-        "total_count": total_count,
-        "date_range": date_range,
-        "id_range": id_range
+        "total_count": total_count
     }
     if get_gages:
         response["gages"] = gage_list  # type: ignore[assignment]
+    if total_count > 0:
+        response['date_range'] = date_range
+        response['id_range'] = id_range
 
     if ids_only:
         serializer_class = GetCalibrationJobIDsResponseSerializer
@@ -377,12 +379,13 @@ def get_calibration_jobs(request):
 
     response = {
         "jobs": jobs,
-        "total_count": total_count,
-        "date_range": date_range,
-        "id_range": id_range
+        "total_count": total_count
     }
     if get_gages:
         response["gages"] = gage_list  # type: ignore[assignment]
+    if total_count > 0:
+        response['date_range'] = date_range
+        response['id_range'] = id_range
 
     if ids_only:
         serializer_class = GetCalibrationJobIDsResponseSerializer
@@ -1342,9 +1345,10 @@ def get_forecast_jobs(request: Request) -> Response:
     response = {
         "forecast_jobs": forecast_jobs,
         "total_count": total_count,
-        "date_range": date_range,
-        "id_range": id_range
     }
+    if total_count > 0:
+        response['date_range'] = date_range
+        response['id_range'] = id_range
 
     response_validator, error_response = validate_response(
         GetForecastJobsResponseSerializer, response,
@@ -1407,10 +1411,11 @@ def get_forecast_jobs_for_verification(request: Request) -> Response:
 
     response = {
         "forecast_jobs": forecast_jobs,
-        "total_count": total_count,
-        "date_range": date_range,
-        "id_range": id_range
+        "total_count": total_count
     }
+    if total_count > 0:
+        response['date_range'] = date_range
+        response['id_range'] = id_range
 
     response_validator, error_response = validate_response(
         GetForecastJobsResponseSerializer, response,
@@ -1545,10 +1550,11 @@ def get_verification_jobs(request: Request) -> Response:
 
     response = {
         'verification_jobs': verification_jobs,
-        "total_count": total_count,
-        "date_range": date_range,
-        "id_range": id_range
+        "total_count": total_count
     }
+    if total_count > 0:
+        response['date_range'] = date_range
+        response['id_range'] = id_range
 
     response_validator, error_response = validate_response(
         GetVerificationJobsResponseSerializer, response,
