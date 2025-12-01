@@ -1282,25 +1282,21 @@ class GetVerificationJobsResponseSerializer(BaseSerializer):
     id_range = serializers.ListSerializer(child=serializers.IntegerField(required=True, allow_null=False), min_length = 2, max_length = 2, required=False)
 
 
-class CreateVerificationJobRequestSerializer(BaseSerializer):
+class CreateAndRunVerificationRequestSerializer(BaseSerializer):
     forecast_run_id = serializers.IntegerField(required=False)
+    logging_config = LoggingConfigSerializer(required=False)
 
 
-class CreateVerificationJobResponseSerializer(GenericMessageResponseSerializer):
+class CreateAndRunVerificationResponseSerializer(GenericMessageResponseSerializer):
+    calibration_run_id = serializers.IntegerField(required=True)
+    forecast_run_id = serializers.IntegerField(required=True)
     verification_run_id = serializers.IntegerField(required=True)
+    status = serializers.CharField(validators=[enum_validator(StatusEnum)], required=True)
+    submit_date = serializers.DateTimeField(required=True, allow_null=False)
 
 
 class GetVerificationStatusRequestSerializer(VerificationJobSerializer):
     include_performance_metrics = serializers.BooleanField(required=False, default=False)
-
-
-class RunVerificationJob(VerificationJobSerializer):
-    logging_config = LoggingConfigSerializer(required=False)
-
-
-class SubmitVerificationJobResponseSerializer(GenericMessageAndStatusResponseSerializer):
-    verification_run_id = serializers.IntegerField(required=True)
-    submit_date = serializers.DateTimeField(required=True, allow_null=False)
 
 
 class GetVerificationStatusResponseSerializer(GenericMessageAndStatusResponseSerializer):

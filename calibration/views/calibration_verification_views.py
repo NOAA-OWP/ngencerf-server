@@ -18,11 +18,11 @@ from calibration.enums_vanilla import JobType
 from calibration.models import VerificationRun
 from calibration.run_util.run_common import submit_job
 from calibration.util.calibration_validators import ErrorResponseSerializer, EmptySerializer, \
-    VerificationJobDetailsResponseSerializer, VerificationJobSerializer, CreateVerificationJobRequestSerializer, \
-    CreateVerificationJobResponseSerializer, RunVerificationJob, SubmitVerificationJobResponseSerializer, \
+    VerificationJobDetailsResponseSerializer, VerificationJobSerializer, \
+    CreateAndRunVerificationRequestSerializer, CreateAndRunVerificationResponseSerializer, \
     GetVerificationStatusRequestSerializer, GetVerificationStatusResponseSerializer, \
-    GetVerificationPlotNamesResponseSerializer, GetVerificationPlotRequestSerializer, GetVerificationPlotResponseSerializer, \
-    DeleteVerificationJobResponseSerializer
+    GetVerificationPlotNamesResponseSerializer, GetVerificationPlotRequestSerializer, \
+    GetVerificationPlotResponseSerializer, DeleteVerificationJobResponseSerializer
 from calibration.util.ngen_locations import get_verification_run_dir, get_verification_yaml_config_file
 from calibration.views.calibration_run_views import get_performance_metrics, should_include_metrics, parse_failure_messages
 from calibration.views.called_from import get_caller_name
@@ -93,6 +93,7 @@ def load_verification_job(request: Request) -> Response:
         'cycle_date': verification_run.forecast_run.cycle_date,
         'gage_id': forecast_run.calibration_run.gage_id,
         'forecast_status': forecast_run.status.name,
+        'created_at': forecast_run.created_at,
         'submit_date': forecast_run.submit_date
     }
 
@@ -105,9 +106,9 @@ def load_verification_job(request: Request) -> Response:
 
 
 @extend_schema(
-    request=CreateVerificationJobRequestSerializer,
+    request=CreateAndRunVerificationRequestSerializer,
     responses={
-        201: CreateVerificationJobResponseSerializer,
+        201: CreateAndRunVerificationResponseSerializer,
         400: OpenApiResponse(
             response=ErrorResponseSerializer,
             description="Validation error or parsing error"
@@ -121,9 +122,9 @@ def load_verification_job(request: Request) -> Response:
 )
 @api_view(['POST'])
 @handle_exceptions
-def create_verification_job(request: Request) -> Response:
+def create_and_run_verification_job(request: Request) -> Response:
     """
-    Creates a new verification job for the requesting user.
+    Creates a new verification job for the requesting user, and submits it for processing.
 
     Handles the creation process by accepting verification details in the request, validating them,
     and creating a new verification job if the request is valid.
@@ -131,88 +132,43 @@ def create_verification_job(request: Request) -> Response:
     :param request: The HTTP request object, containing user and verification job details.
     :return: A Response object with the serialized verification job data.
     """
-    data = request.data if request.method == 'POST' else request.query_params.dict()
+    data = request.data
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} ')
 
-    validator, error_return = validate_request(CreateVerificationJobRequestSerializer, data)
+    validator, error_return = validate_request(CreateAndRunVerificationRequestSerializer, data)
     if error_return:
         return error_return
 
     forecast_run_id = validator.get('forecast_run_id')
+    logging_config = validator.get('logging_config')
 
     forecast_run, error_return = get_forecast_run(forecast_run_id, request.user, run_status=[StatusEnum.DONE])
     if error_return:
         return error_return
 
-    run = create_verification_run_internal(forecast_run)
+    verification_run = create_verification_run_internal(forecast_run)
 
-    with transaction.atomic():
-        response = {'message': f'Verification Job {run.id} created', 'verification_run_id': run.id}
-
-        response_validator, error_response = validate_response(CreateVerificationJobResponseSerializer, response)
-        if error_response:
-            return error_response
-
-        logger.debug(
-            f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(json.dumps(response_validator.data))}')
-        return Response(response_validator.data, status=status.HTTP_201_CREATED)
-
-
-@extend_schema(
-    request=RunVerificationJob,
-    responses={
-        200: SubmitVerificationJobResponseSerializer,
-        400: OpenApiResponse(
-            response=ErrorResponseSerializer,
-            description="Validation error or parsing error"
-        ),
-        500: OpenApiResponse(
-            response=ErrorResponseSerializer,
-            description="Internal server error"
-        )
-    },
-    description="Run a calibration"
-)
-@api_view(['POST'])
-@handle_exceptions
-def run_verification(request: Request) -> Response:
-    """
-    Submits a verification job for processing.
-
-    :param request: HTTP request containing calibration run details.
-    :return: JSON response indicating job submission status.
-    """
-    data = request.data
-    logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
-
-    validator, error_return = validate_request(RunVerificationJob, data)
-    if error_return:
-        return error_return
-
-    verification_run_id = validator.get('verification_run_id')
-    logging_config = validator.get('logging_config')
-
-    run, error_return = get_verification_run(verification_run_id, request.user)
-    if error_return:
-        return error_return
-
-    error_response = submit_job(run, logging_config=logging_config)
+    error_response = submit_job(verification_run, logging_config=logging_config)
     if error_response:
         return error_response
 
-    response = {'message': f'Verification Job {run.id} has been submitted',
-                'verification_run_id': verification_run_id,
-                'status': run.status.name,
-                'submit_date': run.submit_date}
+    msg = get_job_description(verification_run) + ' created and submitted'
+    response = {
+        'message': msg,
+        'calibration_run_id': forecast_run.calibration_run.id,
+        'forecast_run_id': forecast_run.id,
+        'verification_run_id': verification_run.id,
+        'submit_date': verification_run.submit_date,
+        'status': verification_run.status.name
+    }
 
-    response_validator, error_return = validate_response(SubmitVerificationJobResponseSerializer, response)
-    if error_return:
-        return error_return
+    response_validator, error_response = validate_response(CreateAndRunVerificationResponseSerializer, response)
+    if error_response:
+        return error_response
 
     logger.debug(
         f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
-
-    return Response(response_validator.data)
+    return Response(response_validator.data, status=status.HTTP_201_CREATED)
 
 
 @extend_schema(
