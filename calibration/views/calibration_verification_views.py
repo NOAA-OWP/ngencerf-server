@@ -361,8 +361,7 @@ def get_verification_plot(request: Request) -> Response:
 @handle_exceptions
 def delete_verification_job(request: Request) -> Response:
     """
-    Delete a verification job. Performs a hard delete if the run status is SAVED or READY,
-    and a soft delete otherwise.
+    Delete a verification job.
 
     :param request: The HTTP request object.
     :return: A Response object with the deletion confirmation.
@@ -384,11 +383,20 @@ def delete_verification_job(request: Request) -> Response:
         return ResponseError(f'Verification Job {run.id} is running.  Cannot delete a running job')
 
     run_id = run.id
+    verification_dir = get_verification_run_dir(run)  # Save before delete
 
-    # Proceed with deletion
-    hard_delete(run)
+    with transaction.atomic():
+        # Delete the Verification Run
+        run.delete()
 
-    response = {'message': f'Verification Job {run.id} and associated records have been deleted', 'verification_run_id': run_id}
+        logger.info(f"Deleting directory {verification_dir}")
+        shutil.rmtree(verification_dir, ignore_errors=True)
+
+        shutil.rmtree(get_verification_run_dir(run), ignore_errors=True)
+
+    message = f"Verification Job {run_id} has been deleted"
+
+    response = {'message': message, 'verification_run_id': run_id}
 
     response_validator, error_response = validate_response(DeleteVerificationJobResponseSerializer, response)
     if error_response:
@@ -397,32 +405,3 @@ def delete_verification_job(request: Request) -> Response:
         f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
 
     return Response(response_validator.data)
-
-
-def hard_delete(run: VerificationRun) -> None:
-    """
-    Perform a hard delete on a verification run and its related records. Deletes associated files if they exist.
-
-    :param run: The VerificationRun instance to be deleted.
-    """
-    collector = Collector(using=router.db_for_write(run.__class__))
-
-    # Collect related objects that will be deleted due to cascade
-    collector.collect([run])
-
-    with transaction.atomic():
-        # Collect related objects that will be deleted due to cascade
-        collector.collect([run])
-
-        logger.debug(f"Deleting (hard delete) Verification Job {run.id}, associated records and files")
-        # Iterate through the collected objects and list IDs and other fields
-        for model, instances in collector.data.items():
-            logger.debug(f"Verification Job {run.id} - {model.__name__}: {len(instances)} instance(s) will be deleted")
-            for instance in instances:
-                logger.debug(f' - {instance}')
-
-        job_data_dir = get_verification_run_dir(run)
-        run.delete()
-        logger.debug(f'Deleting directory {job_data_dir} for Calibration Job {run.id}')
-        if os.path.exists(job_data_dir):
-            shutil.rmtree(job_data_dir)
