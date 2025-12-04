@@ -1269,12 +1269,6 @@ class VerificationJobsResponseSerializer(BaseSerializer):
     created_at = serializers.DateTimeField(required=True, allow_null=True)
 
 
-class VerificationJobDetailsResponseSerializer(VerificationJobsResponseSerializer):
-    forecast_run_id = serializers.IntegerField(required=False, allow_null=False)
-    run_start = serializers.DateTimeField(required=True, allow_null=True)
-    run_end = serializers.DateTimeField(required=True, allow_null=True)
-
-
 class GetVerificationJobsResponseSerializer(BaseSerializer):
     verification_jobs = serializers.ListSerializer(child=VerificationJobsResponseSerializer(), required=True, allow_empty=True)
     total_count = serializers.IntegerField(required=True)
