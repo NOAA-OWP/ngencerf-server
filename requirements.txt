@@ -1,29 +1,42 @@
-Django~=5.1.4
-djangorestframework~=3.15.2
-djangorestframework-simplejwt~=5.4.0
-geopandas~=1.0.1
-matplotlib~=3.10.0
+Django~=5.2.8
+djangorestframework~=3.16.1
+djangorestframework-simplejwt~=5.5.1
+django-redis~=6.0.0
+geopandas~=1.1.1
+matplotlib~=3.10.7
 fiona~=1.10.1
-shapely~=2.0.5
+shapely~=2.1.2
 toml~=0.10.2
-DateTimeRange~=2.3.1
-python-dotenv~=1.0.1
-django-currentuser~=0.8.0
-psycopg~=3.2.3
-django_dbconn_retry~=0.1.7
-djoser~=2.3.1
+DateTimeRange~=2.3.2
+python-dotenv~=1.2.1
+django-currentuser~=0.9.0
+psycopg~=3.2.12
+django_dbconn_retry~=0.1.9
+djoser~=2.3.3
 pyjwt~=2.10.1
-PyYAML~=6.0.2
-django_dbconn_retry~=0.1.7
-drf_spectacular~=0.28.0
-django-cors-headers~=4.6.0
-requests~=2.32.3
-pandas~=2.2.3
-pyogrio~=0.10.0
-numpy~=2.2.1
+PyYAML~=6.0.3
+drf_spectacular~=0.29.0
+django-cors-headers~=4.9.0
+requests~=2.32.5
+pyarrow~=22.0.0
+pyogrio~=0.11.1
+tabulate~=0.9.0
+
+# AWS stack - pinned together to avoid resolver conflicts
+aiobotocore~=2.24.2
+boto3==1.40.17
+botocore==1.40.17
+fsspec==2025.3.0
+s3fs==2025.3.0
+
+# Use the same versions as mswm
+numpy < 2.0, >= 1.23
+pandas~=2.3.3
 
 
 # There is also a dependancy on these 2 entries
-# git+https://gitlab.sh.nextgenwaterprediction.com/NGWPC/nwm-ngen/ngen-cal.git@development#egg=createInput&subdirectory=python/createInput
-# git+https://gitlab.sh.nextgenwaterprediction.com/NGWPC/nwm-ngen/ngen-forcing.git@development#egg=swe_processing&subdirectory=swe_processing
+# git+https://github.com/NGWPC/nwm-msw-mgr.git@development
+# git+https://github.com/NGWPC/data-assimilation-engine.git@development
 # These dependancies are installed separately in runCerf.sh in order to ensure that we get the latest code
+
+

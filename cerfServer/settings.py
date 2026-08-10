@@ -12,7 +12,7 @@ https://docs.djangoproject.com/en/5.0/ref/settings/
 import codecs
 import os
 import re
-from datetime import timedelta
+from datetime import timedelta, datetime
 from enum import StrEnum, auto
 
 from dotenv import load_dotenv
@@ -23,6 +23,8 @@ EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+DEBUG = os.getenv("DJANGO_DEBUG", "False").lower() in ("1", "true", "yes")
+
 dotenv_path = os.path.join(os.path.dirname(__file__), '.env')
 print(f'Loading values from {dotenv_path}')
 load_dotenv(dotenv_path)
@@ -31,15 +33,10 @@ version_path = os.path.join(BASE_DIR, 'version.env')
 print(f'Loading values from {version_path}')
 load_dotenv(version_path)
 
-VERSION = os.getenv("CERFSERVER_VERSION", "<unknown>")
-DATE = os.getenv("CERFSERVER_DATE", "<unknown>")
-COMMIT_HASH = os.getenv("CERFSERVER_COMMIT", "<unknown>")
 NGENCERF_VERSION = os.getenv("NGENCERF_VERSION", "<unknown>")
-# dotenv doesn't handle Unicode escaping
-NGENCERF_VERSION = codecs.decode(NGENCERF_VERSION, "unicode_escape")
 NGENCERF_DATE = os.getenv("NGENCERF_DATE", "<unknown>")
-
-CONTACT_EMAIL = 'support@ngencerf.com'
+CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "<unknown>")
+NGENCERF_COPYRIGHT = f"© 2024-{datetime.now().year}, RTX"
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.0/howto/deployment/checklist/
@@ -87,10 +84,12 @@ SPECTACULAR_SETTINGS = {
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'calibration.util.middleware.TimingMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'calibration.util.middleware.LogUnmatchedCalibrationRequestsMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'django_currentuser.middleware.ThreadLocalUserMiddleware',
@@ -102,6 +101,9 @@ CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://localhost:3001",
 ]
+
+# Needed for zip file download
+CORS_EXPOSE_HEADERS = ['Content-Disposition']
 
 ROOT_URLCONF = 'cerfServer.urls'
 
@@ -124,6 +126,16 @@ TEMPLATES = [
 AUTHENTICATION_BACKENDS = [
     "django.contrib.auth.backends.ModelBackend",
 ]
+
+CACHES = {
+    "default": {
+        "BACKEND": "django_redis.cache.RedisCache",
+        "LOCATION": os.getenv('REDIS_URL', "redis://127.0.0.1:6379/1"),
+        "OPTIONS": {
+            "CLIENT_CLASS": "django_redis.client.DefaultClient"
+        }
+    }
+}
 
 AUTH_USER_MODEL = 'calibration.CustomUser'
 
@@ -188,35 +200,40 @@ ENTERPRISE_DATA_VERSION = "2.2"
 ENTERPRISE_DATA_GEOPACKAGE_ENDPOINT = [True, 'hydrofabric/geopackages?gage_id={gage_id}&source={source}&domain={domain}&version={version}']
 ENTERPRISE_DATA_MODULE_METADATA_ENDPOINT = [True, 'hydrofabric/modules/parameters/']
 ENTERPRISE_DATA_OBSERVATION_DATA_ENDPOINT = [True, 'hydrofabric/2.1/observational?gage_id={gage_id}&source={agency}&domain={domain}']
-ENTERPRISE_DATA_FORCING_DATA_ENDPOINT = [False, 'hydrofabric/2.1/forcing']
-
 
 ENTERPRISE_DATA_URL = os.getenv('ENTERPRISE_DATA_URL', 'http://localhost:8001')
 
-FORCING_DATA_DIRS = ['s3://ngwpc-forcing/aorc_2.2',
-                     's3://ngwpc-forcing/retrospective_2.2']
+# Due to circular imports, can't use the enums as keys.  But the values must match exactly
+FORCING_DATA_DIRS_AORC = {
+    "AORC": 's3://ngwpc-forcing/aorc_2.2',
+    "NWM Retrospective": 's3://ngwpc-forcing/retrospective_2.2'
+}
+FORCING_DATA_DIRS_RETRO = {
+    "NWM Retrospective": 's3://ngwpc-forcing/retrospective_2.2'
+}
 
 # Translate urls from the format s3://bucket-name to S3_MOUNT_POINT/bucket
 S3_MOUNT_POINT = os.getenv('S3_MOUNT_POINT', os.path.join(os.path.expanduser("~"), 's3'))
 
 # -----------------------------
-# Ngen/Ngen-cal Locations
+# ngen/nwm-cal-mgr Locations
 # -----------------------------
 
-# Locations for running ngen-cal
+# Locations for running nwm-cal-mgr
 
 # Must match the repo root used in the docker container.
-# It is not necessary for you to have local copies of the ngen and ngen-cal repos if you are using Docker
+# It is not necessary for you to have local copies of the ngen and nwm-cal-mgr repos if you are using Docker
 # But these directories still need to be set to reflect the directory of the repos in the docker container.
 REPO_ROOT = '/ngen-app'
 # Directory that Ngen is cloned into
 NGEN_REPO_ROOT = os.path.join(REPO_ROOT, 'ngen')
-# directory that Ngen-cal is cloned into
-NGEN_CAL_REPO_ROOT = os.path.join(REPO_ROOT, 'ngen-cal')
-NGEN_FORECAST_REPO_ROOT = os.path.join(REPO_ROOT, 'ngen-fcst')
+# directory that nwm-cal-mgr is cloned into
+CAL_MGR_REPO_ROOT = os.path.join(REPO_ROOT, 'nwm-cal-mgr')
+NGEN_FORECAST_REPO_ROOT = os.path.join(REPO_ROOT, 'nwm-fcst-mgr')
 NGEN_FORCING_REPO_ROOT = os.path.join(REPO_ROOT, 'ngen-forcing')
+NWM_VERF_REPO_ROOT = os.path.join(REPO_ROOT, 'nwm-verf')
 
-# This must match the data location in the ngen/ngen-cal docker
+# This must match the data location in the ngen/nwm-cal-mgr docker
 # Do not change this location.  You can put your data wherever you want, but you should then create a symbolic link to /ngencerf/data
 # sudo mkdir /ngencerf
 # sudo ln -s ~/your/data/dir /ngencerf/data
@@ -226,13 +243,17 @@ NGEN_CAL_DATA_PATH = os.getenv('NGEN_CAL_DATA_PATH', NGEN_CAL_MOUNT_POINT)
 # Used only by get_git_info when running on PW
 SINGULARITY_DIR = '/ngencerf/containers'
 
-NGEN_LOGGING_DIR = os.path.join(BASE_DIR, 'run-logs')
+NGEN_LOGGING_DIR = os.path.join(BASE_DIR, 'logs')
 print(f"Logging files will be created in {NGEN_LOGGING_DIR}")
 os.makedirs(NGEN_LOGGING_DIR, exist_ok=True)
 
 NGEN_STATIC_DIR = os.path.join(NGEN_CAL_MOUNT_POINT, 'ngen-static-files')
 NGEN_CAL_WORK_DIR = os.path.join(NGEN_CAL_MOUNT_POINT, 'ngen-cal-work')
-NGEN_FORCING_WORK_DIR = os.path.join(NGEN_CAL_MOUNT_POINT, 'forecast_forcing_work')
+NGEN_VERIFICATION_WORK_DIR = os.path.join(NGEN_CAL_MOUNT_POINT, 'verification_work')
+NGEN_FORECAST_WORK_DIR = os.path.join(NGEN_CAL_MOUNT_POINT, 'forecast_work')
+os.makedirs(NGEN_FORECAST_WORK_DIR, exist_ok=True)
+# On PW, the server runs as root, but the Slurm jobs do not, so we need to adjust the permissions
+os.chmod(NGEN_FORECAST_WORK_DIR, 0o777)
 
 # -----------------------------
 # Forcing environments
@@ -244,22 +265,34 @@ FORCING_ENGINE_ENV = 'ngen_forcings_engine_bmi'
 # Directory where all the output runs are stored
 NGEN_CAL_RUN_DIR = os.path.join(NGEN_CAL_WORK_DIR, 'run_calib')
 
-# Directory containing the ngen-cal virtual environment
+# Directory where verification runs are stored
+NWM_VERF_RUN_DIR = os.path.join(NGEN_CAL_WORK_DIR, 'run_verif')
+
+# Directory containing the nwm-cal-mgr virtual environment
 # This is used only if we are running with NGEN_ENVIRONMENT=LOCAL and not in a separate container
 NGEN_CAL_VENV = os.path.join(NGEN_CAL_WORK_DIR, 'venv.cal')
 
 # Used when running in NGEN_ENVIRONMENT=DOCKER
-# This assumes that the docker containers have been appropriately tagged as ngen-cal, ngen-fcst or ngen-forcing
-NGEN_CAL_DOCKER_CMD = f'docker run --network host -v {NGEN_CAL_MOUNT_POINT}:{NGEN_CAL_MOUNT_POINT} ngen-cal'
-NGEN_FORCING_DOCKER_CMD = f'docker run --entrypoint /ngen-app/bin/run-ngen-forcing.sh -v {NGEN_CAL_MOUNT_POINT}:{NGEN_CAL_MOUNT_POINT} ngen-bmi-forcing'
-NGEN_FORECAST_DOCKER_CMD = f'docker run -v {NGEN_CAL_MOUNT_POINT}:{NGEN_CAL_MOUNT_POINT} ngen-fcst'
-
-NGEN_CONTAINERS = ['ngen', 'ngen-cal', 'ngen-bmi-forcing', 'ngen-fcst']
+# --rm ensures containers are auto-removed after exit
+# Use {name} placeholder for the container name, which will be substituted at runtime
+CAL_MGR_DOCKER_CMD = f'docker run --rm --network host --name {{name}} -v {NGEN_CAL_MOUNT_POINT}:{NGEN_CAL_MOUNT_POINT} nwm-cal-mgr'
+NGEN_FORECAST_DOCKER_CMD = f'docker run --rm --name {{name}} -v {NGEN_CAL_MOUNT_POINT}:{NGEN_CAL_MOUNT_POINT} nwm-fcst-mgr'
+NWM_VERF_DOCKER_CMD = f'docker run --rm --name {{name}} -v {NGEN_CAL_MOUNT_POINT}:{NGEN_CAL_MOUNT_POINT} nwm-verf'
 
 # Used when running in NGEN_ENVIRONMENT=LOCAL
-NGEN_CAL_SCRIPT = os.path.join(NGEN_CAL_REPO_ROOT, 'docker', 'run-ngen-cal.sh')
+CAL_MGR_SCRIPT = os.path.join(CAL_MGR_REPO_ROOT, 'docker', 'run-ngen-cal.sh')
 NGEN_FORECAST_SCRIPT = os.path.join(NGEN_FORECAST_REPO_ROOT, 'docker', 'run-ngen-fcst.sh')
-FORECAST_FORCING_SCRIPT = os.path.join(NGEN_FORCING_REPO_ROOT, 'docker', 'run-ngen-forcing.sh')
+NGEN_COLD_START_SCRIPT = os.path.join(NGEN_FORECAST_REPO_ROOT, 'docker', 'run-ngen-fcst.sh')
+VERIFICATION_SCRIPT = os.path.join(NWM_VERF_REPO_ROOT, 'docker', 'run-ngen-verf.sh')
+
+RUNTIME_INFO = {
+    ScriptEnum.CALIBRATION: (CAL_MGR_DOCKER_CMD, CAL_MGR_SCRIPT),
+    ScriptEnum.VALIDATION: (CAL_MGR_DOCKER_CMD, CAL_MGR_SCRIPT),
+    ScriptEnum.VALIDATION_ITERATION: (CAL_MGR_DOCKER_CMD, CAL_MGR_SCRIPT),
+    ScriptEnum.COLD_START: (NGEN_FORECAST_DOCKER_CMD, NGEN_COLD_START_SCRIPT),
+    ScriptEnum.FORECAST: (NGEN_FORECAST_DOCKER_CMD, NGEN_FORECAST_SCRIPT),
+    ScriptEnum.VERIFICATION: (NWM_VERF_DOCKER_CMD, VERIFICATION_SCRIPT)
+}
 
 # -----------------------------
 # Job Simulation Flags for use with NGEN_ENVIRONMENT=LOCAL or DOCKER
@@ -268,20 +301,12 @@ SIMULATE_FLAGS = {
     JobType.CALIBRATION: False,
     JobType.VALIDATION: False,
     JobType.FORECAST: False,
-    JobType.FORECAST_FORCING_DOWNLOAD: False,
-}
-
-
-RUNTIME_INFO = {
-    ScriptEnum.CALIBRATION: (NGEN_CAL_DOCKER_CMD, NGEN_CAL_SCRIPT),
-    ScriptEnum.VALIDATION: (NGEN_CAL_DOCKER_CMD, NGEN_CAL_SCRIPT),
-    ScriptEnum.VALIDATION_ITERATION: (NGEN_CAL_DOCKER_CMD, NGEN_CAL_SCRIPT),
-    ScriptEnum.FORECAST: (NGEN_FORECAST_DOCKER_CMD, NGEN_FORECAST_SCRIPT),
-    ScriptEnum.FORECAST_FORCING: (NGEN_FORCING_DOCKER_CMD, FORECAST_FORCING_SCRIPT)
+    JobType.VERIFICATION: False,
 }
 
 NGEN_ENVIRONMENT_STR = os.getenv('NGEN_ENVIRONMENT', NgenEnvironmentEnum.LOCAL.name)
 try:
+    # noinspection PyTypeHints
     NGEN_ENVIRONMENT = NgenEnvironmentEnum[NGEN_ENVIRONMENT_STR]
 except KeyError:
     # noinspection PyUnresolvedReferences
@@ -289,14 +314,15 @@ except KeyError:
         f"Invalid environment value for NGEN_ENVIRONMENT: {NGEN_ENVIRONMENT_STR}.  Must be one of {', '.join([e.name for e in NgenEnvironmentEnum])}")
 
 # -----------------------------
-# Slurm 
+# Slurm
 # -----------------------------
 
 SLURM_URL = os.getenv("SLURM_URL")
 SLURM_SUBMIT_CALIBRATION_JOB_ENDPOINT = 'submit-calibration-job'
 SLURM_SUBMIT_VALIDATION_JOB_ENDPOINT = 'submit-validation-job'
+SLURM_SUBMIT_COLD_START_JOB_ENDPOINT = 'submit-cold-start-job'
 SLURM_SUBMIT_FORECAST_JOB_ENDPOINT = 'submit-forecast-job'
-SLURM_SUBMIT_FORECAST_FORCING_DOWNLOAD_JOB_ENDPOINT = 'submit-forecast-forcing-download-job'
+SLURM_SUBMIT_VERIFICATION_JOB_ENDPOINT = 'submit-verification-job'
 SLURM_JOB_STATUS_ENDPOINT = 'job-status'
 SLURM_CANCEL_JOB_ENDPOINT = 'cancel-job'
 
@@ -309,17 +335,13 @@ LOGGING = {
 
     # Root Logger: Sends everything to the console
     'root': {
-        'handlers': ['console'],
+        'handlers': ['console', 'file_dev'],
         'level': 'DEBUG'
     },
+
     'formatters': {
-        'prod_format': {
-            'format': '{asctime}.{msecs:03.0f} {module:15s} {levelname:8s} {message}',
-            'datefmt': '%Y-%m-%dT%H:%M:%S',
-            'style': '{',
-        },
         'dev_format': {
-            'format': '{asctime}.{msecs:03.0f} {module:15s} {levelname:8s} {funcName} {process:d} {thread:d} {message}',
+            'format': '{asctime}.{msecs:03.0f} {module:15s} {levelname:8s} {funcName} {message}',
             'datefmt': '%Y-%m-%dT%H:%M:%S',
             'style': '{',
         },
@@ -329,33 +351,33 @@ LOGGING = {
             'style': '{',
         },
     },
+
     'handlers': {
-        'console': {'level': 'DEBUG', 'class': 'logging.StreamHandler', 'formatter': 'simple'},
+        'console': {
+            'level': 'DEBUG',
+            'class': 'logging.StreamHandler',
+            'formatter': 'simple',
+        },
         'file_dev': {
             'level': 'DEBUG',
-            'class': 'cerfServer.timed_rotating_file_handler.CustomTimedRotatingFileHandler',
-            'filename': os.path.join(NGEN_LOGGING_DIR, 'ngencerf_dev.log'),
-            'when': 'MIDNIGHT',  # Rotate the file every day at midnight
-            'interval': 1,  # Rotate every 1 day
-            'backupCount': 10,  # Keep 10 days worth of logs (adjust as needed)
+            'class': 'logging.FileHandler',
+            'filename': os.path.join(NGEN_LOGGING_DIR, 'ngencerf.log'),
             'formatter': 'dev_format',
             'encoding': 'utf-8',
         },
-        'file_prod': {
-            'level': 'INFO',
-            'class': 'cerfServer.timed_rotating_file_handler.CustomTimedRotatingFileHandler',  # Use TimedRotatingFileHandler
-            'filename': os.path.join(NGEN_LOGGING_DIR, 'ngencerf_prod.log'),
-            'when': 'MIDNIGHT',  # Rotate the file every day at midnight
-            'interval': 1,  # Rotate every 1 day
-            'backupCount': 10,  # Keep 10 days worth of logs (adjust as needed)
-            'formatter': 'prod_format',
+        'file_db': {
+            'level': 'DEBUG',
+            'class': 'logging.FileHandler',
+            'filename': os.path.join(NGEN_LOGGING_DIR, 'ngencerf_db.log'),
+            'formatter': 'dev_format',
             'encoding': 'utf-8',
         },
     },
+
     'loggers': {
         'django.db.backends': {
-            'handlers': ['console', 'file_dev'],
-            'level': 'INFO',
+            'handlers': ['file_db'],
+            'level': 'DEBUG',
             'propagate': False  # Prevents these logs from reaching the root logger (avoids duplication)
         },
         'django': {
@@ -379,7 +401,16 @@ LOGGING = {
             'level': 'INFO',
             'propagate': False,  # Prevents these logs from reaching the root logger (avoids duplication)
         },
-
+        # 'createInput': {
+        #     'handlers': ['console'],
+        #     'level': 'INFO',
+        #     'propagate': False,
+        # },
+        'django_dbconn_retry': {
+            'handlers': ['console', 'file_dev'],
+            'level': 'DEBUG',
+            'propagate': False,
+        },
         # Add these loggers for 'requests' and 'urllib3'
         'requests': {
             'handlers': ['console', 'file_dev'],
@@ -392,7 +423,7 @@ LOGGING = {
             'propagate': False,  # Prevents these logs from reaching the root logger (avoids duplication)
         },
         'calibration': {
-            'handlers': ['console', 'file_dev', 'file_prod'],
+            'handlers': ['console', 'file_dev'],
             'level': 'DEBUG',
             'propagate': False,  # Prevents these logs from reaching the root logger (avoids duplication)
         },
@@ -407,6 +438,7 @@ LOGGING = {
 # This needs to be at the end of settings.py
 try:
     from .local_settings import *
+
     print("Loaded local_settings.py successfully.")
 except ImportError as e:
     print('local_settings.py not found or could not be imported:', e)

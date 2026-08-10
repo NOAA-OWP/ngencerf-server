@@ -4,7 +4,7 @@ from calibration.models.base_model import BaseModel
 
 
 class NWMRetrospectiveMetrics(BaseModel):
-    run_type = models.CharField(max_length=20, null=False)
+    run_type = models.CharField(max_length=25, null=False)
     period = models.CharField(max_length=20, null=False)
     metric = models.ForeignKey('Metric', null=False, on_delete=models.RESTRICT)
     metric_value = models.FloatField(null=False)

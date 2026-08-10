@@ -2,9 +2,10 @@ from typing import Any, Type
 
 from django.core.cache import cache
 
-from calibration.models import Status, ForcingSource, ObservationalSource, Domain, Optimization, GeopackageSource, PlotDefinition, ForecastCycle, \
-    Metric
+from calibration.models import Status, ForcingSource, ObservationalSource, Domain, Optimization, GeopackageSource, PlotDefinition, \
+    ForecastConfiguration, Metric
 from calibration.util.AbstractEnum import AbstractEnum
+from calibration.views.cache_prefix import CACHE_PREFIX
 
 
 class StatusEnum(AbstractEnum):
@@ -14,6 +15,7 @@ class StatusEnum(AbstractEnum):
 
     SAVED = 'Saved'
     READY = 'Ready'
+    SUBMITTED = 'Submitted'
     RUNNING = 'Running'
     DONE = 'Done'
     CANCELLED = 'Cancelled'
@@ -30,6 +32,8 @@ class ForcingSourceEnum(AbstractEnum):
     Enum for Forcing Sources, with alias support for 'Upload' or 'User Upload' entries.
     """
     UPLOAD = 'User Upload'
+    AORC = 'AORC'
+    NWM_RETROSPECTIVE = 'NWM Retrospective'
 
     @classmethod
     def get_aliases(cls):
@@ -91,20 +95,33 @@ class GeopackageSourceEnum(AbstractEnum):
         return {'is_active': True}
 
 
-class ForecastCycleEnum(AbstractEnum):
+class ForecastConfigEnum(AbstractEnum):
     """
     Enum for Forecast Cycles,
     """
 
     @classmethod
-    def get_model(cls) -> Type[ForecastCycle]:
-        return ForecastCycle
+    def get_model(cls) -> Type[ForecastConfiguration]:
+        return ForecastConfiguration
+
+    @classmethod
+    def get_filter(cls) -> dict[str, Any]:
+        # Apply the filter to return only active elements
+        return {'is_active': True}
 
 
 class DomainEnum(AbstractEnum):
     """
     Domain Enum with database synchronization.
     """
+
+    PUERTO_RICO = 'Puerto_Rico'
+
+    @classmethod
+    def get_aliases(cls):
+        return {
+            cls.PUERTO_RICO: ['Puerto Rico', 'Puerto_Rico']
+        }
 
     @classmethod
     def get_model(cls) -> Type[Domain]:
@@ -141,7 +158,12 @@ class OptimizationEnum(AbstractEnum):
 
     @classmethod
     def load_items(cls) -> None:
-        # Fetch optimization items with prefetching for 'inputs' relation
+        """
+        Override: load Optimization rows and prefetch inputs so they are cached
+        once per server run and used everywhere else without extra SELECTs.
+        """
+        cache_key = f"{CACHE_PREFIX}{cls.__name__}_cache"
+
         model = cls.get_model()
         filter_criteria = cls.get_filter() or {}
 
@@ -150,7 +172,7 @@ class OptimizationEnum(AbstractEnum):
         # Store the results in a dictionary with the item's name as the key
         item_dict = {item.name: item for item in items}
 
-        cache.set(f'{cls.__name__}_cache', item_dict, timeout=None)
+        cache.set(cache_key, item_dict, timeout=None)
 
 
 class PlotDefinitionsEnum(AbstractEnum):
@@ -172,6 +194,7 @@ class PlotDefinitionsEnum(AbstractEnum):
     HYDROGRAPH_VALIDATION = 'Hydrograph Validation'
     STREAMFLOW_VALIDATION_PRECIPITATION = 'Streamflow Validation Precipitation'
     FORECAST_HYDROGRAPH = 'Forecast Hydrograph'
+    CALIBRATION_METRICS = 'Calibration Metrics'
 
     @classmethod
     def get_model(cls) -> Type[PlotDefinition]:
@@ -191,6 +214,7 @@ class SlurmStatusEnum(AbstractEnum):
     DONE = 'DONE'
     FAILED = 'FAILED'
     CANCELED = 'CANCELED'
+    STARTING = 'STARTING'
 
 
 class LocationEnum(AbstractEnum):
@@ -239,3 +263,12 @@ class GetValidationJobsScope(AbstractEnum):
     IDS = 'ids'
     STATUS = 'status'
     DETAILS = 'details'
+    DONE = 'done'
+
+
+class NgenLogging(AbstractEnum):
+    DEBUG = 'debug'
+    INFO = 'info'
+    WARNING = 'warning'
+    SEVERE = 'severe'
+    FATAL = 'fatal'

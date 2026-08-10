@@ -1,6 +1,21 @@
 name: ngencerf-server
 
 services:
+  redis:
+    image: redis:7.2
+    container_name: ngencerf-redis
+    command: [ "redis-server", "/usr/local/etc/redis/redis.conf" ]
+    volumes:
+      - ./redis/redis.conf.prod:/usr/local/etc/redis/redis.conf:ro
+    ports:
+      - "6379:6379"
+    restart: no  # ensure Redis is recreated fresh on each deploy; no auto-restart
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      retries: 5
+      timeout: 5s
+
   db:
     image: postgres:16
     ports:
@@ -9,7 +24,7 @@ services:
       - ../data/db:/var/lib/postgresql/data
     env_file:
       - path: ./postgres_db.env
-        required: true 
+        required: true
       - path: ./postgres_db.override.env
         required: false
     healthcheck:
@@ -19,35 +34,31 @@ services:
       timeout: 5s
 
   ngencerf-services:
-    build: 
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    build:
       context: .
       args:
-        - CREATE_INPUT_TAG=${NGEN_CAL_TAG}
-        - RUN_SWE_TAG=${NGEN_FORCING_TAG}
-      secrets:
-        - gitlab_token
-    image: registry.sh.nextgenwaterprediction.com/ngwpc/nwm-ngen/ngencerf-server:latest
+        - MSWM_TAG=${MSWM_TAG:-development}
+        - NGEN_FORCING_TAG=${NGEN_FORCING_TAG:-development}
+        - DATA_ASSIMILATION_TAG=${DATA_ASSIMILATION_TAG:-development}
+        - CACHE_BUST=${CACHE_BUST:-1}
+    image: ghcr.io/ngwpc/ngencerf-server:latest
     pull_policy: build
     ports:
       - "8000:8000"
     volumes:
       - ../data/.ngencerf-init:/ngencerf/ngencerf-server/.init/
       - ${NGEN_CAL_DATA_PATH}:/ngencerf/data/
-      - ../logs/ngencerf-server:/ngencerf/ngencerf-server/run-logs/
-      - ${FORCING_DATA_S3_PATH}:${FORCING_DATA_MOUNT_PATH}
-      - ${HF_DATA_S3_PATH}:${HF_DATA_MOUNT_PATH}
+      - ../logs/ngencerf-server:/ngencerf/ngencerf-server/logs/
     environment:
       - NGEN_CAL_DATA_PATH=${NGEN_CAL_DATA_PATH}
     env_file:
       - path: ./ngencerf_services.env
-        required: true 
+        required: true
       - path: ./ngencerf_services.override.env
         required: false
-    depends_on:
-      db:
-        condition: service_healthy
-        restart: true
 
-secrets:
-  gitlab_token:
-    file: ${GITLAB_TOKEN_PATH}

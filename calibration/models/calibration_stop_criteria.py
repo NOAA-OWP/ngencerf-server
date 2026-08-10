@@ -11,3 +11,6 @@ class CalibrationStopCriteria(BaseModel):
 
     class Meta:
         db_table = 'calibration_stop_criteria'
+        constraints = [
+            models.UniqueConstraint(fields=['calibration_run'], name='uq_stopcriteria_per_run'),
+        ]

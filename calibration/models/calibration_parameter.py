@@ -4,7 +4,7 @@ from calibration.models.base_model import BaseModel
 
 
 class CalibrationParameter(BaseModel):
-    calibration_formulation = models.ForeignKey('CalibrationFormulation', null=False, on_delete=models.CASCADE)
+    calibration_formulation = models.ForeignKey('CalibrationFormulation', null=False, on_delete=models.CASCADE, db_index=True)
     name = models.CharField(max_length=255, null=False)
     description = models.TextField(null=False)
     data_type = models.CharField(max_length=50, null=False)
@@ -17,8 +17,15 @@ class CalibrationParameter(BaseModel):
     class Meta:
         db_table = 'calibration_parameter'
         constraints = [
-            models.UniqueConstraint(fields=['name', 'calibration_formulation'],
-                                    name='calibration_tune_parameter__name__calibration_formulation__unique')
+            models.UniqueConstraint(
+                fields=['name', 'calibration_formulation'],
+                name='calibration_tune_parameter__name__calibration_formulation__unique',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['calibration_formulation'], name='idx_parameter_formulation'),
+            models.Index(fields=['calibration_formulation', 'user_selected_for_tuning'],
+                         name='idx_param_formulation_selected'),
         ]
 
     def __str__(self):

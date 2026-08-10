@@ -1,0 +1,27 @@
+# -----------------------------
+# Redis PROD configuration
+# -----------------------------
+
+# Accept all container-local connections (Docker networking)
+bind 0.0.0.0
+
+# Disable protection since Redis runs inside an isolated Docker network
+protected-mode no
+
+# Default Redis port
+port 6379
+
+# Disable RDB snapshots – pure in-memory cache
+save ""
+
+# Disable AOF persistence – keep behavior consistent with dev
+appendonly no
+
+# Do not daemonize (needed for Docker/systemd)
+daemonize no
+
+# Do not block writes if a background save fails
+stop-writes-on-bgsave-error no
+
+# Log to stdout (Docker/systemd captures logs)
+logfile ""

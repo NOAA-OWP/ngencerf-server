@@ -20,14 +20,13 @@ ALLOWED_HOSTS = ['*']
 DEBUG = True
 
 # SQL logging
-LOGGING['loggers']['django.db.backends']['level'] = 'INFO'
+LOGGING['loggers']['django.db.backends']['level'] = 'DEBUG'
 
 # Calibration logging
 LOGGING['loggers']['calibration']['level'] = 'DEBUG'
 
 # Regular logging
 LOGGING['root']['level'] = 'INFO'
-
 
 DATABASES = {
     'default': {
@@ -36,10 +35,15 @@ DATABASES = {
         'USER': os.getenv('CERF_SERVER_DATABASE_USER', 'postgres'),
         'PASSWORD': os.getenv('CERF_SERVER_DATABASE_PASSWORD', 'postgres'),
         'HOST': os.getenv('CERF_SERVER_DATABASE_HOST', 'localhost'),
+        # Blackhole ip for timeout testing
+        # 'HOST': '10.255.255.1',
         'PORT': 5432,
+        'CONN_MAX_AGE': 60,
         'OPTIONS': {
             'connect_timeout': 10,
-            'options': '-c statement_timeout=10000ms'
+            'options': '-c statement_timeout=10000ms',
+            'sslmode': 'verify-full',
+            'sslrootcert': '/ngencerf/aws_cert/global-bundle.pem',
         }
     }
 }

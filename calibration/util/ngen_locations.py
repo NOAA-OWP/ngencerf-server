@@ -5,7 +5,8 @@ from typing import Literal
 from django.conf import settings
 
 from calibration.enums import ValidationType
-from calibration.models import CalibrationRun, ForecastRun
+from calibration.enums_vanilla import SecondaryDataEnum
+from calibration.models import CalibrationRun, ValidationRun, ForecastRun, ColdStartRun, VerificationRun
 from cerfServer.settings import NGEN_ENVIRONMENT
 
 logger = logging.getLogger(__name__)
@@ -13,11 +14,15 @@ logger = logging.getLogger(__name__)
 static_dirs = [
     NWM_RETROSPECTIVE_DIR := os.path.join(settings.NGEN_STATIC_DIR, 'nwm_retrospective'),
     PARQUET_DIR := os.path.join(settings.NGEN_STATIC_DIR, 'parquet'),
-    NGEN_MODULE_PARAMETERS := os.path.join(settings.NGEN_STATIC_DIR, 'module_parameter_files')
+    NGEN_MODULE_PARAMETERS := os.path.join(settings.NGEN_STATIC_DIR, 'module_parameter_files'),
+    FORECAST_FORCING_TEMPLATES := os.path.join(settings.NGEN_STATIC_DIR, 'forecast_forcing_templates'),
+    VERF_DATA := os.path.join(settings.NGEN_STATIC_DIR, 'verification_data')
 ]
 
 files = [
     NGEN_EXE := os.path.join(settings.NGEN_REPO_ROOT, 'cmake_build', 'ngen'),
+    PARALLEL_NGEN_EXE := os.path.join(settings.NGEN_REPO_ROOT, 'cmake_build', 'ngen'),
+    PARTITION_GENERATOR_EXE := os.path.join(settings.BASE_DIR, 'partitionGenerator'),
     CFE_LIB := os.path.join(settings.NGEN_REPO_ROOT, 'extern', 'cfe', 'cmake_build', 'libcfebmi.so'),
     SLOTH_LIB := os.path.join(settings.NGEN_REPO_ROOT, 'extern', 'sloth', 'cmake_build', 'libslothmodel.so'),
     TOPMD_LIB := os.path.join(settings.NGEN_REPO_ROOT, 'extern', 'topmodel', 'cmake_build', 'libtopmodelbmi.so'),
@@ -28,27 +33,10 @@ files = [
     PET_LIB := os.path.join(settings.NGEN_REPO_ROOT, 'extern', 'evapotranspiration', 'evapotranspiration', 'cmake_build', 'libpetbmi.so'),
     SNOW17_LIB := os.path.join(settings.NGEN_REPO_ROOT, 'extern', 'snow17', 'cmake_build', 'libsnow17bmi.so'),
     SAC_LIB := os.path.join(settings.NGEN_REPO_ROOT, 'extern', 'sac-sma', 'cmake_build', 'libsacbmi.so'),
-    UEB_LIB := os.path.join(settings.NGEN_REPO_ROOT, 'extern', 'ueb-bmi', 'cmake_build', 'src', 'libbmiuebcxx.so')
+    UEB_LIB := os.path.join(settings.NGEN_REPO_ROOT, 'extern', 'ueb-bmi', 'cmake_build', 'src', 'libbmiuebcxx.so'),
+    VERF_CROSSWALK_NGEN_FILE := os.path.join(VERF_DATA, 'usgs_ngen_crosswalk_all_domains.parquet'),
+    VERF_GAGE_HYDROFABRIC_FILE := os.path.join(VERF_DATA, 'gage_hydrofabric_all_domains.parquet'),
 ]
-
-forecast_forcing_scripts = [
-    FORCING_MESH_SCRIPT_PATH := os.path.join(settings.NGEN_FORCING_REPO_ROOT, 'ESMF_Mesh_Domain_Configuration_Production',
-                                             'NextGen_hyfab_to_ESMF_Mesh.py'),
-    FORCING_EXTRACTION_SCRIPT_PATH := os.path.join(settings.NGEN_FORCING_REPO_ROOT, 'Forcing_Extraction_Scripts'),
-    FORCING_BMI_SCRIPT_PATH := os.path.join(settings.NGEN_FORCING_REPO_ROOT, 'NextGen_Forcings_Engine_BMI', 'run_bmi_model.py')
-]
-
-forecast_forcing_work_directories = [
-    FORCING_RAW_INPUT := os.path.join(settings.NGEN_FORCING_WORK_DIR, 'raw_input'),
-    FORCING_ESMF_MESH := os.path.join(settings.NGEN_FORCING_WORK_DIR, 'esmf_mesh'),
-    FORCING_HRRR := os.path.join(FORCING_RAW_INPUT, 'HRRR'),
-    FORCING_RAP := os.path.join(FORCING_RAW_INPUT, 'RAP'),
-]
-
-for f in forecast_forcing_work_directories:
-    os.makedirs(f, exist_ok=True)
-    # On PW, the server runs as root, but the Slurm jobs do not, so we need to adjust the permissions
-    os.chmod(f, 0o777)
 
 
 def check_files():
@@ -67,9 +55,11 @@ def check_files():
 
 # Construct the directory where the Input/Output is
 def get_gage_dir(run: CalibrationRun) -> str:
+    objective_function_name = run.objective_function.name if run.objective_function else 'None'
+    optimization_name = run.optimization.name if run.optimization else 'None'
     return os.path.join(
         run.job_data_dir,
-        f"{run.objective_function.name.lower()}_{run.optimization.name.lower()}",
+        f"{objective_function_name.lower()}_{optimization_name.lower()}",
         run.user_formulation_name,
         run.gage.gage_id
     )
@@ -92,7 +82,7 @@ def get_bmi_config_dir_for_module(run: CalibrationRun, module_name: str) -> str:
 
 
 def get_bmi_config_key(module_name: str) -> str:
-    return f"{module_name.lower()}_bmi_dir"
+    return f"{module_name.lower().replace('-', '_')}_bmi_dir"
 
 
 # Job-specific forcing directory
@@ -149,6 +139,10 @@ def get_output_validation_plot_dir(run: CalibrationRun) -> str:
 
 def get_output_validation_iteration_plot_dir(run: CalibrationRun, iteration_num: int, worker_name: str) -> str:
     return os.path.join(get_output_validation_run_dir(run), f'Plot_Valid_{worker_name}_iter{iteration_num}')
+
+
+def get_output_cold_start_run_dir(run: CalibrationRun) -> str:
+    return os.path.join(get_output_dir(run), 'Cold_Start_Run')
 
 
 def get_output_forecast_run_dir(run: CalibrationRun) -> str:
@@ -267,8 +261,16 @@ def get_validation_iteration_stdout_file(run: CalibrationRun, worker_name: str, 
     return os.path.join(get_output_validation_run_dir(run), f"ngen-cal_validation_{worker_name}_iter{iteration_num}_stdout.log")
 
 
+def get_cold_start_dir(cold_start_run: ColdStartRun) -> str:
+    return os.path.join(get_output_cold_start_run_dir(cold_start_run.calibration_run), f'cold_start_{cold_start_run.id}')
+
+
 def get_forecast_dir(forecast_run: ForecastRun) -> str:
     return os.path.join(get_output_forecast_run_dir(forecast_run.calibration_run), f'forecast_{forecast_run.id}')
+
+
+def get_cold_start_output_dir(cold_start_run: ColdStartRun) -> str:
+    return os.path.join(get_cold_start_dir(cold_start_run), 'output')
 
 
 def get_forecast_output_dir(forecast_run: ForecastRun) -> str:
@@ -279,40 +281,58 @@ def get_forecast_forcing_config_file(forecast_run: ForecastRun) -> str:
     return os.path.join(get_forecast_dir(forecast_run), f'forecast_forcing_config.yaml')
 
 
-def get_forecast_forcing_cycle_config_file(forecast_run: ForecastRun) -> str:
-    return os.path.join(get_forecast_dir(forecast_run), f'{forecast_run.cycle.internal_name}_config.yaml')
+# def get_forecast_forcing_cycle_config_file(forecast_run: ForecastRun) -> str:
+#     return os.path.join(get_forecast_dir(forecast_run), f'{forecast_run.cycle.internal_name}_config.yaml')
+
+
+def get_cold_start_output_file(forecast_run: ForecastRun) -> str | None:
+    if not forecast_run.cold_start_run:
+        return None
+    return os.path.join(get_cold_start_output_dir(forecast_run.cold_start_run), f'{forecast_run.calibration_run.gage.gage_id}_output.csv')
 
 
 def get_forecast_output_file(forecast_run: ForecastRun) -> str:
     return os.path.join(get_forecast_output_dir(forecast_run), f'{forecast_run.calibration_run.gage.gage_id}_output.csv')
 
 
-def get_forecast_forcing_download_stdout_file(forecast_run: ForecastRun) -> str:
-    return os.path.join(get_forecast_dir(forecast_run), 'forecast_forcing_download_stdout.log')
+def get_cold_start_stdout_file(cold_start_run: ColdStartRun) -> str:
+    return os.path.join(get_cold_start_dir(cold_start_run), 'cold_start_stdout.log')
 
 
 def get_forecast_stdout_file(forecast_run: ForecastRun) -> str:
     return os.path.join(get_forecast_dir(forecast_run), 'forecast_stdout.log')
 
 
-def get_forecast_forcing_download_performance_file(forecast_run: ForecastRun) -> str:
-    return os.path.join(get_forecast_dir(forecast_run), 'forecast_forcing_download_performance.log')
+def get_cold_start_performance_file(cold_start_run: ColdStartRun) -> str:
+    return os.path.join(get_cold_start_dir(cold_start_run), 'cold_start_performance.log')
 
 
 def get_forecast_performance_file(forecast_run: ForecastRun) -> str:
     return os.path.join(get_forecast_dir(forecast_run), 'forecast_performance.log')
 
 
-def get_forecast_forcing_download_file(forecast_run: ForecastRun) -> str:
-    return os.path.join(get_forecast_dir(forecast_run), f'forecast_forcing_{forecast_run.id}.nc')
+def get_forecast_realization_file(forecast_run: ForecastRun) -> str:
+    return os.path.join(get_forecast_dir(forecast_run), f'{forecast_run.calibration_run.gage.gage_id}_realization_config_bmi_fcst.json')
 
 
-def get_forecast_temp_dir(forecast_run: ForecastRun) -> str:
-    # TODO Need Kyle to create the directory, so we can use /tmp and not create it ourselves
-    # temp_dir = os.path.join('/tmp', f'forcing_workdir_Calibration_{forecast_run.calibration_run.id}_Forecast_{forecast_run.id}')
-    temp_dir = os.path.join(get_forecast_dir(forecast_run), 'scratch_dir')
-    os.mkdir(temp_dir)
-    return temp_dir
+def get_cold_start_realization_file(cold_start_run: ColdStartRun) -> str:
+    return os.path.join(get_cold_start_dir(cold_start_run), f'{cold_start_run.calibration_run.gage.gage_id}_realization_config_bmi_cold_start.json')
+
+
+def get_verification_run_dir(run: VerificationRun) -> str:
+    return os.path.join(get_forecast_dir(run.forecast_run), 'Verification_Run', f'verification_{run.id}')
+
+
+def get_verification_yaml_config_file(run: VerificationRun) -> str:
+    return os.path.join(get_verification_run_dir(run), f'verification_{run.id}_config.yaml')
+
+
+def get_verification_stdout_file(run: VerificationRun) -> str:
+    return os.path.join(get_verification_run_dir(run), 'verification_stdout.log')
+
+
+def get_verification_performance_file(run: VerificationRun) -> str:
+    return os.path.join(get_verification_run_dir(run), 'verification_performance.log')
 
 
 def get_validation_performance_file(run: CalibrationRun, worker_name: str, iteration_num: int) -> str:
@@ -323,10 +343,38 @@ def get_swe_netcdf_file(run: CalibrationRun) -> str:
     return os.path.join(get_output_validation_run_dir(run), f"{run.gage.gage_id}_swe.nc")
 
 
+def get_soil_moisture_netcdf_file(run: CalibrationRun) -> str:
+    return os.path.join(get_output_validation_run_dir(run), f"{run.gage.gage_id}_soil_moisture.nc")
+
+
 def get_validation_special_performance_file(run: CalibrationRun,
                                             validation_type: Literal[ValidationType.VALID_BEST, ValidationType.VALID_CONTROL]) -> str:
     validation_type_str = validation_type.value.split('_')[1].lower()
     return os.path.join(get_output_validation_run_dir(run), f"ngen-cal_validation_{validation_type_str}_performance.log")
+
+
+def get_calibration_git_info_file(run: CalibrationRun) -> str:
+    return os.path.join(get_output_calibration_run_dir(run), f"git_info_calibration.json")
+
+
+def get_validation_special_git_info_file(run: ValidationRun) -> str:
+    return os.path.join(get_output_validation_run_dir(run.calibration_run), f"git_info_{run.validation_type}.json")
+
+
+def get_validation_iteration_git_info_file(run: ValidationRun, worker_name: str, iteration_num: int):
+    return os.path.join(get_output_validation_run_dir(run.calibration_run), f"git_info_{worker_name}_iter{iteration_num}.json")
+
+
+def get_forecast_git_info_file(forecast_run: ForecastRun) -> str:
+    return os.path.join(get_forecast_dir(forecast_run), "git_info_forecast.json")
+
+
+def get_cold_start_git_info_file(cold_start_run: ColdStartRun) -> str:
+    return os.path.join(get_cold_start_dir(cold_start_run), "git_info_forecast.json")
+
+
+def get_verification_git_info_file(run: VerificationRun) -> str:
+    return os.path.join(get_verification_run_dir(run), "git_info_verification.json")
 
 
 def get_validation_metrics_valid_best_file(run: CalibrationRun) -> str:
@@ -347,3 +395,66 @@ def get_validation_metrics_nwm_retrospective_file(run: CalibrationRun) -> str:
 
 def get_validation_metrics_valid_iteration_file(run: CalibrationRun, worker_name: str, iteration_num: int) -> str:
     return os.path.join(get_output_validation_run_dir(run), f"{run.gage.gage_id}_metrics_valid_{worker_name}_iter{iteration_num}.csv")
+
+
+def get_ngen_logging_basename() -> str:
+    return "ngen_logging"
+
+
+def get_ngen_logging_file(run: CalibrationRun | ValidationRun | ForecastRun | ColdStartRun, import_flag: bool = False) -> str:
+    calibration_run = run if isinstance(run, CalibrationRun) else run.calibration_run
+    job_type = run.__class__.__name__.removesuffix('Run').lower()
+    file_name = f"{get_ngen_logging_basename()}_{job_type}_{run.id}{'_import' if import_flag else ''}.json"
+    return os.path.join(calibration_run.job_data_dir, file_name)
+
+
+def get_swe_timeseries_png_filename(validation_run: ValidationRun) -> str:
+    """
+    Returns the full file path for the SWE timeseries PNG image.
+
+    :param validation_run: The ValidationRun object.
+    :return: A string representing the path to the PNG file.
+    """
+    return os.path.join(get_secondary_plot_dir(validation_run, SecondaryDataEnum.SWE), 'swe_timeseries.png')
+
+
+def get_swe_timeseries_data_filename(validation_run: ValidationRun) -> str:
+    """
+    Returns the full file path for the SWE timeseries CSV data file.
+
+    :param validation_run: The ValidationRun object.
+    :return: A string representing the path to the CSV file.
+    """
+    filename = (
+        'swe_timeseries_best.csv'
+        if validation_run.validation_type == ValidationType.VALID_BEST.value
+        else f'swe_timeseries_{validation_run.worker_name}_iter{validation_run.iteration_num}'
+    )
+    return os.path.join(get_output_validation_run_dir(validation_run.calibration_run), filename)
+
+
+def get_soil_moisture_timeseries_png_filename(validation_run: ValidationRun) -> str:
+    return os.path.join(get_secondary_plot_dir(validation_run, SecondaryDataEnum.SOIL_MOISTURE), 'soil_moisture_timeseries.png')
+
+
+def get_soil_moisture_timeseries_data_filename(validation_run: ValidationRun) -> str:
+    filename = (
+        'soil_moisture_timeseries_best.csv'
+        if validation_run.validation_type == ValidationType.VALID_BEST.value
+        else f'soil_moisture_timeseries_{validation_run.worker_name}_iter{validation_run.iteration_num}'
+    )
+    return os.path.join(get_output_validation_run_dir(validation_run.calibration_run), filename)
+
+
+def get_secondary_plot_dir(run: ValidationRun, data_type: SecondaryDataEnum) -> str:
+    """
+    Determines and returns the appropriate plot directory for a given validation run.
+    """
+    if run.validation_type == ValidationType.VALID_ITERATION.value:
+        base_dir = get_output_validation_iteration_plot_dir(run.calibration_run, run.iteration_num, run.worker_name)
+    else:
+        base_dir = get_output_validation_plot_dir(run.calibration_run)
+
+    plot_dir = os.path.join(base_dir, str(data_type.value))
+    os.makedirs(plot_dir, exist_ok=True)
+    return plot_dir

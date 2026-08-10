@@ -1,9 +1,13 @@
 from django.urls import path
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 
+import calibration.views.calibration_import_export_views
+import calibration.views.calibration_landing_views
+import calibration.views.get_jobs_views
 from calibration.views import calibration_formulation_views, calibration_tuning_views, calibration_gage_views, \
     calibration_optimization_views, calibration_run_views, calibration_plot_views, calibration_import_export_views, calibration_landing_views, \
-    calibration_evaluation_views, calibration_forecast_views, calibration_swe_views
+    calibration_evaluation_views, calibration_forecast_views, calibration_regionalization_views, \
+    calibration_verification_views, calibration_secondary_data_views
 
 urlpatterns = [
     ##################################
@@ -14,15 +18,16 @@ urlpatterns = [
     path('calibration/create_and_run_forecast/', calibration_landing_views.create_and_run_forecast, name="createForecastRun"),
     path('calibration/get_footer/', calibration_landing_views.get_footer, name="getFooter"),
     path('calibration/get_git_info/', calibration_landing_views.get_git_info, name="getGitInfo"),
-    path('calibration/get_calibration_jobs/', calibration_landing_views.get_calibration_jobs, name="getCalibrationJobs"),
-    path('calibration/get_calibration_jobs_for_evaluation/', calibration_landing_views.get_calibration_jobs_for_evaluation,
+    path('calibration/get_calibration_jobs/', calibration.views.get_jobs_views.get_calibration_jobs, name="getCalibrationJobs"),
+    path('calibration/get_calibration_jobs_for_evaluation/', calibration.views.get_jobs_views.get_calibration_jobs_for_evaluation,
          name="getCalibrationJobsForEvaluation"),
-    path('calibration/get_calibration_jobs_for_forecast/', calibration_landing_views.get_calibration_jobs_for_forecast,
+    path('calibration/get_calibration_jobs_for_forecast/', calibration.views.get_jobs_views.get_calibration_jobs_for_forecast,
          name="getCalibrationJobsForForecast"),
-    path('calibration/get_validation_jobs/', calibration_evaluation_views.get_validation_jobs, name="getValidationJobs"),
-    path('calibration/load_calibration_run/', calibration_landing_views.load_calibration_run, name="loadCalibrationRun"),
-    path('calibration/delete_job/', calibration_landing_views.delete_job, name="deleteJob"),
-    path('calibration/archive_job/', calibration_landing_views.archive_job, name="deleteJob"),
+    path('calibration/get_validation_jobs/', calibration.views.get_jobs_views.get_validation_jobs, name="getValidationJobs"),
+    path('calibration/load_calibration_run/', calibration.views.calibration_import_export_views.load_calibration_run, name="loadCalibrationRun"),
+    path('calibration/delete_jobs/', calibration_landing_views.delete_jobs, name="deleteJobs"),
+    path('calibration/archive_jobs/', calibration_landing_views.archive_jobs, name="archiveJobs"),
+    path('calibration/lock_jobs/', calibration_landing_views.lock_jobs, name="lockJobs"),
     path('calibration/clone_job/', calibration_landing_views.clone_job, name="cloneJob"),
 
     ##################################
@@ -34,17 +39,21 @@ urlpatterns = [
     path('calibration/upload_forcing_data/', calibration_gage_views.upload_forcing_data, name="uploadForcingData"),
     path('calibration/upload_geopackage_data/', calibration_gage_views.upload_geopackage_data, name="uploadGeopackageData"),
     path('calibration/save_gage_tab/', calibration_gage_views.save_gage_tab, name="saveGageTab"),
+    path('calibration/update_and_get_gage_status/', calibration_gage_views.update_and_get_gage_status, name="updateAndGetGageStatus"),
 
     ##################################
     # Plot Definitions tab
     ##################################
     path('calibration/get_plot_names/', calibration_plot_views.get_plot_names, name="getPlotNames"),
+    path('calibration/get_plot_names_for_comparison/', calibration_plot_views.get_plot_names_for_comparison, name="getPlotNamesForComparison"),
     path('calibration/get_plot/', calibration_plot_views.get_plot, name="getPlot"),
+    path('calibration/get_plots_for_comparison/', calibration_plot_views.get_plots_for_comparison, name="getPlotsForComparison"),
 
     ##################################
     # Formulation tab
     ##################################
-    path('calibration/load_formulation_tab/', calibration_formulation_views.load_formulation_tab, name="loadFormulationTab"),
+    path('calibration/get_modules/', calibration_formulation_views.get_modules, name="getModules"),
+    path('calibration/validate_formulation_tab/', calibration_formulation_views.validate_formulation_tab, name="validateFormulationTab"),
     path('calibration/save_formulation_tab/', calibration_formulation_views.save_formulation_tab, name="saveFormulationTab"),
 
     ##################################
@@ -64,16 +73,17 @@ urlpatterns = [
     # Run tab
     ##################################
     path('calibration/get_status/', calibration_run_views.get_status, name="getStatus"),
+    path('calibration/get_status_for_comparison/', calibration_run_views.get_status_for_comparison, name="getStatusForComparison"),
     path('calibration/run_calibration/', calibration_run_views.run_calibration, name="runCalibration"),
     path('calibration/report_iteration/', calibration_run_views.report_iteration, name="reportIteration"),
     path('calibration/get_iteration/', calibration_run_views.get_iteration, name="getIteration"),
     path('calibration/cancel_job/', calibration_run_views.cancel_job, name="cancelJob"),
-    path('calibration/get_job_data_dir/', calibration_run_views.get_job_dir, name="getJobDir"),
     path('calibration/calibration_job_slurm_callback/', calibration_run_views.calibration_job_slurm_callback, name="calibrationJobSlurmCallback"),
     path('calibration/validation_job_slurm_callback/', calibration_run_views.validation_job_slurm_callback, name="validationJobSlurmCallback"),
-    path('calibration/forecast_forcing_download_job_slurm_callback/', calibration_run_views.forecast_forcing_download_job_slurm_callback,
-         name="forecastForcingDownloadJobSlurmCallback"),
+    path('calibration/cold_start_job_slurm_callback/', calibration_run_views.cold_start_job_slurm_callback, name="coldStartJobSlurmCallback"),
     path('calibration/forecast_job_slurm_callback/', calibration_run_views.forecast_job_slurm_callback, name="forecastJobSlurmCallback"),
+    path('calibration/verification_job_slurm_callback/', calibration_run_views.verification_job_slurm_callback, name="verificationJobSlurmCallback"),
+    path('calibration/update_mpi_rules/', calibration_run_views.update_mpi_rules, name="updateMPIRules"),
 
     ##################################
     # Evaluation
@@ -82,29 +92,54 @@ urlpatterns = [
          name="getCalibrationDataByIteration"),
     path('calibration/get_log_names/', calibration_evaluation_views.get_log_names, name="getLogNames"),
     path('calibration/get_log/', calibration_evaluation_views.get_log, name="getLog"),
+    path('calibration/get_log_status/', calibration_evaluation_views.get_log_status, name="getLogStatus"),
+    path('calibration/get_calibration_job_zip/', calibration_evaluation_views.get_calibration_job_zip, name="getCalibrationJobZip"),
+    path('calibration/start_zip_for_calibration_job/', calibration_evaluation_views.start_zip_for_calibration_job, name="startZipForCalibrationJob"),
+    path('calibration/get_zip_status/<int:calibration_run_id>/', calibration_evaluation_views.get_zip_status, name="getZipStatus"),
+    path('calibration/download_calibration_zip/', calibration_evaluation_views.download_calibration_zip, name="downloadCalibrationZip"),
+
 
     ##################################
     # Forecast
     ##################################
     path('calibration/load_forecast_tab/', calibration_forecast_views.load_forecast_tab, name="loadForecastTab"),
-    path('calibration/get_forecast_jobs/', calibration_forecast_views.get_forecast_jobs, name="getForecastJobs"),
+    path('calibration/get_forecast_jobs/', calibration.views.get_jobs_views.get_forecast_jobs, name="getForecastJobs"),
+    path('calibration/get_forecast_jobs_for_verification/', calibration.views.get_jobs_views.get_forecast_jobs_for_verification, name="getForecastJobsForVerification"),
     path('calibration/clone_and_run_forecast/', calibration_forecast_views.clone_and_run_forecast_job, name="cloneAndRunForecastJob"),
+    path('calibration/get_forecast_timeseries_data/', calibration_forecast_views.get_forecast_timeseries_data, name="getForecastTimeseriesData"),
     path('calibration/delete_forecast_job/', calibration_forecast_views.delete_forecast_job, name="deleteForecastJob"),
+
+
+    ##################################
+    # Verification
+    ##################################
+    path('calibration/load_verification_job/', calibration_verification_views.load_verification_job, name="loadVerificationJob"),
+    path('calibration/get_verification_jobs/', calibration.views.get_jobs_views.get_verification_jobs, name="getVerificationJobs"),
+    path('calibration/create_verification_job/', calibration_verification_views.create_verification_job, name="createVerificationJob"),
+    path('calibration/get_verification_status/', calibration_verification_views.get_verification_status, name="getVerificationStatus"),
+    path('calibration/run_verification/', calibration_verification_views.run_verification, name="runVerification"),
+    path('calibration/get_verification_plot_names/', calibration_verification_views.get_verification_plot_names, name="getVerificationPlotNames"),
+    path('calibration/get_verification_plot/', calibration_verification_views.get_verification_plot, name="getVerificationPlot"),
+    path('calibration/delete_verification_job/', calibration_verification_views.delete_verification_job, name="deleteVerificationJob"),
 
     ##################################
     # SWE
     ##################################
-    path('calibration/get_swe_images_by_date/', calibration_swe_views.get_swe_images_by_date, name="getSweImagesByDate"),
-    path('calibration/get_swe_timeseries_data/', calibration_swe_views.get_swe_timeseries_data, name="getSweTimeseriesData"),
-    
-    # Testing
-    path('calibration/process_calibration_output/', calibration_run_views.read_calibration_output, name="processCalibrationOutput"),
+    path('calibration/get_swe_images_by_date/', calibration_secondary_data_views.get_swe_images_by_date, name="getSweImagesByDate"),
+    path('calibration/get_swe_timeseries_data/', calibration_secondary_data_views.get_swe_timeseries_data, name="getSweTimeseriesData"),
+    path('calibration/get_soil_moisture_images_by_date/', calibration_secondary_data_views.get_soil_moisture_images_by_date, name="getSoilMoistureImagesByDate"),
+    path('calibration/get_soil_moisture_timeseries_data/', calibration_secondary_data_views.get_soil_moisture_timeseries_data, name="getSoilMoistureTimeseriesData"),
 
     ##################################
     # Import/Export
     ##################################
     path('calibration/export/', calibration_import_export_views.export_job, name="export"),
-    path('calibration/import/', calibration_import_export_views.import_job, name="import"),
+    path('calibration/import/', calibration.views.calibration_landing_views.import_job, name="import"),
+
+    ##################################
+    # Regionalization
+    ##################################
+    path('calibration/get_regionalization_files_zip/', calibration_regionalization_views.get_regionalization_files_zip, name="getRegionalizationFilesZip"),
 
     ##################################
     # Swagger - drf_spectacular
@@ -117,5 +152,7 @@ urlpatterns = [
     # Testing
     ##################################
     path('calibration/get_slurm_token/', calibration_run_views.get_slurm_token, name="getSlurmToken"),
+    path('calibration/process_calibration_output/', calibration_run_views.process_calibration_output, name="processCalibrationOutput"),
+    path('calibration/process_swe_timeseries/', calibration_run_views.process_swe_timeseries, name="processSweTimeseries"),
 
 ]

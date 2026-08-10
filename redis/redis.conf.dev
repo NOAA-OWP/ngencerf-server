@@ -1,0 +1,27 @@
+# -----------------------------
+# Redis DEV configuration
+# -----------------------------
+
+# Bind only to localhost (dev machine)
+bind 127.0.0.1
+
+# Restrict access to local connections
+protected-mode yes
+
+# Default Redis port
+port 6379
+
+# Disable RDB snapshots – pure in-memory cache
+save ""
+
+# Disable AOF persistence – keep behavior consistent with dev
+appendonly no
+
+# Do not daemonize (needed for Docker/systemd)
+daemonize no
+
+# Do not block writes if a background save fails
+stop-writes-on-bgsave-error no
+
+# Log to stdout (Docker/systemd captures logs)
+logfile ""

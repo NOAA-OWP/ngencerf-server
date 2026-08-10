@@ -1,63 +1,157 @@
-FROM registry.sh.nextgenwaterprediction.com/infrastructure/rockylinux/rockylinux:latest
+FROM rockylinux:8
 
-# Install runtime dependencies
-RUN set -eux; \
-    dnf install -y yum-utils; \
-    dnf config-manager --set-enabled crb; \
-    dnf install -y epel-release; \
+# Install build and runtime dependencies
+RUN set -eux && \
+    dnf install -y yum-utils epel-release && \
     dnf install -y \
-        file \
+        # Singularity build requirements
+        golang \
+        libseccomp-devel \
+        squashfs-tools \
+        cryptsetup \
+        wget \
+        make \
+        gcc \
+        openssl-devel \
+        glib2-devel \
         findutils \
+        file \
         jq \
         libpq \
         git \
         openssl openssl-devel \
+        # Python 3.11 stack
         python3.11 python3.11-libs python3.11-devel \
         python3.11-pip \
         python3.11-setuptools \
-        singularity-ce \
-        which; \
-    dnf clean all
+        # partitionGenerator requirements
+        cmake \
+        gcc-c++ \
+        sqlite-devel \
+        udunits2 udunits2-devel \
+        dnf-plugins-core && \
+    dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo && \
+    dnf install -y docker-ce-cli && \
+    dnf clean all && \
+    # Build and install SingularityCE 3.11.4 from source
+    git clone https://github.com/sylabs/singularity.git /tmp/singularity && \
+    cd /tmp/singularity && \
+    git checkout v3.11.4 && \
+    git submodule update --init --recursive && \
+    ./mconfig && \
+    make -C builddir && \
+    make -C builddir install && \
+    cd / && \
+    rm -rf /tmp/singularity
 
-# Configure Git with the GitLab token using BuildKit secret mount
-RUN --mount=type=secret,id=gitlab_token \
-    set -eux; \
-    \
-    git config --global url."https://oauth2:$(cat /run/secrets/gitlab_token)@gitlab.sh.nextgenwaterprediction.com/".insteadOf "https://gitlab.sh.nextgenwaterprediction.com/"
 
+# Install Boost 1.79.0 from source
+ARG BOOST_VERSION=1.79.0
+RUN --mount=type=cache,target=/root/.cache/cmake,id=cmake-boost \
+    set -eux && \
+    curl --location --output boost.tar.gz "https://archives.boost.io/release/${BOOST_VERSION}/source/boost_${BOOST_VERSION//./_}.tar.gz" && \
+    mkdir -p /opt/boost && \
+    tar --extract --directory /opt/boost --strip-components=1 --file boost.tar.gz && \
+    rm boost.tar.gz
+
+# Install Python virtual environment
 ENV VIRTUAL_ENV=/ngencerf/ngencerf-python
-RUN set -eux; \
-	\
-    python3.11 -m venv ${VIRTUAL_ENV}
 ENV PATH=${VIRTUAL_ENV}/bin:${PATH}
+
+RUN --mount=type=cache,target=/root/.cache/pip,id=pip-cache \
+    set -eux && \
+    python3.11 -m venv ${VIRTUAL_ENV}
 
 WORKDIR /ngencerf/ngencerf-server/
 
-# Install Python virtual environment
+# Pre-copy requirements for better caching
 COPY requirements.txt .
-ARG CREATE_INPUT_TAG
-ARG RUN_SWE_TAG
-RUN set -eux; \
-    pip3 install -r requirements.txt ; \
-    pip3 install "git+https://gitlab.sh.nextgenwaterprediction.com/NGWPC/nwm-ngen/ngen-cal.git@${CREATE_INPUT_TAG}#egg=createInput&subdirectory=python/createInput" ; \
-    pip3 install -e "git+https://gitlab.sh.nextgenwaterprediction.com/NGWPC/nwm-ngen/ngen-forcing.git@${RUN_SWE_TAG}#egg=swe_processing&subdirectory=swe_processing" ; \
-    # Lock numpy and netcdf4 versions so t-route doesn't break
-    pip3 install "numpy==1.26.4" "pandas~=2.2.2" ; \
-    pip3 cache purge; \
-    rm --force /root/.gitconfig; \
-    rm --force requirments.txt
+
+RUN --mount=type=cache,target=/root/.cache/pip,id=pip-cache \
+    set -eux && \
+    pip3 install --upgrade pip && \
+    pip3 install -r requirements.txt && \
+    # ASGI server deps (kept out of base requirements to avoid forcing them on dev envs)
+    pip3 install gunicorn uvicorn && \
+    rm -f requirements.txt
+
+# Build partitionGenerator
+ARG NGEN_ORG=NGWPC
+ARG NGEN_TAG=development
+
+WORKDIR /ngencerf/ngen-sparse
+RUN --mount=type=cache,target=/ngencerf/partitionGenerator_build,id=partition-generator-build \
+    --mount=type=cache,target=/root/.cache/cmake,id=cmake-cache \
+    set -eux && \
+    # Clone only the required directories
+    git clone --depth 1 --filter=blob:none --branch "${NGEN_TAG}" --single-branch --sparse "https://github.com/${NGEN_ORG}/ngen.git" . && \
+    git sparse-checkout init --cone && \
+    git sparse-checkout set \
+        src \
+        include \
+        extern \
+        cmake && \
+    # Configure CMake
+    cmake -S /ngencerf/ngen-sparse -B /ngencerf/partitionGenerator_build \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DNGEN_WITH_MPI=OFF \
+          -DNGEN_WITH_NETCDF=OFF \
+          -DNGEN_WITH_SQLITE=ON \
+          -DNGEN_WITH_UDUNITS=OFF \
+          -DNGEN_WITH_BMI_FORTRAN=OFF \
+          -DNGEN_WITH_BMI_C=OFF \
+          -DNGEN_WITH_PYTHON=OFF \
+          -DNGEN_WITH_TESTS=OFF \
+          -DNGEN_WITH_ROUTING=OFF \
+          -DNGEN_QUIET=ON \
+          -DNGEN_UPDATE_GIT_SUBMODULES=OFF \
+          -DNGEN_WITH_EXTERN_ALL=OFF \
+          -DNGEN_WITH_EXTERN_SLOTH=OFF \
+          -DBOOST_ROOT=/opt/boost && \
+    # Build partitionGenerator
+    cmake --build /ngencerf/partitionGenerator_build --target partitionGenerator --parallel && \
+    # Copy partitionGenerator to server root
+    install -m 755 /ngencerf/partitionGenerator_build/partitionGenerator /ngencerf/ngencerf-server/ && \
+    # Cleanup non-cached build artifacts
+    rm -rf /ngencerf/ngen-sparse
+
+WORKDIR /ngencerf/ngencerf-server/
+
+ARG MSWM_ORG=NGWPC
+ARG MSWM_TAG=development
+
+ARG DATA_ASSIMILATION_ORG=NGWPC
+ARG DATA_ASSIMILATION_TAG=development
+
+ARG NGEN_FORCING_ORG=NGWPC
+ARG NGEN_FORCING_TAG=development
+
+ARG CACHE_BUST=1
+RUN set -eux && \
+    echo $CACHE_BUST && pip3 install "git+https://github.com/${MSWM_ORG}/nwm-msw-mgr.git@${MSWM_TAG}" && \
+    echo $CACHE_BUST && pip3 install "git+https://github.com/${DATA_ASSIMILATION_ORG}/data-assimilation-engine.git@${DATA_ASSIMILATION_TAG}" && \
+    pip3 cache purge
+
+# Get AWS cert for database
+ENV RDS_CERT_DIR=/ngencerf/aws_cert
+
+RUN mkdir -p $RDS_CERT_DIR && \
+    curl -sSL -o $RDS_CERT_DIR/global-bundle.pem \
+    https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
 
 # Should parallel similar functionality in the run_cerf.sh
 COPY .git .git
 
-RUN set -eux; \
+# Create git_info files for server and nwm-msw-mgr
+RUN set -eux && \
+    # ----- Server git_info -----
     # Get the remote URL from Git configuration
-    repo_url=$(git config --get remote.origin.url); \
+    repo_url=$(git config --get remote.origin.url) && \
     # Extract the repo name (everything after the last slash) and remove any trailing .git
-    key=${repo_url##*/}; \
-    key=${key%.git}; \
+    key=${repo_url##*/} && \
+    key=${key%.git} && \
     # Construct the file path using the derived key
-    GIT_INFO_PATH="${key}_git_info.json"; \
+    GIT_INFO_PATH="${key}_git_info.json" && \
     jq -n \
       --arg commit_hash "$(git rev-parse HEAD)" \
       --arg branch "$(git rev-parse --abbrev-ref HEAD)" \
@@ -67,13 +161,72 @@ RUN set -eux; \
       --arg message "$(git log -1 --pretty=format:'%s' | tr '\n' ';')" \
       --arg build_date "$(date -u +'%Y-%m-%d %H:%M:%S UTC')" \
       "{\"$key\": {commit_hash: \$commit_hash, branch: \$branch, tags: \$tags, author: \$author, commit_date: \$commit_date, message: \$message, build_date: \$build_date}}" \
-      > $GIT_INFO_PATH
+      > $GIT_INFO_PATH && \
+    \
+    # ----- nwm-msw-mgr git_info -----
+    GIT_INFO_PATH="/ngencerf/ngencerf-server/nwm-msw-mgr_git_info.json" && \
+    tmpdir=$(mktemp -d) && \
+    if [ "$MSWM_TAG" = "development" ]; then \
+        git clone --depth 1 --branch development https://github.com/${MSWM_ORG}/nwm-msw-mgr.git "$tmpdir" && \
+        cd "$tmpdir" && \
+        branch="development" && \
+        tags=""; \
+    else \
+        git clone --depth 1 --branch "$MSWM_TAG" --single-branch https://github.com/${MSWM_ORG}/nwm-msw-mgr.git "$tmpdir" && \
+        cd "$tmpdir" && \
+        branch="" && \
+        tags="$MSWM_TAG"; \
+    fi && \
+    jq -n \
+      --arg commit_hash "$(git rev-parse HEAD)" \
+      --arg branch "$branch" \
+      --arg tags "$tags" \
+      --arg author "$(git log -1 --pretty=format:'%an')" \
+      --arg commit_date "$(date -u -d @$(git log -1 --pretty=format:'%ct') +'%Y-%m-%d %H:%M:%S UTC')" \
+      --arg message "$(git log -1 --pretty=format:'%s' | tr '\n' ';')" \
+      --arg build_date "$(date -u +'%Y-%m-%d %H:%M:%S UTC')" \
+      '{"nwm-msw-mgr": {commit_hash: $commit_hash, branch: $branch, tags: $tags, author: $author, commit_date: $commit_date, message: $message, build_date: $build_date}}' \
+      > $GIT_INFO_PATH && \
+    cd / && rm -rf "$tmpdir"
+
+# Remove .git directory
+RUN rm -rf .git
+
+COPY cli /ngencerf/ngencerf-server/cli
 
 # Copy application code
 COPY . /ngencerf/ngencerf-server/
 
-# Remove .git directory
-RUN rm --recursive --force .git
+# Fetch forecast_forcing_templates into an internal, non-mounted path to be copied at runtime by runCerf.sh
+RUN set -eux && \
+    PREBUILT_DIR="/ngencerf/prebuilt/forecast_forcing_templates" && \
+    NGEN_FORCING_URL="https://github.com/${NGEN_FORCING_ORG}/ngen-forcing.git" && \
+    \
+    echo "Preparing forecast_forcing_templates from ${NGEN_FORCING_URL}, branch: ${NGEN_FORCING_TAG}" && \
+    \
+    # Ensure prebuilt directory exists and is empty
+    rm -rf "$PREBUILT_DIR" && \
+    mkdir -p "$PREBUILT_DIR" && \
+    \
+    # Clone sparse repo
+    git clone --depth 1 --filter=blob:none --sparse \
+        -b "${NGEN_FORCING_TAG}" \
+        "$NGEN_FORCING_URL" tmp-ngen-forcing && \
+    \
+    cd tmp-ngen-forcing && \
+    git sparse-checkout set \
+        NextGen_Forcings_Engine_BMI/BMI_NextGen_Configs/config_templates && \
+    \
+    # Copy *contents* of config_templates into PREBUILT_DIR
+    cp -a NextGen_Forcings_Engine_BMI/BMI_NextGen_Configs/config_templates/. \
+        "$PREBUILT_DIR"/ && \
+    \
+    cd /ngencerf/ngencerf-server && \
+    rm -rf tmp-ngen-forcing || true
+
+
+# Build CLI executable in cli/dist
+RUN cli/build_cli.sh
 
 # Copy additional configuration files
 COPY ./cerfserver-docker.env /ngencerf/ngencerf-server/cerfserver.env

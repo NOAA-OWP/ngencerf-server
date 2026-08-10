@@ -1,5 +1,4 @@
 import logging
-import os
 import time
 from urllib.parse import urljoin
 
@@ -8,11 +7,11 @@ from django.conf import settings
 from django.db import transaction
 from django.db.models import QuerySet
 
+from calibration.enums import ForcingSourceEnum
 from calibration.models import CalibrationParameter, CalibrationFormulation, CalibrationRun
-from calibration.util.aws_util import convert_s3_uri_to_fs
-from calibration.util.caching import get_cached_module_by_name
-from calibration.util.calibration_validators import ModuleDataListSerializer, S3FileValidator, S3DirectoryValidator
-from calibration.util.file_util import copy_directory
+from calibration.util.caching import get_cached_module_by_name, get_cached_modules_by_id
+from calibration.util.calibration_validators import ModuleDataListSerializer, S3FileValidator
+from calibration.util.cloud_util import copy_tree, path_exists, join_url, is_dir
 from calibration.util.ngen_locations import get_bmi_config_dir_for_module
 from calibration.views.common import validate_response_data
 from data_services_test_data import data_services_test_data
@@ -28,12 +27,12 @@ def fetch_from_data_services(method: str, url: str, headers: dict = None, payloa
     """
     Sends an HTTP request to Data Services and processes the response.
 
-    :param method: HTTP method (e.g., 'GET' or 'POST')
+    :param method: HTTP method (e.g., 'GET' or 'POST').
     :param url: The full URL of the Data Services endpoint.
     :param headers: Optional HTTP headers to include.
     :param payload: Optional JSON payload for POST requests.
     :return: The response JSON data as a dictionary.
-    :raises: DataServicesException for any HTTP or connection-related errors.
+    :raises: DataServicesException: For any HTTP or connection-related errors.
     """
     status_code = None
     response_text = None
@@ -107,6 +106,9 @@ def fetch_from_data_services(method: str, url: str, headers: dict = None, payloa
 class DataServicesException(Exception):
     """
     Custom exception for errors related to Data Services.
+
+    :param message: Description of the error.
+    :param status_code: Optional HTTP status code associated with the error.
     """
 
     def __init__(self, message, status_code=None):
@@ -136,9 +138,8 @@ def get_geopackage_from_data_services(run: CalibrationRun):
 
         eds_data = validate_response_data(S3FileValidator, geopackage_json, 'Geopackage data from Data Services is not in the expected format')
 
-        s3_uri = eds_data.get('uri')
-        run.geopackage_eds_file_path = convert_s3_uri_to_fs(s3_uri)
-        if run.geopackage_eds_file_path and not os.path.exists(run.geopackage_eds_file_path):
+        run.geopackage_eds_file_path = eds_data.get('uri')
+        if run.geopackage_eds_file_path and not path_exists(run.geopackage_eds_file_path):
             raise DataServicesException(f"Geopackage from Data Services, {run.geopackage_eds_file_path} does not exist")
         logger.info(f'Setting run.geopackage_eds_file_path to {run.geopackage_eds_file_path}')
 
@@ -164,10 +165,8 @@ def get_observational_data_from_data_services(run: CalibrationRun):
     observational_data = validate_response_data(S3FileValidator, observational_json,
                                                 'Observational data from Data Services is not in the expected format')
 
-    s3_uri = observational_data.get('uri')
-
-    run.observational_eds_file_path = convert_s3_uri_to_fs(s3_uri)
-    if run.observational_eds_file_path and not os.path.exists(run.observational_eds_file_path):
+    run.observational_eds_file_path = observational_data.get('uri')
+    if run.observational_eds_file_path and not path_exists(run.observational_eds_file_path):
         logger.error(f"Observational file from Data Services, {run.observational_eds_file_path} does not exist")
     clear_times(run)
     logger.info(f'Setting run.observational_eds_file_path to {run.observational_eds_file_path}')
@@ -198,54 +197,48 @@ def clear_times(run: CalibrationRun, cli: bool = False):
         run.validation_eval_end_period = None
 
 
-def get_forcing_data_from_data_services(run: CalibrationRun):
+def get_forcing_data_from_s3(run: CalibrationRun, forcing_source_name: str):
     """
-    Retrieves forcing data from Data Services and updates the CalibrationRun instance.
+    Attempts to retrieve forcing data from configured S3 directories.
+
+    settings.FORCING_DATA_DIRS_xxx is a dict of S3 URLs (prefixes).
 
     :param run: A CalibrationRun object with associated gage information.
-    """
-    if settings.ENTERPRISE_DATA_FORCING_DATA_ENDPOINT[0]:
-        logger.info('Getting forcing data from Data Services')
-        url = urljoin(settings.ENTERPRISE_DATA_URL, settings.ENTERPRISE_DATA_FORCING_DATA_ENDPOINT[1].format(gage_id=run.gage.gage_id))
-        forcing_json = fetch_from_data_services('GET', url, headers=default_headers)
-    else:
-        get_forcing_data_from_s3(run)
-        return
-
-    forcing_data = validate_response_data(S3DirectoryValidator, forcing_json, 'Forcing data from Data Services is not in the expected format')
-
-    s3_uri = forcing_data.get('uri')
-
-    run.forcing_eds_dir_path = convert_s3_uri_to_fs(s3_uri)
-    clear_times(run)
-    logger.info(f'Setting run.forcing_eds_dir_path to {run.forcing_eds_dir_path}')
-
-
-def get_forcing_data_from_s3(run: CalibrationRun):
-    """
-    Attempts to retrieve forcing data from local S3 directories.
-
-    :param run: A CalibrationRun object with associated gage information.
+    :param forcing_source_name: The name of the forcing source to retrieve data for.
     :raises DataServicesException: If the forcing data cannot be found in the local S3 directories.
     """
-    for s3_uri in settings.FORCING_DATA_DIRS:
-        dir_path = convert_s3_uri_to_fs(s3_uri)
-        gage_dir = os.path.join(dir_path, run.gage.domain.name, f"Gage_{run.gage.gage_id}")
-        if os.path.isdir(gage_dir):
-            logger.info(f"Found forcing directory {gage_dir}")
-            run.forcing_eds_dir_path = gage_dir
+    forcing_containers = (
+        settings.FORCING_DATA_DIRS_AORC
+        if forcing_source_name == ForcingSourceEnum.AORC.value
+        else settings.FORCING_DATA_DIRS_RETRO
+    )
+
+    for src_key, s3_uri in forcing_containers.items():
+        # <prefix>/<domain>/Gage_<gage_id>
+        forcing_dir = join_url(s3_uri, run.gage.domain.name, f"Gage_{run.gage.gage_id}")
+
+        if is_dir(forcing_dir):
+            logger.info(f"Found forcing directory {forcing_dir}")
+            run.forcing_eds_dir_path = forcing_dir
+            run.forcing_source_actual = ForcingSourceEnum.get_instance(src_key)
             clear_times(run)
-            logger.info(f'Setting run.forcing_eds_dir_path to {run.forcing_eds_dir_path}')
+            logger.info(
+                "Setting run.forcing_eds_dir_path to %s; forcing_source_actual=%s",
+                run.forcing_eds_dir_path, run.forcing_source_actual
+            )
             return
         else:
-            logger.info(f"Forcing directory doesn't exist for {gage_dir}")
+            logger.info(
+                "Forcing directory for gage %s doesn't exist at %s (key: %s)",
+                run.gage.gage_id, forcing_dir, src_key
+            )
 
     raise DataServicesException(f"Could not find forcing data for gage {run.gage.gage_id}")
 
 
 def get_module_metadata_from_data_services(run: CalibrationRun,
                                            calibration_formulations: QuerySet[CalibrationFormulation],
-                                           gage_changed: bool = False):
+                                           gage_changed: bool = False) -> list[dict]:
     """
     Retrieves module metadata from Data Services and updates the database with module parameters and output variables.
 
@@ -255,12 +248,20 @@ def get_module_metadata_from_data_services(run: CalibrationRun,
                          - If False: Indicates the modules have changed.
                          - If True: Indicates the gage has changed, and we want to retain the min/max values
                            for existing parameters while updating their initial values.
+    :return: A list of dictionaries containing potential errors.
     :raises DataServicesException: If required module metadata is missing.
     """
     gage = run.gage
 
-    # Collect module names from calibration formulations
-    my_module_names_set = list(calibration_formulations.values_list('module__name', flat=True))
+    # Use cached modules to resolve names (avoid DB hit)
+    modules_by_id = get_cached_modules_by_id()
+
+    # Only fetch module_id from the DB
+    my_module_names_set = [
+        modules_by_id[f.module_id].name
+        for f in calibration_formulations.only("module_id")
+        if f.module_id in modules_by_id
+    ]
 
     # Fetch module metadata from Data Services or use test data
     if settings.ENTERPRISE_DATA_MODULE_METADATA_ENDPOINT[0]:
@@ -287,30 +288,54 @@ def get_module_metadata_from_data_services(run: CalibrationRun,
     fix_module_metadata(module_metadata)
 
     # Extract module names from the response for comparison
-    eds_module_names = set([module['module_name'] for module in module_metadata['modules']])
+    eds_module_names = {module['module_name'] for module in module_metadata['modules']}
     my_module_names_set = set(my_module_names_set)
 
     # Determine discrepancies between requested and returned modules
     missing_names = my_module_names_set - eds_module_names
     extra_names = eds_module_names - my_module_names_set
 
-    # Save module parameters and output variables to the database
+    eds_errors = []
+
+    # Preload formulations into a dict (avoid per-loop .get())
+    formulation_map = {
+        f.module_id: f for f in calibration_formulations
+    }
+
+    new_params: list[CalibrationParameter] = []
+    to_update: list[CalibrationParameter] = []
+
+    # Save module parameters to the database
     with transaction.atomic():
         for module in module_metadata.get('modules'):
             module_name = module['module_name']
+            # See if we have optional field
+            error = module.get('error')
+            if error:
+                eds_errors.append({
+                    'name': 'parameters',
+                    'message': error,
+                    'status_code': None
+                })
+                continue
 
             if module_name in extra_names:
                 # Ignore any extra names that Data Services sent us
                 logger.warning(f'Ignoring extra module from Data Services - {module_name}')
                 continue
 
-            # Fetch the corresponding module instance
+            # Resolve module via cache
             module_instance = get_cached_module_by_name(module_name)
-            calibration_formulation = calibration_formulations.get(module=module_instance)
+            calibration_formulation = formulation_map.get(module_instance.id if module_instance else None)
+            if not calibration_formulation:
+                raise DataServicesException(f"No formulation found for module {module_name}")
 
-            # Copy the BMI configuration file to the appropriate directory
-            bmi_config = convert_s3_uri_to_fs(module['parameter_file']['uri'])
-            copy_directory(bmi_config, get_bmi_config_dir_for_module(run, module_name))
+            # New (cloud-agnostic, no FUSE mount needed):
+            src_prefix = module['parameter_file']['uri']  # e.g. "s3://bucket/path/to/dir/"
+            dst_dir = get_bmi_config_dir_for_module(run, module_name)  # local directory path
+
+            # copy the BMI parameters
+            _ = copy_tree(src_prefix, dst_dir)
 
             # Save or update parameters for the module
             parameters = module.get('calibrate_parameters', [])
@@ -325,34 +350,43 @@ def get_module_metadata_from_data_services(run: CalibrationRun,
                     min_value = safe_float(param.get('min'), "Minimum value", param.get('name'), module_name)
                     max_value = safe_float(param.get('max'), "Maximum value", param.get('name'), module_name)
 
-                    # Using get_or_create because we don't want to override any values the user has already entered
-                    calibration_parameter, created = CalibrationParameter.objects.get_or_create(
+                    new_param = CalibrationParameter(
                         name=param['name'],
                         calibration_formulation=calibration_formulation,
-                        defaults={
-                            'data_type': param['data_type'],
-                            'description': param['description'],
-                            'initial_value': initial_value,
-                            'minimum': min_value,
-                            'maximum': max_value,
-                            'units': param['units']
-                        }
+                        data_type=param['data_type'],
+                        description=param['description'],
+                        initial_value=initial_value,
+                        minimum=min_value,
+                        maximum=max_value,
+                        units=param['units']
                     )
+                    new_params.append(new_param)
 
-                    # Update initial value if the gage changed and the parameter already exists
-                    if gage_changed and not created:
-                        logger.info(
-                            f"Updating initial value for parameter {param['name']} for module {module_name} to {initial_value}"
-                        )
-                        # We want to overwrite the initial_value from Data Services
-                        calibration_parameter.initial_value = initial_value
-                        calibration_parameter.save(update_fields=['initial_value'])
+        # Bulk insert (ignore_conflicts ensures no crash if they already exist)
+        if new_params:
+            CalibrationParameter.objects.bulk_create(new_params, ignore_conflicts=True)
+
+        # If gage_changed, bulk update initial_value for existing params
+        if gage_changed and new_params:
+            existing_params = CalibrationParameter.objects.filter(
+                calibration_formulation__in=formulation_map.values(),
+                name__in=[p.name for p in new_params]
+            )
+            existing_lookup = {(p.calibration_formulation_id, p.name): p for p in existing_params}
+            for param in new_params:
+                key = (param.calibration_formulation.id, param.name)
+                if key in existing_lookup:
+                    existing_lookup[key].initial_value = param.initial_value
+                    to_update.append(existing_lookup[key])
+
+            if to_update:
+                CalibrationParameter.objects.bulk_update(to_update, ['initial_value'])
 
     # Raise an exception if any requested modules are missing in the response
     if missing_names:
         raise DataServicesException(f'Response from Data Services is missing entries for: {missing_names}')
 
-    return
+    return eds_errors
 
 
 translation_map = {
@@ -406,7 +440,7 @@ def fix_module_metadata(metadata):
                      {
                          "modules": [
                              {
-                                 "name": "module_name",
+                                 "module_name": "module_name",
                                  "calibrate_parameters": [
                                      {"name": "full_param_name", "value": 123}
                                  ]

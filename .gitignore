@@ -15,6 +15,7 @@ Thumbs_db
 # Log and databases
 *.log
 *.sqllite
+logs/
 
 # Pyenv file
 .python-version
@@ -27,5 +28,18 @@ ngencerf_services.override.env
 postgres_db.override.env
 
 .load_static
+.load_gages
+.gages_fingerprint
 *git_info.json
 /git_info
+
+*.egg-info
+cli/build
+cli/dist
+ngencerf.spec
+
+logrotate.status
+logrotate-ngencerf.dev.conf
+
+data_source_mapping.xml
+dataSources.xml

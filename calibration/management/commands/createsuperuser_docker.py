@@ -16,6 +16,8 @@ class Command(createsuperuser.Command):
         )
 
     def handle(self, *args, **options):
+        # TODO Delete me
+        print("This command is deprecated and can be deleted")
         password = options.get("password")
         email = options.get("email")
 

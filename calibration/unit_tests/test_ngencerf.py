@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.management import call_command
 from django.db.models import Value, CharField
@@ -9,12 +10,12 @@ from django.forms import CharField
 from django.test import TestCase
 from rest_framework.test import APIClient, force_authenticate, APIRequestFactory
 
+import calibration.views.calibration_landing_views
 from calibration.enums import StatusEnum
 from calibration.models.plot_definitions import PlotDefinition
 from calibration.models.status import Status
-from calibration.views import calibration_import_export_views, calibration_plot_views
+from calibration.views import calibration_plot_views
 from calibration.views.common import get_calibration_run
-from django.conf import settings
 
 
 class CerfUnitTest(TestCase):
@@ -46,7 +47,7 @@ class CerfUnitTest(TestCase):
         data = json.load(f)
         request = factory.post('/calibration/import/', data, format='json')
         force_authenticate(request, user=user)
-        response = calibration_import_export_views.import_job(request)
+        response = calibration.views.calibration_landing_views.import_job(request)
         response.render()
         res = json.loads(response.content)
         self.run_id = res["calibration_run_id"]

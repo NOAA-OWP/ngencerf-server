@@ -6,13 +6,19 @@ from calibration.models.base_run import BaseRun
 class ValidationRun(BaseRun):
     calibration_run = models.ForeignKey('CalibrationRun', null=False, related_name="validations", on_delete=models.CASCADE, db_index=True)
     iteration = models.ForeignKey('Iteration', null=True, on_delete=models.CASCADE)
-    ngen_commit_hash = models.CharField(max_length=50, null=True)
-    ngen_cal_commit_hash = models.CharField(max_length=50, null=True)
     validation_type = models.CharField(max_length=20, null=False)
     validation_worker_name = models.CharField(max_length=20, null=True)
 
     class Meta:
         db_table = 'validation_run'
+        indexes = [
+            models.Index(fields=['calibration_run', 'validation_type'], name='idx_validationrun_run_type'),
+            models.Index(fields=['calibration_run'], name='idx_validation_calibration_run'),
+            models.Index(fields=['status'], name='idx_validation_status'),
+            models.Index(fields=['calibration_run', 'validation_type', '-id'], name='idx_val_run_type_id_desc'),
+            models.Index(fields=['calibration_run', 'validation_type', 'status'], name='idx_val_run_type_status')
+
+        ]
 
     @property
     def worker_name(self):

@@ -4,18 +4,18 @@ import os
 import subprocess
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
+from datetime import datetime, timezone
 from typing import Callable
 
 from django.conf import settings
 
 from calibration.enums import StatusEnum, ValidationType
 from calibration.enums_vanilla import ScriptEnum
-from calibration.models import CalibrationRun, ValidationRun, ForecastRun
+from calibration.models import CalibrationRun, ValidationRun, ForecastRun, ColdStartRun, VerificationRun
 from calibration.models.base_run import BaseRun
-from calibration.models.forecast_forcing_download_run import ForecastForcingDownloadRun
-from calibration.run_util.run_common import set_job_status, job_registry, get_job_registry_key, run_generic_job_callback, \
-    finalize_calibration_after_callback, \
-    finalize_validation_after_callback, finalize_forecast_after_callback, finalize_forecast_forcing_download_after_callback
+from calibration.run_util.run_common import set_job_status, job_registry, get_job_registry_key, run_generic_job_end_callback, \
+    finalize_calibration_after_callback, finalize_validation_after_callback, finalize_forecast_after_callback, finalize_cold_start_after_callback, \
+    finalize_verification_after_callback
 from calibration.views.common import get_job_description
 from cerfServer.settings import NGEN_CAL_VENV, NGEN_ENVIRONMENT, NgenEnvironmentEnum
 
@@ -50,22 +50,29 @@ def run_job_local(run: BaseRun, cmd_line_args: dict[str, str], stdout_file: str,
             ScriptEnum.VALIDATION_ITERATION if run.validation_type == ValidationType.VALID_ITERATION.value else ScriptEnum.VALIDATION
         )
         callback_function = run_validation_job_callback_local
-    elif isinstance(run, ForecastForcingDownloadRun):
-        script_cmd = ScriptEnum.FORECAST_FORCING
-        callback_function = run_forecast_forcing_download_job_callback_local
-        venv = settings.FORCING_ENGINE_ENV
+    elif isinstance(run, ColdStartRun):
+        script_cmd = ScriptEnum.COLD_START
+        callback_function = run_cold_start_job_callback_local
     elif isinstance(run, ForecastRun):
         script_cmd = ScriptEnum.FORECAST
         callback_function = run_forecast_job_callback_local
+    elif isinstance(run, VerificationRun):
+        script_cmd = ScriptEnum.VERIFICATION
+        callback_function = run_verification_job_callback_local
     else:
         raise ValueError(f"Unsupported run type: {type(run).__name__} (run id: {getattr(run, 'id', 'N/A')})")
+
+    # Remove nprocs
+    cmd_line_args.pop('nprocs', None)
 
     # Construct the shell script path based on the execution environment
     if NGEN_ENVIRONMENT == NgenEnvironmentEnum.LOCAL:
         spawn_command = [settings.RUNTIME_INFO.get(script_cmd)[1]]
         extra = [stdout_file, venv]
     elif NGEN_ENVIRONMENT == NgenEnvironmentEnum.DOCKER:
-        spawn_command = settings.RUNTIME_INFO.get(script_cmd)[0].split()
+        container_name = get_job_registry_key(run)
+        # Format the docker run command with the container name
+        spawn_command = settings.RUNTIME_INFO.get(script_cmd)[0].format(name=container_name).split()
         extra = [stdout_file]  # Venv not required for Docker
     else:
         spawn_command = []
@@ -96,22 +103,43 @@ def check_local_for_failure(run: BaseRun, future: Future) -> bool:
     try:
         if future.exception() is not None:
             logger.error(f"Exception occurred in {get_job_description(run)}: {future.exception() or 'Unknown error'}")
-            set_job_status(run, StatusEnum.FAILED)
+            # Only mark FAILED if not already CANCELLED
+            if run.status != StatusEnum.CANCELLED.db_instance:
+                set_job_status(run, StatusEnum.FAILED)
+            else:
+                logger.info(f"{get_job_description(run)} already CANCELLED; preserving status despite exception")
             return True
 
         exit_code = future.result()
-        if exit_code == -15 or exit_code == -9:
-            logger.info(f"{get_job_description(run)} was cancelled")
-            set_job_status(run, StatusEnum.CANCELLED)
+
+        # Treat common cancel exit codes as cancellation:
+        # -15 SIGTERM, -9 SIGKILL, 143 = 128+15, 137 = 128+9
+        cancelled_codes = (-15, -9, 143, 137)
+        if exit_code in cancelled_codes:
+            if run.status == StatusEnum.CANCELLED.db_instance:
+                logger.info(f"{get_job_description(run)} was already marked CANCELLED (exit {exit_code})")
+            else:
+                logger.info(f"{get_job_description(run)} was cancelled (exit {exit_code})")
+                set_job_status(run, StatusEnum.CANCELLED)
             return True
-        elif exit_code != 0:
-            logger.error(f"{get_job_description(run)} ending due to abnormal return code {exit_code}")
-            set_job_status(run, StatusEnum.FAILED)
+
+        if exit_code != 0:
+            # Only downgrade to FAILED if not already CANCELLED
+            if run.status != StatusEnum.CANCELLED.db_instance:
+                logger.error(f"{get_job_description(run)} ending due to abnormal return code {exit_code}")
+                set_job_status(run, StatusEnum.FAILED)
+            else:
+                logger.info(f"{get_job_description(run)} ended with nonzero code {exit_code}, but preserving CANCELLED status")
             return True
+
         return False
+
     except Exception as e:
         logger.exception(f"Error in callback for {get_job_description(run)}: {str(e)}")
-        set_job_status(run, StatusEnum.FAILED)
+        if run.status != StatusEnum.CANCELLED.db_instance:
+            set_job_status(run, StatusEnum.FAILED)
+        else:
+            logger.info(f"{get_job_description(run)} already CANCELLED; preserving status despite callback error")
         return True
 
 
@@ -124,28 +152,36 @@ def check_local_for_failure(run: BaseRun, future: Future) -> bool:
 # - Uses `check_local_status` to validate the job's exit code.
 # - Executes `finalize_calibration` to read job output, mark the job as DONE, and possibly create validation runs.
 run_calibration_job_callback_local = functools.partial(
-    run_generic_job_callback, check_if_failed=check_local_for_failure, finalize_func=finalize_calibration_after_callback
+    run_generic_job_end_callback, check_if_failed=check_local_for_failure, finalize_func=finalize_calibration_after_callback
 )
 
 # Handles the completion of a validation job in the local environment.
 # - Uses `check_local_status` to validate the job's exit code.
 # - Executes `finalize_validation` to process validation results and potentially mark the best validation run.
 run_validation_job_callback_local = functools.partial(
-    run_generic_job_callback, check_if_failed=check_local_for_failure, finalize_func=finalize_validation_after_callback
+    run_generic_job_end_callback, check_if_failed=check_local_for_failure, finalize_func=finalize_validation_after_callback
+)
+
+# Handles the completion of a cold start job in the local environment.
+# - Uses `check_local_status` to validate the job's exit code.
+# - Executes `finalize_cold_start` to finalize the cold start job and mark it as DONE.
+run_cold_start_job_callback_local = functools.partial(
+    run_generic_job_end_callback, check_if_failed=check_local_for_failure, finalize_func=finalize_cold_start_after_callback
 )
 
 # Handles the completion of a forecast job in the local environment.
 # - Uses `check_local_status` to validate the job's exit code.
 # - Executes `finalize_forecast` to finalize the forecast job and mark it as DONE.
 run_forecast_job_callback_local = functools.partial(
-    run_generic_job_callback, check_if_failed=check_local_for_failure, finalize_func=finalize_forecast_after_callback
+    run_generic_job_end_callback, check_if_failed=check_local_for_failure, finalize_func=finalize_forecast_after_callback
 )
 
-# Handles the completion of a forecast job in the local environment.
+
+# Handles the completion of a verification job in the local environment.
 # - Uses `check_local_status` to validate the job's exit code.
-# - Executes `finalize_forecast` to finalize the forecast job and mark it as DONE.
-run_forecast_forcing_download_job_callback_local = functools.partial(
-    run_generic_job_callback, check_if_failed=check_local_for_failure, finalize_func=finalize_forecast_forcing_download_after_callback
+# - Executes `finalize_verification` to finalize the verification job and mark it as DONE.
+run_verification_job_callback_local = functools.partial(
+    run_generic_job_end_callback, check_if_failed=check_local_for_failure, finalize_func=finalize_verification_after_callback
 )
 
 
@@ -178,6 +214,10 @@ def spawn_job(run: BaseRun, args: list[str], callback_function: Callable[[Future
     logger.info(f"Spawning process: {job_description} with {args}")
 
     try:
+        run.status = StatusEnum.RUNNING.db_instance
+        run.run_start = datetime.now(timezone.utc)
+        run.save(update_fields=["status", "run_start"])
+
         # Prepare the environment for the subprocess needed for Forecast forcing downloading
         env = os.environ.copy()
         env["WGRIB2"] = os.path.expanduser("~/miniconda3/envs/NextGen_Forcings_Engine/bin/wgrib2")
@@ -201,32 +241,40 @@ def spawn_job(run: BaseRun, args: list[str], callback_function: Callable[[Future
 
 def cancel_local_job(run: BaseRun) -> bool:
     """
-    Terminate a running local job and remove it from the job registry.
+    Terminate a running job (LOCAL or DOCKER) and remove it from the job registry.
 
     This function attempts to gracefully terminate the process associated with the
     given `run` object. If successful, it removes the job from the global job registry.
 
+    - LOCAL: kills the spawned process directly.
+    - DOCKER: sends `docker kill <container_name>`. Containers use `--rm`, so they're auto-removed after exit.
+
     :param run: The CalibrationRun, ValidationRun, or ForecastRun object to cancel.
     :return: True if the job was successfully terminated, False otherwise.
-
-    # TODO There is a known issue that cancelling a job doesn't actually work if the ngen/ngen-cal is running in a Docker container.
-    # Probably need to do a Docker kill, But that means we need to give each run a unique Docker name.
     """
     job_description = get_job_description(run)
-
     logger.info(f"Cancelling {job_description}")
 
-    if isinstance(run, ForecastRun):
-        # #TODO Special handling.  If we are downloading the forcing data, then we need to send a cancel request to the Forcing server
-        pass
+    key = get_job_registry_key(run)
 
-    process = job_registry.get(get_job_registry_key(run))
-
-    if process:
-        process.terminate()  # Gracefully terminates the process
-
-        logger.info(f"{job_description} has been terminated.")
-        return True
+    if NGEN_ENVIRONMENT == NgenEnvironmentEnum.DOCKER:
+        container_name = key
+        logger.info(f"Killing Docker container {container_name}")
+        result = subprocess.run(["docker", "kill", container_name], check=False, capture_output=True, text=True)
+        if result.returncode == 0:
+            logger.info(f"Container {container_name} killed successfully")
+            job_registry.pop(key, None)
+            return True
+        else:
+            logger.warning(f"Failed to kill container {container_name}: {result.stderr.strip()}")
+            return False
     else:
-        logger.warning(f"No running job found for {job_description}")
-        return False
+        process = job_registry.get(key)
+        if process:
+            process.terminate()
+            logger.info(f"{job_description} has been terminated.")
+            job_registry.pop(key, None)
+            return True
+        else:
+            logger.warning(f"No running job found for {job_description}")
+            return False

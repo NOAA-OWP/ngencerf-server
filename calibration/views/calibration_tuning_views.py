@@ -5,27 +5,30 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import MAXYEAR, MINYEAR, datetime, timezone
-from typing import Literal, cast
+from typing import Literal
+from urllib.parse import urlparse
 
 import pandas as pd
 from datetimerange import DateTimeRange
 from django.db import transaction
-from django.db.models import QuerySet
+from django.db.models import QuerySet, Prefetch
 from drf_spectacular.utils import OpenApiParameter, extend_schema, OpenApiResponse
 from rest_framework.decorators import api_view
 from rest_framework.request import Request
 from rest_framework.response import Response
 
-from calibration.enums import ObservationalSourceEnum, ForcingSourceEnum, StatusEnum
+from calibration.enums import StatusEnum
 from calibration.enums_vanilla import JobType
-from calibration.models import CalibrationFormulation, CalibrationParameter, CalibrationRun, CustomUser
-from calibration.util.caching import get_cached_module_by_name
+from calibration.models import CalibrationFormulation, CalibrationParameter, CalibrationRun
+from calibration.util import cloud_util
+from calibration.util.caching import get_cached_module_by_name, have_LSTM, get_cached_modules_by_id
 from calibration.util.calibration_validators import CalibrationRunSerializer, SaveTuningRequestSerializer, LoadTuningResponseSerializer, \
     GenericResponseSerializer, ErrorResponseSerializer, UploadUserParameterFile, UserParameterFileUploadResponse
 from calibration.util.ngen_locations import get_observational_file_for_job, get_forcing_dir_for_job
 from calibration.views import ngen_cal_input
+from calibration.views.called_from import get_caller_name
 from calibration.views.common import get_calibration_run, ResponseError, handle_exceptions, validate_response, CerfException, validate_request, \
-    get_valid_path, format_datetime
+    get_valid_path, format_datetime, get_user_email, get_elapsed_str, readonly_transaction
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +52,7 @@ MAX_TIME = datetime(MINYEAR, 1, 1, 0, 0, 0).replace(tzinfo=timezone.utc)
     parameters=[
         OpenApiParameter(name='calibration_run_id', description='ID of the calibration run', required=True, type=int)
     ],
-    description="Load tuning tab data"
+    description="Load tuning tab data for a calibration run"
 )
 @api_view(['GET', 'POST'])
 @handle_exceptions
@@ -57,124 +60,207 @@ def load_tuning_tab(request: Request) -> Response:
     """
     API endpoint to load tuning tab data for a calibration run.
 
+    Splits read-heavy operations into a read-only transaction,
+    then persists time_range if it was newly computed. Calls
+    ready_to_run() outside the read-only block so that updates
+    to run.status are persisted and reflected in the response.
+
     :param request: Django HTTP request, containing parameters in the body for POST or query params for GET.
     :return: Response containing the tuning tab data, including time ranges, modules, and formulations.
     """
     data = request.data if request.method == 'POST' else request.query_params.dict()
-    logger.debug(f'load_tuning_tab() request from {(cast(CustomUser, request.user)).email}  - {data}')
+    logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
 
     validator, error_return = validate_request(CalibrationRunSerializer, data)
     if error_return:
         return error_return
 
     calibration_run_id = validator.get('calibration_run_id')
-    run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=list(StatusEnum))
-    if error_return:
-        return error_return
 
-    # Retrieve the time ranges
-    time_range = get_time_range(run)
-    calibration_times, validation_times = get_times(run)
+    # Phase 1: Read-only section (heavy reads)
+    with readonly_transaction():
+        run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=list(StatusEnum))
+        if error_return:
+            return error_return
 
-    formulations = CalibrationFormulation.objects.filter(calibration_run=run).prefetch_related(
-        'calibrationparameter_set'
-    )
+        # Compute time range without persisting
+        time_range = compute_time_range(run)
+        calibration_times, validation_times = get_times(run)
 
-    # For each module, get the Parameters and Output Variables
-    module_list = get_parameters(formulations)
+        formulations = (
+            CalibrationFormulation.objects
+            .filter(calibration_run=run)
+            .select_related('module')
+            .prefetch_related(
+                Prefetch(
+                    'calibrationparameter_set',
+                    queryset=CalibrationParameter.objects.only(
+                        'calibration_formulation_id',
+                        'name', 'minimum', 'maximum', 'initial_value',
+                        'units', 'data_type', 'description', 'user_selected_for_tuning'
+                    ),
+                    to_attr='prefetched_params',
+                )
+            )
+        )
 
+        # For each module, get the Parameters and Output Variables
+        module_list = get_parameters(formulations)
+
+    # Phase 2: Write section (ready_to_run + optional persist_time_range)
     ngen_cal_input.ready_to_run(run)
 
-    response = {'calibration_run_id': run.id, 'status': run.status.name,
-                'modules': module_list,
-                'time_range': time_range,
-                'calibration_times': calibration_times,
-                'validation_times': validation_times
-                }
+    if time_range and (not run.time_range_start or not run.time_range_end):
+        with transaction.atomic():
+            persist_time_range(run, time_range)
+
+    # Phase 3: Build response with updated run.status
+    response = {
+        'calibration_run_id': run.id,
+        'status': run.status.name,  # reflects updated status
+        'modules': module_list,
+        'time_range': time_range,
+        'calibration_times': calibration_times,
+        'validation_times': validation_times
+    }
 
     response_validator, error_response = validate_response(LoadTuningResponseSerializer, response)
     if error_response:
         return error_response
-    logger.debug(f'Returning to {(cast(CustomUser, request.user)).email}  from load_tuning_tab() - {json.dumps(response_validator.data)}')
+
+    logger.debug(
+        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - '
+        f'{json.dumps(response_validator.data)}'
+    )
 
     return Response(response_validator.data)
 
 
-def has_user_selected_tuning_parameters(modules: QuerySet[CalibrationFormulation]) -> bool:
+def has_user_selected_tuning_parameters(formulation_ids: list[int]) -> bool:
     """
-    Determines if any calibration parameters were selected by the user for tuning.
+    Check whether any user-selected tuning parameters exist for the given module IDs.
+    Avoids resolving Module objects via the DB.
 
-    :param modules: QuerySet of CalibrationFormulation objects associated with the calibration run.
-    :return: True if any parameters were selected for tuning, otherwise False.
+    :param formulation_ids: List of module IDs from CalibrationFormulation.
+    :return: True if at least one user-selected parameter exists, else False.
     """
-    return modules.filter(calibrationparameter__user_selected_for_tuning=True).exists()
+
+    return CalibrationParameter.objects.filter(
+        calibration_formulation__module_id__in=formulation_ids,
+        user_selected_for_tuning=True
+    ).exists()
 
 
 def get_parameters(modules: QuerySet[CalibrationFormulation]) -> list[dict[str, str | list[dict[str, str | float | int]]]]:
     """
-    Retrieves the calibration parameters and output variables for each module in the specified calibration formulation.
+    Retrieves the calibration parameters for each module in the specified calibration formulation.
 
-    :param modules: QuerySet of CalibrationFormulation objects.
-    :return: List of dictionaries, each containing module name, parameters, and output variables.
+    Uses `select_related('module')` and prefetched CalibrationParameter objects to avoid DB hits.
+
+    :param modules: QuerySet of CalibrationFormulation objects, built with
+                    select_related('module') and Prefetch for calibrationparameter_set.
+    :return: List of dicts with the module name and its parameters.
     """
-    module_list = []
+    module_list: list[dict] = []
 
-    for formulation in modules.prefetch_related('calibrationparameter_set'):
-        module = get_cached_module_by_name(formulation.module.name)
+    # 'modules' must be built with select_related('module') and the Prefetch above.
+    for formulation in modules:
+        module = formulation.module  # Already populated by select_related
 
-        if module:
-            # Gather calibration parameters and for each module
-            calibration_parameters = formulation.calibrationparameter_set.values(
-                'name', 'minimum', 'maximum', 'initial_value', 'units', 'data_type', 'description', 'user_selected_for_tuning'
-            )
-            module_entry = {
-                'name': formulation.module.name,
-                'parameters': list(calibration_parameters),
+        # Use the prefetched list (no DB hits here)
+        params = [
+            {
+                'name': p.name,
+                'minimum': p.minimum,
+                'maximum': p.maximum,
+                'initial_value': p.initial_value,
+                'units': p.units,
+                'data_type': p.data_type,
+                'description': p.description,
+                'user_selected_for_tuning': p.user_selected_for_tuning,
             }
-            module_list.append(module_entry)
+            for p in getattr(formulation, 'prefetched_params', [])
+        ]
+
+        module_list.append({
+            'name': module.name,
+            'parameters': params,
+        })
+
     return module_list
 
 
-def get_parameters_for_export(modules: QuerySet[CalibrationFormulation]) -> list[dict[str, str | float]]:
+def get_parameters_for_export(run: CalibrationRun) -> list[dict]:
     """
-    Prepares calibration parameters for export by collecting only user-selected parameters.
+    Export calibration parameters for all modules in the given calibration run that have been selected by the user
+    Uses cached modules to resolve names instead of hitting DB for Module.
 
-    :param modules: QuerySet of CalibrationFormulation instances associated with a calibration run.
-    :return: List of dictionaries containing selected parameter details, including module name.
+    :param run: The CalibrationRun to export parameters from.
+    :return: List of parameter dicts for export.
     """
-    parameter_list = []
-    for m in modules:
-        calibration_parameters = list(CalibrationParameter.objects
-                                      .filter(calibration_formulation=m, user_selected_for_tuning=True)
-                                      .values('name', 'minimum', 'maximum', 'initial_value'))
+    modules_by_id = get_cached_modules_by_id()
 
-        for p in calibration_parameters:
-            p['module'] = m.module.name
-            parameter_list.append(p)
+    # Query parameters linked to formulations by module_id
+    params = (
+        CalibrationParameter.objects
+        .filter(calibration_formulation__calibration_run=run, user_selected_for_tuning=True)
+        .values(
+            "name", "initial_value", "minimum", "maximum",
+            "calibration_formulation__module_id"
+        )
+    )
+    print('params', params)
 
-    return parameter_list
+    result = []
+    for p in params:
+        module_id = p["calibration_formulation__module_id"]
+        module_name = modules_by_id[module_id].name
+        result.append({
+            "name": p["name"],
+            "initial_value": p["initial_value"],
+            "minimum": p["minimum"],
+            "maximum": p["maximum"],
+            "module": module_name,
+        })
+    print('result', result)
+    return result
 
 
-def get_time_range(run: CalibrationRun) -> dict[str, datetime | None]:
+def compute_time_range(run: CalibrationRun) -> dict[str, datetime]:
     """
-    Determines the date range intersection between observational and forcing data and updates the run if necessary.
+    Compute the intersection of observational and forcing data ranges for the given run,
+    without persisting anything to the database.
+
+    Behavior:
+      - If the run already has a persisted time range (both start and end), that exact range is returned.
+      - If observational or forcing data is missing, returns None.
+      - If both sources are available, computes the intersection and returns a dictionary with:
+          * 'start_time': datetime (UTC, timezone-aware),
+          * 'end_time': datetime (UTC, timezone-aware).
+      - If there is no valid overlap between observational and forcing ranges, returns None.
 
     :param run: CalibrationRun instance.
-    :return: Dictionary containing the start and end times of the intersection.
+    :return: A dictionary containing 'start_time' and 'end_time' if available,
+             otherwise None.
     """
     if run.time_range_start and run.time_range_end:
         logger.info("Time range is already set")
         return {'start_time': run.time_range_start, 'end_time': run.time_range_end}
 
-    observation_path = get_valid_path(run.observational_source,
-                                      run.observational_eds_file_path,
-                                      ObservationalSourceEnum.UPLOAD,
-                                      lambda: get_observational_file_for_job(run))
+    observation_path = get_valid_path(
+        run.observational_eds_file_path,
+        lambda: get_observational_file_for_job(run)
+    )
+    forcing_path = get_valid_path(
+        run.forcing_eds_dir_path,
+        lambda: get_forcing_dir_for_job(run)
+    )
 
-    forcing_path = get_valid_path(run.forcing_source,
-                                  run.forcing_eds_dir_path,
-                                  ForcingSourceEnum.UPLOAD,
-                                  lambda: get_forcing_dir_for_job(run))
+    # Explicitly log the resolved paths
+    logger.info(
+        f"get_time_range: observation_path={observation_path}, "
+        f"forcing_path={forcing_path}"
+    )
 
     if not observation_path or not forcing_path:
         return {}
@@ -185,11 +271,22 @@ def get_time_range(run: CalibrationRun) -> dict[str, datetime | None]:
     logger.info(f"Date range intersection completed in {time.time() - daterange_intersection_start:.2f}s")
 
     if daterange:
-        run.time_range_start = daterange.start_datetime
-        run.time_range_end = daterange.end_datetime
-        run.save(update_fields=['time_range_start', 'time_range_end'])
+        return {'start_time': daterange.start_datetime, 'end_time': daterange.end_datetime}
 
-    return {'start_time': run.time_range_start, 'end_time': run.time_range_end}
+    return {}
+
+
+def persist_time_range(run: CalibrationRun, time_range: dict[str, datetime]) -> None:
+    """
+    Persist the computed time range to the database if values are provided.
+
+    :param run: CalibrationRun instance to update.
+    :param time_range: Dictionary containing both 'start_time' and 'end_time'.
+                       Assumes these keys are present and valid datetimes.
+    """
+    run.time_range_start = time_range['start_time']
+    run.time_range_end = time_range['end_time']
+    run.save(update_fields=['time_range_start', 'time_range_end'])
 
 
 def get_times(run: CalibrationRun) -> tuple[dict[str, datetime], dict[str, datetime]]:
@@ -246,7 +343,7 @@ def save_tuning_tab(request: Request) -> Response:
     Saves tuning settings for a calibration run, including parameters, output variables, and time periods.
     """
     data = request.data
-    logger.debug(f'save_tuning_tab() request from {(cast(CustomUser, request.user)).email}  - {data}')
+    logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
 
     validator, error_return = validate_request(SaveTuningRequestSerializer, data)
     if error_return:
@@ -262,6 +359,9 @@ def save_tuning_tab(request: Request) -> Response:
     if error_return:
         return error_return
 
+    if have_LSTM(run) and parameters:
+        return ResponseError('You cannot specify parameters when using LSTM')
+
     run.automatic_validation = automatic_validation
 
     error_message = validate_and_save_times(run, calibration_times, validation_times)
@@ -271,13 +371,15 @@ def save_tuning_tab(request: Request) -> Response:
     if parameters and not run.gage:
         return ResponseError('Parameters cannot be specified without a gage')
 
-    error_message = validate_parameters(run, parameters)
-    if error_message:
-        return ResponseError(error_message)
+    # The UI already does the parameter validation, so we don't have to bother sending the warnings
+    parameter_errors, _ = validate_parameters(run, parameters)
+    if parameter_errors:
+        return ResponseError(parameter_errors)
 
     with transaction.atomic():
-        run.save()
         save_parameters(run, parameters)
+
+    run.save()
 
     ngen_cal_input.ready_to_run(run)
 
@@ -286,7 +388,8 @@ def save_tuning_tab(request: Request) -> Response:
     response_validator, error_response = validate_response(GenericResponseSerializer, response)
     if error_response:
         return error_response
-    logger.debug(f'Returning to {(cast(CustomUser, request.user)).email}  from save_tuning_tab() - {json.dumps(response_validator.data)}')
+    logger.debug(
+        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
     return Response(response_validator.data)
 
 
@@ -313,7 +416,7 @@ def upload_user_parameters(request: Request) -> Response:
     and content, and then attaching it to the specified calibration run.
     """
     data = request.data
-    logger.debug(f'upload_user_parameter_file() request from {(cast(CustomUser, request.user)).email}  - {data}')
+    logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
 
     validator, error_return = validate_request(UploadUserParameterFile, data, context={'request': request})
     if error_return:
@@ -326,10 +429,21 @@ def upload_user_parameters(request: Request) -> Response:
         return error_return
 
     files = request.FILES.getlist('user_parameter_file')
+    if not files:
+        return ResponseError('No file uploaded under field "user_parameter_file".')
+    if len(files) > 1:
+        logger.warning(f'{get_caller_name()}() multiple files uploaded; using the first one')
 
     # Process the first file in the list
     parameter_file = files[0]
-    file_contents = parameter_file.read().decode('utf-8')
+    try:
+        file_contents = parameter_file.read().decode('utf-8')
+    except Exception as exc:
+        logger.exception('Failed to read/decode uploaded file as UTF-8')
+        return ResponseError(f'Failed to read file as UTF-8: {exc}')
+
+    if not file_contents.strip():
+        return ResponseError('Uploaded file is empty.')
 
     # Detect delimiter type by checking the first few rows
     first_line = file_contents.splitlines()[0]
@@ -344,11 +458,46 @@ def upload_user_parameters(request: Request) -> Response:
         delimiter = r'\s+'
         logger.debug("Detected space delimiter.")
 
+    # Expected columns
+    required_columns = ['param', 'min', 'max', 'init', 'model']
+    expected_cols = len(required_columns)
+
+    # Pre-validate consistent column counts when we have a simple delimiter
+    # (csv.reader can't handle regex separators, so we skip this for r'\s+')
+    if delimiter in (',', '\t'):
+        import csv
+        lines = file_contents.splitlines()
+        # Header check (strict match on header names after trim)
+        header_cols = [c.strip() for c in next(csv.reader([lines[0]], delimiter=delimiter))]
+        if header_cols != required_columns:
+            return ResponseError(
+                f'Header mismatch. Expected: {required_columns}, Found: {header_cols}'
+            )
+        # Validate each data line has exactly the expected number of columns
+        for i, row in enumerate(lines[1:], start=2):  # human line numbers
+            cols = next(csv.reader([row], delimiter=delimiter))
+            if len(cols) != expected_cols:
+                return ResponseError(
+                    f'Row {i} has {len(cols)} fields; expected {expected_cols}. Offending row: {row}'
+                )
+
+    # Parse with pandas; enforce dtypes so we fail fast on bad numerics
     try:
         # Handle file parsing based on detected delimiter
-        df = pd.read_csv(io.StringIO(file_contents), sep=delimiter, engine='python', skipinitialspace=True)
-    except pd.errors.ParserError:
-        return Response({'error': 'The uploaded file could not be parsed with the detected delimiter.'}, status=400)
+        df = pd.read_csv(
+            io.StringIO(file_contents),
+            sep=delimiter,
+            engine='python',
+            skipinitialspace=True,
+            dtype={'param': str, 'min': float, 'max': float, 'init': float, 'model': str},
+        )
+    except pd.errors.ParserError as exc:
+        logger.debug(f'Pandas parser error: {exc}')
+        return Response({'error': f'Could not parse file with detected delimiter: {exc}'}, status=400)
+    except ValueError as exc:
+        # Typically raised when dtype conversion fails with informative message
+        logger.debug(f'Pandas dtype error: {exc}')
+        return Response({'error': f'Invalid data types in file: {exc}'}, status=400)
 
     # Strip any leading/trailing whitespace in the column headers
     df.columns = df.columns.str.strip()
@@ -357,32 +506,78 @@ def upload_user_parameters(request: Request) -> Response:
     logger.debug(f"Detected columns: {df.columns.tolist()}")
 
     # Ensure that the DataFrame contains the correct columns
-    required_columns = ['param', 'min', 'max', 'init', 'model']
     missing_cols = [col for col in required_columns if col not in df.columns]
-
     if missing_cols:
         # Log the actual DataFrame to inspect it
         logger.debug(f"DataFrame content:\n{df.head()}")
         return ResponseError(f'Missing required columns: {missing_cols}')
 
-    # Ensure numeric columns are properly converted to floats and validate values
-    invalid_values = {}
-    for col in ['min', 'max', 'init']:
-        df[col] = pd.to_numeric(df[col], errors='coerce')  # Coerce invalid values to NaN
-        invalid_rows = df[df[col].isna()]
-        if not invalid_rows.empty:
-            invalid_values[col] = invalid_rows.index.tolist()
+    # Ensure no unexpected columns (common when a row has too many fields and pandas shifts things)
+    unexpected = [c for c in df.columns if c not in required_columns]
+    if unexpected:
+        return ResponseError(f'Unexpected columns present: {unexpected}. Expected only {required_columns}.')
 
-    if invalid_values:
-        error_message = f"Invalid values found in columns: {invalid_values}"
-        logger.debug(error_message)
-        return Response({'error': error_message}, status=400)
+    # Ensure there is at least one data row
+    if df.empty:
+        return ResponseError('No data rows found. Provide at least one parameter row.')
+
+    # Validate numeric columns and report exact offending lines/values
+    invalid_details = {}
+    for col in ['min', 'max', 'init']:
+        # Re-coerce to catch NaN in case dtype enforcement was bypassed by space sep quirks
+        coerced = pd.to_numeric(df[col], errors='coerce')
+        bad_mask = coerced.isna()
+        if bad_mask.any():
+            bad_rows = df[bad_mask]
+            # +2 => header is line 1; df index 0 is line 2
+            invalid_details[col] = [
+                {'line': int(idx) + 2, 'param': str(row.get('param')), 'value': row.get(col)}
+                for idx, row in bad_rows.iterrows()
+            ]
+
+    if invalid_details:
+        logger.debug(f"Invalid numeric values: {invalid_details}")
+        return Response({'error': 'Invalid numeric values', 'details': invalid_details}, status=400)
+
+    # Range checks: min <= max and init within [min, max]
+    range_errors = {}
+
+    bad_minmax_mask = df['min'] > df['max']
+    if bad_minmax_mask.any():
+        rows = df[bad_minmax_mask]
+        range_errors['min_gt_max'] = [
+            {'line': int(idx) + 2, 'param': str(row['param']), 'min': row['min'], 'max': row['max']}
+            for idx, row in rows.iterrows()
+        ]
+
+    bad_init_low = df['init'] < df['min']
+    if bad_init_low.any():
+        rows = df[bad_init_low]
+        range_errors.setdefault('init_lt_min', [])
+        range_errors['init_lt_min'].extend(
+            {'line': int(idx) + 2, 'param': str(row['param']), 'init': row['init'], 'min': row['min']}
+            for idx, row in rows.iterrows()
+        )
+
+    bad_init_high = df['init'] > df['max']
+    if bad_init_high.any():
+        rows = df[bad_init_high]
+        range_errors.setdefault('init_gt_max', [])
+        range_errors['init_gt_max'].extend(
+            {'line': int(idx) + 2, 'param': str(row['param']), 'init': row['init'], 'max': row['max']}
+            for idx, row in rows.iterrows()
+        )
+
+    if range_errors:
+        logger.debug(f"Range validation errors: {range_errors}")
+        return Response({'error': 'Range validation failed', 'details': range_errors}, status=400)
 
     logger.debug(f"Parsed DataFrame after stripping and numeric conversion: \n{df}")
 
     # Convert DataFrame to a list of dictionaries
     parsed_data = df.to_dict(orient='records')
 
+    # Persist filename on the run
     run.user_parameter_filename = parameter_file.name
     run.save(update_fields=['user_parameter_filename'])
 
@@ -396,7 +591,8 @@ def upload_user_parameters(request: Request) -> Response:
     if error_response:
         return error_response
 
-    logger.debug(f'Returning to {(cast(CustomUser, request.user)).email}  from upload_user_parameter_file() - {json.dumps(response_validator.data)}')
+    logger.debug(
+        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
     return Response(response_validator.data)
 
 
@@ -653,40 +849,86 @@ def validate_time_range(
     return None, (start_time, end_time)
 
 
-def validate_parameters(run: CalibrationRun, parameters: list[dict[str, str | float]]) -> str | None:
+def validate_parameters(run: CalibrationRun, parameters: list[dict[str, str | float]]) -> tuple[list[str], list[str]]:
     """
     Validates each provided parameter against existing calibration parameters for a specific calibration run.
+    Returns a tuple: (errors, warnings)
+    - Errors: invalid parameter names or modules
+    - Warnings: initial values outside of [minimum, maximum]
+
+    :param run: The calibration run being validated.
+    :param parameters: A list of dictionaries containing parameter details.
+    :return: Tuple containing two lists — error messages and warning messages.
     """
     if not parameters:
-        return None
+        return [], []
 
-    # Fetch all CalibrationParameters for the given calibration run and related modules in one query
-    existing_parameters = CalibrationParameter.objects.filter(
-        calibration_formulation__calibration_run=run
-    ).select_related('calibration_formulation__module')
+    # Retrieve all parameters for this run with only the fields we need
+    existing_parameters = list(
+        CalibrationParameter.objects.filter(
+            calibration_formulation__calibration_run=run
+        ).values('name', 'calibration_formulation__module_id')
+    )
 
-    # Create a lookup dictionary for existing parameters by module name and parameter name
+    # Get cached modules keyed by ID
+    modules_by_id = get_cached_modules_by_id()
+
+    # Build lookup dict: (module_name, parameter_name) → CalibrationParameter (as dict)
     parameter_lookup = {
-        (param.calibration_formulation.module.name, param.name): param
-        for param in existing_parameters
+        (modules_by_id[p['calibration_formulation__module_id']].name, p['name']): p
+        for p in existing_parameters
     }
 
-    # Validate each parameter in the input
+    # Validate provided parameters
     invalid_parameters = []
     invalid_modules = []
+    value_out_of_bounds = []
+
+    # Validate each provided parameter
     for p in parameters:
-        key = (p['module'], p['name'])
+        module_name = p['module']
+        key = (module_name, p['name'])
         if key not in parameter_lookup:
-            # Determine if the module exists in the cache
-            (invalid_parameters if get_cached_module_by_name(p['module']) else invalid_modules).append(key)
+            # Check if module is valid
+            if get_cached_module_by_name(module_name):
+                invalid_parameters.append(key)
+            else:
+                invalid_modules.append(key)
+        else:
+            min_val = p.get('minimum')
+            max_val = p.get('maximum')
+            initial = p.get('initial_value')
 
-    # If any invalid parameters or modules are found, create an error message
-    if invalid_parameters or invalid_modules:
-        invalid_param_list = [f"Invalid parameter '{name}' for module '{module}'" for module, name in invalid_parameters]
-        invalid_module_list = [f"Invalid module '{module}' for parameter '{name}'" for module, name in invalid_modules]
-        return ", ".join(invalid_param_list + invalid_module_list)
+            # Only check range if all values are provided
+            if min_val is not None and max_val is not None and initial is not None:
+                if not (min_val <= initial <= max_val):
+                    msg = (
+                        f"Initial value {initial} for parameter '{p['name']}' in module '{module_name}' "
+                        f"is outside the range [{min_val}, {max_val}]"
+                    )
+                    logger.warning(msg)
+                    value_out_of_bounds.append(msg)
 
-    return None
+    # Construct messages
+    error_messages = []
+    warning_messages = []
+
+    if invalid_parameters:
+        error_messages.extend(
+            f"Invalid parameter '{name}' for module '{module}'"
+            for module, name in invalid_parameters
+        )
+    if invalid_modules:
+        error_messages.extend(
+            f"Invalid module '{module}' for parameter '{name}'"
+            for module, name in invalid_modules
+        )
+    if value_out_of_bounds:
+        for m in value_out_of_bounds:
+            logger.warning(m)
+        warning_messages.extend(value_out_of_bounds)
+
+    return error_messages, warning_messages
 
 
 def save_parameters(run: CalibrationRun, parameters: list[dict[str, str | float]], allow_nulls: bool = False) -> None:
@@ -702,6 +944,7 @@ def save_parameters(run: CalibrationRun, parameters: list[dict[str, str | float]
         - If `allow_nulls` is True, user-provided values override the defaults only if they are not None,
           allowing missing values to retain their defaults.
     """
+    # Handle the case where the user clears all parameters
     if not parameters:
         # If no parameters are provided, turn off all user_selected_for_tuning flags
         CalibrationParameter.objects.filter(
@@ -710,144 +953,178 @@ def save_parameters(run: CalibrationRun, parameters: list[dict[str, str | float]
         ).update(user_selected_for_tuning=False)
         return
 
-    parameters_to_update = []
-    selected_for_tuning = set((p['module'], p['name']) for p in parameters)
+    # Fetch all parameters for this run efficiently
+    existing_parameters = list(
+        CalibrationParameter.objects.filter(
+            calibration_formulation__calibration_run=run
+        ).values(
+            'id', 'name', 'minimum', 'maximum', 'initial_value',
+            'user_selected_for_tuning', 'calibration_formulation__module_id'
+        )
+    )
 
-    # Fetch all CalibrationParameters for the given calibration run in one query
-    existing_parameters = list(CalibrationParameter.objects.filter(
-        calibration_formulation__calibration_run=run
-    ).select_related('calibration_formulation__module'))
+    modules_by_id = get_cached_modules_by_id()
 
-    # Create a lookup dictionary for existing parameters by module name and parameter name
+    # Build lookup keyed by (module_name, parameter_name)
     parameter_lookup = {
-        (param.calibration_formulation.module.name, param.name): param
-        for param in existing_parameters
+        (modules_by_id[p['calibration_formulation__module_id']].name, p['name']): p
+        for p in existing_parameters
     }
 
-    # Update the parameters based on the input
+    selected_for_tuning = {(p['module'], p['name']) for p in parameters}
+    parameters_to_update = []
+
+    # Update existing parameters
     for p in parameters:
         key = (p['module'], p['name'])
-        if key in parameter_lookup:
-            calibration_param = parameter_lookup[key]
+        existing = parameter_lookup.get(key)
+        if not existing:
+            continue  # Ignore unknown parameters
 
-            # Override Data Services values conditionally based on `allow_nulls`
-            # If `allow_nulls` is True, update only if user input is not None
-            min_value = p.get('minimum')
-            max_value = p.get('maximum')
-            init_value = p.get('initial_value')
+        updates = {}
+        if allow_nulls:
+            if p.get('minimum') is not None:
+                updates['minimum'] = p['minimum']
+            if p.get('maximum') is not None:
+                updates['maximum'] = p['maximum']
+            if p.get('initial_value') is not None:
+                updates['initial_value'] = p['initial_value']
+        else:
+            updates['minimum'] = p.get('minimum')
+            updates['maximum'] = p.get('maximum')
+            updates['initial_value'] = p.get('initial_value')
 
-            if allow_nulls:
-                if min_value is not None:
-                    calibration_param.minimum = min_value
-                if max_value is not None:
-                    calibration_param.maximum = max_value
-                if init_value is not None:
-                    calibration_param.initial_value = init_value
-            else:
-                # Always override with user input if `allow_nulls` is False
-                calibration_param.minimum = min_value
-                calibration_param.maximum = max_value
-                calibration_param.initial_value = init_value
+        if updates:
+            updates['user_selected_for_tuning'] = True
+            updates['id'] = existing['id']
+            parameters_to_update.append(updates)
 
-            calibration_param.user_selected_for_tuning = True
-            parameters_to_update.append(calibration_param)
-
-    # Collect parameters that need to have user_selected_for_tuning turned off
-    parameters_to_unselect = [
-        param for param in existing_parameters
-        if (param.calibration_formulation.module.name, param.name) not in selected_for_tuning and param.user_selected_for_tuning
-    ]
-
-    # Use bulk_update to update selected parameters
+    # Bulk update selected parameters
     if parameters_to_update:
         CalibrationParameter.objects.bulk_update(
-            parameters_to_update, ['minimum', 'maximum', 'initial_value', 'user_selected_for_tuning']
+            [
+                CalibrationParameter(
+                    id=p['id'],
+                    minimum=p.get('minimum'),
+                    maximum=p.get('maximum'),
+                    initial_value=p.get('initial_value'),
+                    user_selected_for_tuning=True,
+                )
+                for p in parameters_to_update
+            ],
+            ['minimum', 'maximum', 'initial_value', 'user_selected_for_tuning']
         )
 
-    # Turn off user_selected_for_tuning for parameters not in the new list
-    # Use bulk_update to turn off user_selected_for_tuning for unselected parameters
-    if parameters_to_unselect:
-        for param in parameters_to_unselect:
-            param.user_selected_for_tuning = False
-        CalibrationParameter.objects.bulk_update(parameters_to_unselect, ['user_selected_for_tuning'])
+    # Turn off tuning flag for unselected parameters
+    unselected_ids = [
+        p['id']
+        for p in existing_parameters
+        if (modules_by_id[p['calibration_formulation__module_id']].name, p['name']) not in selected_for_tuning
+           and p['user_selected_for_tuning']
+    ]
+    if unselected_ids:
+        CalibrationParameter.objects.filter(id__in=unselected_ids).update(user_selected_for_tuning=False)
 
 
-def get_csv_daterange(file: str) -> DateTimeRange:
+def _as_local_path(path: str) -> str:
     """
-    Reads a CSV file that is assumed to be sorted by date/time and efficiently determines
-    the min and max date values from the first column.
+    Convert a file:// URL into a local filesystem path.
+    For example: file:///ngencerf/data/file.csv -> /ngencerf/data/file.csv
+    Leaves non-file URLs unchanged.
+    """
+    if path.startswith("file://"):
+        return urlparse(path).path
+    return path
 
-    :param file: The file path to the CSV file.
+
+def get_csv_daterange(path: str) -> DateTimeRange:
+    """
+    Reads a CSV file (local or cloud) that is assumed to be sorted by date/time and efficiently determines
+    the min and max date values from the first column. Uses caching for remote files so that later operations
+    (e.g., copying/subsetting) can reuse the same local file without re-downloading.
+
+    :param path: The file path or cloud URL to the CSV file.
     :return: DateTimeRange representing the min and max datetime values from the file.
     :raises CerfException: If the file does not exist, contains invalid datetime values, or encounters a read error.
     """
     try:
-        if not os.path.exists(file):
-            raise CerfException(f"File {file} does not exist")
+        # Always cache remote files, so subsequent uses don't re-download
+        with cloud_util.localize_to_path(path, enable_cache=True, suffix=".csv") as (orig, local_path):
+            local_path = _as_local_path(local_path)  # ✅ ensure usable by os.path and open()
 
-        # Read only the first row to get the min date
-        first_row = pd.read_csv(file, delimiter=',', nrows=1, engine='python')
-        first_time = pd.to_datetime(first_row.iloc[0, 0], errors='coerce')
+            if not os.path.exists(local_path):
+                raise CerfException(f"File {path} does not exist")
 
-        # Read only the last line efficiently using seek()
-        with open(file, 'rb') as f:
-            f.seek(-2, os.SEEK_END)  # Move to the end of the file
-            while f.read(1) != b'\n':  # Move backwards until a newline is found
-                f.seek(-2, os.SEEK_CUR)
-            last_line = f.readline().decode('utf-8').strip()
+            # Read first data row (skip header)
+            with open(local_path, "r", encoding="utf-8") as f:
+                _ = f.readline()  # skip header
+                first_line = f.readline()
+            if not first_line:
+                raise CerfException(f"File {path} does not contain data rows")
+            first_time = pd.to_datetime(first_line.strip().split(',', 1)[0], errors="coerce")
 
-        # Extract the last timestamp from the last line (assuming CSV format)
-        last_time = pd.to_datetime(last_line.split(',')[0], errors='coerce')
+            # Read last line efficiently
+            try:
+                with open(local_path, "rb") as f:
+                    f.seek(-2, os.SEEK_END)
+                    while f.read(1) != b"\n":
+                        f.seek(-2, os.SEEK_CUR)
+                    last_line = f.readline().decode("utf-8").strip()
+            except OSError:
+                # For very small files, fall back to reading all lines
+                with open(local_path, "r", encoding="utf-8") as f:
+                    lines = f.read().splitlines()
+                    if len(lines) < 2:
+                        raise CerfException(f"File {path} does not contain data rows")
+                    last_line = lines[-1].strip()
 
-        if pd.isna(first_time) or pd.isna(last_time):
-            raise CerfException(f"Invalid datetime values found in {file}")
+            last_time = pd.to_datetime(last_line.split(",", 1)[0], errors="coerce")
 
-        # Ensure timestamps are UTC
-        return DateTimeRange(first_time.replace(tzinfo=timezone.utc), last_time.replace(tzinfo=timezone.utc))
+            if pd.isna(first_time) or pd.isna(last_time):
+                raise CerfException(f"Invalid datetime values found in {path}")
+
+            # Ensure timestamps are UTC
+            return DateTimeRange(
+                first_time.replace(tzinfo=timezone.utc),
+                last_time.replace(tzinfo=timezone.utc),
+            )
 
     except Exception as e:
-        logger.error(f"Error while processing file {file}: {e}")
-        raise CerfException(f"Error reading file {file}: {e}")
+        logger.error(f"Error while processing file {path}: {e}")
+        raise CerfException(f"Error reading file {path}: {e}")
 
 
 def get_forcing_date_range(forcing_dir_path: str) -> DateTimeRange | None:
     """
     Computes the encompassing date range for all valid CSV files in a given directory.
+    Supports both local paths and cloud URLs.
 
-    :param forcing_dir_path: The directory path containing forcing data files.
-    :return: DateTimeRange representing the combined date range from all files in the directory, or None if no files are found.
+    :param forcing_dir_path: Directory path or cloud URL containing forcing data files.
+    :return: DateTimeRange covering all CSV files, or None if no files found.
     """
-    # Use pathlib only for globbing
-    from pathlib import Path
-
-    csv_files = [file for file in Path(forcing_dir_path).glob("*.csv") if file.is_file()]
+    print('forcing_dir_path', forcing_dir_path)
+    csv_files = cloud_util.list_files(forcing_dir_path, pattern="*.csv")
     if not csv_files:
         return None
 
-    # Define a function to process individual files and calculate their date range
-    def process_file(file: str) -> DateTimeRange:
-        return get_csv_daterange(str(file))  # Convert Path to string
-
     # Use ThreadPoolExecutor for parallel processing
-    with ThreadPoolExecutor() as executor:
-        ranges = list(executor.map(process_file, csv_files))
+    with ThreadPoolExecutor(max_workers=min(32, (os.cpu_count() or 1) + 4)) as executor:
+        ranges = list(executor.map(get_csv_daterange, csv_files))
 
     # Combine all individual ranges into a single encompassing range
     timerange = None
-    for new_range in ranges:
-        if timerange:
-            timerange = timerange.encompass(new_range)
-        else:
-            timerange = new_range
+    for r in ranges:
+        timerange = timerange.encompass(r) if timerange else r
     return timerange
 
 
 def get_observation_date_range(observational_filepath: str) -> DateTimeRange:
     """
     Calculates the date range for a single observational data file.
+    Supports both local paths and cloud URLs.
 
-    :param observational_filepath: The file path to the observational data file.
-    :return: DateTimeRange representing the date range based on the observational data file.
+    :param observational_filepath: File path or cloud URL to the observational data.
+    :return: DateTimeRange based on the file's min and max timestamps.
     """
     return get_csv_daterange(observational_filepath)
 
@@ -855,18 +1132,19 @@ def get_observation_date_range(observational_filepath: str) -> DateTimeRange:
 def get_date_range_intersection(observational_file_path: str, forcing_dir_path: str) -> DateTimeRange | None:
     """
     Calculates the intersection of date ranges between observational and forcing data.
+    Supports both local paths and cloud URLs.
 
-    :param observational_file_path: Path to the observational data file.
-    :param forcing_dir_path: Directory path containing forcing data files.
-    :return: DateTimeRange representing the intersection of date ranges if both ranges exist, or None if there is no overlap.
+    :param observational_file_path: File path or cloud URL to the observational data.
+    :param forcing_dir_path: Directory path or cloud URL containing forcing data.
+    :return: DateTimeRange representing the overlapping period, or None if no overlap.
     """
     # Calculate the date range for the observational data
     obs_range = get_observation_date_range(observational_file_path)
-    logger.debug(f'obs_range: {obs_range}')
+    logger.debug(f"obs_range: {obs_range}")
 
     # Calculate the date range for the forcing data
     forcing_range = get_forcing_date_range(forcing_dir_path)
-    logger.debug(f'forcing_range: {forcing_range}')
+    logger.debug(f"forcing_range: {forcing_range}")
 
     # Compute the intersection of the two ranges
     if obs_range and forcing_range:

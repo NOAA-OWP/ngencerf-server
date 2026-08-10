@@ -1,6 +1,6 @@
 import json
 import logging
-from typing import Any, cast
+from typing import Any
 
 from django.db import transaction
 from django.db.models import F
@@ -9,12 +9,14 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
 from calibration.enums import OptimizationEnum, StatusEnum, MetricEnum
-from calibration.models import Optimization, CalibrationOptimizationInput, CalibrationStopCriteria, CalibrationRun, CustomUser
-from calibration.util.caching import get_cached_optimization_inputs
+from calibration.models import Optimization, CalibrationOptimizationInput, CalibrationStopCriteria, CalibrationRun
+from calibration.util.caching import have_LSTM
 from calibration.util.calibration_validators import CalibrationRunSerializer, LoadOptimizationResponseSerializer, \
     SaveOptimizationRequestSerializer, ErrorResponseSerializer, GenericResponseSerializer
 from calibration.views import ngen_cal_input
-from calibration.views.common import get_calibration_run, ResponseError, handle_exceptions, validate_response, validate_request
+from calibration.views.called_from import get_caller_name
+from calibration.views.common import get_calibration_run, ResponseError, handle_exceptions, validate_response, validate_request, get_user_email, \
+    get_elapsed_str
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +53,7 @@ def load_optimization_tab(request) -> Response:
     """
     data = request.data if request.method == 'POST' else request.query_params.dict()
 
-    logger.debug(f'load_optimization_tab() request from {(cast(CustomUser, request.user)).email}  - {data}')
+    logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
 
     validator, error_return = validate_request(CalibrationRunSerializer, data)
     if error_return:
@@ -63,9 +65,20 @@ def load_optimization_tab(request) -> Response:
     if error_return:
         return error_return
 
-    metrics = MetricEnum.get_choices_with_fields(fields=['name', 'description', 'categorical', 'event_based'], extra_filter={'objective_function': True})
+    metrics = MetricEnum.get_choices_with_fields(fields=['name', 'display_name', 'categorical', 'event_based'],
+                                                 extra_filter={'objective_function': True})
 
-    optimization_list = get_static_optimizations()
+    optimization_list = OptimizationEnum.get_choices_with_fields(
+        fields=['name', 'description', 'is_active']
+    )
+    for o in optimization_list:
+        item = OptimizationEnum.get_instance(o['name'])
+        o['inputs'] = list(
+            item.inputs.values(
+                'name', 'description', 'data_type',
+                'default_value', 'min', 'max', 'is_active'
+            )
+        )
 
     ngen_cal_input.ready_to_run(run)
     response = {'calibration_run_id': run.id, 'status': run.status.name,
@@ -78,22 +91,26 @@ def load_optimization_tab(request) -> Response:
     response_validator, error_response = validate_response(LoadOptimizationResponseSerializer, response)
     if error_response:
         return error_response
-    logger.debug(f'Returning to {(cast(CustomUser, request.user)).email}  from load_optimization_tab() - {json.dumps(response_validator.data)}')
+    logger.debug(
+        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
     return Response(response_validator.data)
 
 
-def get_user_optimization(run: CalibrationRun) -> tuple[str, list[dict[str, Any]]]:
+def get_user_optimization(run: CalibrationRun) -> tuple[str | None, list[dict[str, Any]]]:
     """
-    Retrieves user-selected optimization and inputs for a calibration run.
+    Retrieve the selected optimization and its inputs for a calibration run.
 
     :param run: The CalibrationRun instance.
-    :return: A tuple with the optimization name and list of optimization inputs.
+    :return: A tuple with the optimization name (or None) and a list of input dicts
+             containing input name and value.
     """
     if run.optimization:
         optimization = run.optimization.name
         optimization_inputs = list(
-            CalibrationOptimizationInput.objects.filter(calibration_run=run)
+            CalibrationOptimizationInput.objects
+            .filter(calibration_run=run)
             .select_related('optimization_input')
+            .order_by('optimization_input__name')
             .values('value', name=F('optimization_input__name'))
         )
     else:
@@ -101,25 +118,6 @@ def get_user_optimization(run: CalibrationRun) -> tuple[str, list[dict[str, Any]
         optimization_inputs = []
 
     return optimization, optimization_inputs
-
-
-def get_static_optimizations() -> list[dict[str, Any]]:
-    """
-    Retrieves static optimizations with input details.
-
-    :return: A list of optimizations with related input fields.
-    """
-    optimization_list = OptimizationEnum.get_choices_with_fields(
-        fields=['name', 'description', 'is_active']
-    )
-
-    for optimization in optimization_list:
-        optimization_obj: Optimization = OptimizationEnum.get_instance(optimization['name'])
-
-        inputs = list(optimization_obj.inputs.values('name', 'description', 'data_type', 'is_active', 'default_value', 'min', 'max'))
-        optimization['inputs'] = inputs
-
-    return optimization_list
 
 
 # noinspection PyUnusedLocal
@@ -151,7 +149,7 @@ def save_optimization_tab(request) -> Response:
     """
     data = request.data
 
-    logger.debug(f'save_optimization_tab() request from {(cast(CustomUser, request.user)).email}  - {data}')
+    logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
 
     validator, error_return = validate_request(SaveOptimizationRequestSerializer, data)
     if error_return:
@@ -171,10 +169,18 @@ def save_optimization_tab(request) -> Response:
     if error_return:
         return error_return
 
+    if have_LSTM(run) and (optimization_name or objective_function_name or
+                           streamflow_threshold is not None or peak_flow_threshold is not None or
+                           optimization_inputs or stop_criteria is not None or
+                           save_output_iteration or save_plot_iteration_frequency is not None):
+        return ResponseError(
+            "You cannot specify optimization_name, objective_function_name, streamflow_threshold, peak_flow_threshold, "
+            "optimization_name, stop_criteria, save_output_iteration or save_plot_iteration_frequency when using LSTM")
+
     if optimization_inputs and not optimization_name:
         return ResponseError('Optimization inputs cannot be specified without an optimization name')
 
-    optimization, error_message = validate_optimizations(run, optimization_name, optimization_inputs)
+    optimization, prepared_inputs, error_message = validate_optimizations(run, optimization_name, optimization_inputs)
     if error_message:
         return ResponseError(error_message)
 
@@ -191,55 +197,61 @@ def save_optimization_tab(request) -> Response:
     run.streamflow_threshold = streamflow_threshold
     run.peak_flow_threshold = peak_flow_threshold
 
+    keep_ids = {obj.optimization_input_id for obj in prepared_inputs} if prepared_inputs else set()
     with transaction.atomic():
         if stop_criteria is not None:
             # I'm assuming for now that there is just one CalibrationStopCriteria for this run, but that might change in the future
             CalibrationStopCriteria.objects.update_or_create(calibration_run=run, defaults={"value": stop_criteria})
 
-        write_optimization_inputs(run, optimization, optimization_inputs)
+        write_optimization_inputs(run, prepared_inputs, keep_ids)
 
         run.save()
 
-        ngen_cal_input.ready_to_run(run)
+    ngen_cal_input.ready_to_run(run)
 
-        response = {'message': f'Calibration Job {run.id} updated', 'calibration_run_id': run.id, 'status': run.status.name}
+    response = {'message': f'Calibration Job {run.id} updated', 'calibration_run_id': run.id, 'status': run.status.name}
 
-        response_validator, error_response = validate_response(GenericResponseSerializer, response)
-        if error_response:
-            return error_response
-        logger.debug(f'Returning to {(cast(CustomUser, request.user)).email}  from save_optimization_tab() - {json.dumps(response_validator.data)}')
-        return Response(response_validator.data)
+    response_validator, error_response = validate_response(GenericResponseSerializer, response)
+    if error_response:
+        return error_response
+    logger.debug(
+        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
+    return Response(response_validator.data)
 
 
-def validate_optimizations(run: CalibrationRun, optimization_name: str, optimization_inputs: list[dict[str, Any]]) \
-        -> tuple[Optimization | None, str | None]:
+def validate_optimizations(run: CalibrationRun, optimization_name: str, optimization_inputs: list[dict[str, Any]]) -> tuple[
+    Optimization | None, list[CalibrationOptimizationInput] | None, str | None]:
     """
-    Validates and assigns optimization inputs to a calibration run.
+    Validate and prepare optimization inputs for a calibration run.
 
     :param run: The CalibrationRun instance.
     :param optimization_name: Name of the optimization to apply.
     :param optimization_inputs: List of inputs for the optimization.
-    :return: Tuple with the optimization instance or None if invalid, and any error message.
+    :return: Tuple with the Optimization instance, a list of prepared
+             CalibrationOptimizationInput objects, and an error message if validation fails.
     """
     optimization = OptimizationEnum.get_instance(optimization_name)
-
     run.optimization = optimization
+
+    prepared_inputs: list[CalibrationOptimizationInput] = []
 
     if optimization_inputs:
         # Retrieve cached optimization inputs
+        opt = OptimizationEnum.get_instance(optimization_name)
         valid_inputs_dict = {
-            input_data['name']: input_data
-            for input_data in get_cached_optimization_inputs(optimization_name)
+            i['name']: i
+            for i in opt.inputs.values(
+                'name', 'description', 'data_type',
+                'default_value', 'min', 'max', 'id', 'is_active'
+            )
         }
 
-        optimization_inputs_to_create = []
         for o in optimization_inputs:
             name = o['name']
             value = o['value']
             optimization_input_data = valid_inputs_dict.get(name)
-
             if not optimization_input_data:
-                return None, f"'{name}' is not a valid parameter input for '{optimization_name}'"
+                return None, None, f"'{name}' is not a valid parameter input for '{optimization_name}'"
 
             # Safely retrieve min and max values
             min_value = optimization_input_data['min']
@@ -255,12 +267,12 @@ def validate_optimizations(run: CalibrationRun, optimization_name: str, optimiza
 
             # Validate against min and max
             if min_value is not None and value < min_value:
-                return None, f"'{name}' value ({value}) is below the minimum allowed ({min_value})"
+                return None, None, f"'{name}' value ({value}) is below the minimum allowed ({min_value})"
             if max_value is not None and value > max_value:
-                return None, f"'{name}' value ({value}) is above the maximum allowed ({max_value})"
+                return None, None, f"'{name}' value ({value}) is above the maximum allowed ({max_value})"
 
             # Append to the list for bulk creation with the original `OptimizationInput` id
-            optimization_inputs_to_create.append(
+            prepared_inputs.append(
                 CalibrationOptimizationInput(
                     optimization_input_id=optimization_input_data['id'],
                     calibration_run=run,
@@ -268,10 +280,7 @@ def validate_optimizations(run: CalibrationRun, optimization_name: str, optimiza
                 )
             )
 
-        # Bulk create inputs
-        CalibrationOptimizationInput.objects.bulk_create(optimization_inputs_to_create)
-
-    return optimization, None
+    return optimization, prepared_inputs, None
 
 
 def validate_objective_function(run: CalibrationRun, objective_function_name: str, streamflow_threshold: float,
@@ -310,27 +319,45 @@ def validate_objective_function(run: CalibrationRun, objective_function_name: st
     return None
 
 
-def write_optimization_inputs(run: CalibrationRun, optimization: Optimization, optimization_inputs: list[dict[str, Any]]) -> None:
+def write_optimization_inputs(run: CalibrationRun, prepared_inputs: list[CalibrationOptimizationInput] | None,
+                              keep_ids: set[int] | None = None) -> None:
     """
-    Writes optimization inputs to the database, removing any existing ones for the calibration run.
+    Write or update optimization input records for a calibration run.
 
-    :param run: The CalibrationRun instance.
-    :param optimization: The selected Optimization instance.
-    :param optimization_inputs: List of inputs with names and values.
+    This function synchronizes the database state of `CalibrationOptimizationInput`
+    entries for the given run with the provided validated inputs:
+      - Deletes any existing inputs not present in `keep_ids`.
+      - Inserts or updates the provided inputs
+      - If `prepared_inputs` is empty or None, removes all existing inputs for the run.
+
+    This function does not manage transactions; callers modifying multiple related
+    models should wrap the operation inside a `transaction.atomic()` block.
+
+    :param run: The CalibrationRun instance whose optimization inputs are being updated.
+    :param prepared_inputs: A list of prepared `CalibrationOptimizationInput` objects,
+                            typically produced by `validate_optimizations()`.
+    :param keep_ids: Optional set of optimization_input IDs to retain. If not provided,
+                     inferred from `prepared_inputs`.
+    :return: None
     """
+    # If there are no inputs, this means the run should have none — delete and exit.
+    if not prepared_inputs:
+        CalibrationOptimizationInput.objects.filter(calibration_run=run).delete()
+        return
+    keep_ids = keep_ids or {obj.optimization_input_id for obj in prepared_inputs}
 
-    # Delete existing optimization inputs first
-    CalibrationOptimizationInput.objects.filter(calibration_run=run).delete()
+    (CalibrationOptimizationInput.objects
+     .filter(calibration_run=run)
+     .exclude(optimization_input_id__in=keep_ids)
+     .delete())
 
-    if optimization_inputs:
-        cached_inputs_list = get_cached_optimization_inputs(optimization.name)
-        cached_inputs = {opt['name']: opt for opt in cached_inputs_list}  # Convert to dict
-
-        for o in optimization_inputs:
-            optimization_input = cached_inputs.get(o['name'])
-            if optimization_input and optimization_input['is_active']:
-                CalibrationOptimizationInput.objects.create(
-                    optimization_input_id=optimization_input['id'],
-                    calibration_run=run,
-                    value=o['value']
-                )
+    # Upsert the remaining/new ones in bulk:
+    # - update existing rows' value
+    # - insert new rows
+    #
+    CalibrationOptimizationInput.objects.bulk_create(
+        prepared_inputs,
+        update_conflicts=True,
+        update_fields=['value'],
+        unique_fields=['calibration_run', 'optimization_input'],
+    )

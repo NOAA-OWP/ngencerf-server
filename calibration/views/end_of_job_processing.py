@@ -2,6 +2,7 @@ import csv
 import logging
 import math
 import os
+import traceback
 from collections import deque
 from datetime import timedelta
 from itertools import groupby
@@ -13,17 +14,20 @@ from django.db import transaction
 from django.utils.timezone import now
 
 from calibration.enums import OptimizationEnum, ValidationMetricPeriod, ValidationType, MetricEnum
+from calibration.enums_vanilla import SecondaryDataEnum
 from calibration.models import Iteration, CalibrationRun, IterationMetric, IterationParameter, CalibrationParameter, ValidationRun, \
-    PerformanceMetrics, ValidationMetrics, NWMRetrospectiveMetrics, IterationResult, ForecastForcingDownloadRun, ForecastRun
+    PerformanceMetrics, ValidationMetrics, NWMRetrospectiveMetrics, IterationResult, ColdStartRun, ForecastRun, \
+    VerificationRun
 from calibration.models.base_run import BaseRun
+from calibration.util.caching import have_LSTM
 from calibration.util.ngen_locations import get_realization_file_path, get_metrics_iteration_file, \
     get_objective_log_best_file, get_calibration_worker_path, get_global_best_params_file, get_validation_metrics_valid_control_file, \
     get_validation_metrics_valid_best_file, get_validation_metrics_valid_iteration_file, \
     get_validation_performance_file, get_calibration_performance_file, get_validation_metrics_nwm_retrospective_file, get_output_iteration_csv, \
-    get_validation_special_performance_file, get_forecast_forcing_download_performance_file, \
-    get_forecast_performance_file, get_params_iteration_file
-from calibration.views.calibration_swe_views import generate_swe_ts_data
-from calibration.views.common import CerfException, get_job_description, find_validation_worker_with_matching_log
+    get_validation_special_performance_file, get_forecast_performance_file, get_verification_performance_file, \
+    get_params_iteration_file, get_cold_start_performance_file
+from calibration.views.calibration_secondary_data_views import generate_secondary_ts_data
+from calibration.views.common import CerfException, get_job_description, find_validation_worker_with_matching_id
 
 logger = logging.getLogger(__name__)
 
@@ -42,21 +46,22 @@ def read_validation_output(validation_run: ValidationRun, failed_so_far: bool) -
 
     logger.info(f"Processing output for {job_description}, status: {validation_run.status}")
 
-    with transaction.atomic():
-        # Convert validation_type to an instance of ValidationType
-        validation_type = ValidationType(validation_run.validation_type)
+    # --- Moved this read-only query OUTSIDE the transaction to reduce lock contention ---
+    validation_type = ValidationType(validation_run.validation_type)
+    iteration = validation_run.iteration if validation_type == ValidationType.VALID_ITERATION else None
 
+    with transaction.atomic():
         # Identify the matching worker based on validation type
-        matching_worker = find_validation_worker_with_matching_log(
+        matching_worker = find_validation_worker_with_matching_id(
             validation_run,
-            worker_name=validation_run.iteration.worker_name if validation_type == ValidationType.VALID_ITERATION else None,
-            iteration_num=validation_run.iteration.iteration_num if validation_type == ValidationType.VALID_ITERATION else None
+            worker_name=iteration.worker_name if validation_type == ValidationType.VALID_ITERATION else None,
+            iteration_num=iteration.iteration_num if validation_type == ValidationType.VALID_ITERATION else None,
         )
         validation_run.validation_worker_name = matching_worker
         validation_run.save(update_fields=['validation_worker_name'])
 
         performance_metrics_file = (
-            get_validation_performance_file(validation_run.calibration_run, validation_run.worker_name, validation_run.iteration_num)
+            get_validation_performance_file(validation_run.calibration_run, iteration.worker_name, iteration.iteration_num)
             if validation_type == ValidationType.VALID_ITERATION
             else get_validation_special_performance_file(validation_run.calibration_run, validation_type)
         )
@@ -99,11 +104,49 @@ def read_calibration_output(calibration_run: CalibrationRun, failed_so_far: bool
     logger.info(f"End of processing output for {job_description}")
 
 
-def read_forecast_output(run: ForecastForcingDownloadRun | ForecastRun, _failed_so_far: bool) -> None:
+def read_cold_start_output(run: ColdStartRun, _failed_so_far: bool) -> None:
     """
     Processes the output of a forecast run by parsing performance metrics.
 
-    :param run: The ForecastForcingDownloadRun or ForecastRun instance.
+    :param run: The ColdStartRun instance.
+    :param _failed_so_far: Indicates whether the job has failed up to this point.
+    """
+
+    job_description = get_job_description(run)
+
+    logger.info(f"Processing output for {job_description}, status={run.status}")
+    with transaction.atomic():
+        create_performance_metrics(run, get_cold_start_performance_file(run))
+
+    # No other processing needed
+
+    logger.info(f"End of processing output for {job_description}")
+
+
+def read_forecast_output(run: ForecastRun, _failed_so_far: bool) -> None:
+    """
+    Processes the output of a forecast run by parsing performance metrics.
+
+    :param run: The ForecastRun instance.
+    :param _failed_so_far: Indicates whether the job has failed up to this point.
+    """
+
+    job_description = get_job_description(run)
+
+    logger.info(f"Processing output for {job_description}, status={run.status}")
+    with transaction.atomic():
+        create_performance_metrics(run, get_forecast_performance_file(run))
+
+    # No other processing needed
+
+    logger.info(f"End of processing output for {job_description}")
+
+
+def read_verification_output(run: VerificationRun, _failed_so_far: bool) -> None:
+    """
+    Processes the output of a verification run by parsing performance metrics.
+
+    :param run: The VerificationRun instance.
     :param _failed_so_far: Indicates whether the job has failed up to this point.
     """
 
@@ -112,9 +155,7 @@ def read_forecast_output(run: ForecastForcingDownloadRun | ForecastRun, _failed_
     logger.info(f"Processing output for {job_description}, status={run.status}")
     with transaction.atomic():
         performance_metrics_file = (
-            get_forecast_forcing_download_performance_file(run.forecast_run)
-            if isinstance(run, ForecastForcingDownloadRun)
-            else get_forecast_performance_file(run)
+            get_verification_performance_file(run)
         )
 
         create_performance_metrics(run, performance_metrics_file)
@@ -134,14 +175,10 @@ def create_performance_metrics(run: BaseRun, performance_metrics_file: str) -> N
     """
     performance_metrics = parse_performance_metrics(performance_metrics_file)
 
-    # Use a reserved_time of 0 if performance_metrics is None
-    reserved_time = performance_metrics.reserved_time if performance_metrics else timedelta(0)
-    run.run_start = run.submit_date + reserved_time
-
     if not performance_metrics:
-        # Fallback to calculate elapsed_time manually
-        elapsed_time = now() - run.run_start
-        performance_metrics = PerformanceMetrics.objects.create(elapsed_time=elapsed_time)
+        # Fallback to calculate run_time manually
+        run_time = now() - run.run_start
+        performance_metrics = PerformanceMetrics.objects.create(run_time=run_time)
 
     run.performance_metrics = performance_metrics
     run.save(update_fields=['performance_metrics', 'run_start'])
@@ -176,10 +213,11 @@ def process_validation_metrics(run: ValidationRun | CalibrationRun, metrics_file
     # Loop over each row in the metrics file
     for _, row in metrics_df.iterrows():
         # Extract the run type and period fields
-        run_type = row['run']
+        run_type = str(row['run']).strip()
         if run_type != expected_run_type:
             logger.info(f'Unexpected run_type in {metrics_file} - {run_type}')
-        period = row['period']
+
+        period = str(row['period']).strip()
         if period not in ValidationMetricPeriod.get_names():
             logger.info(f'Unexpected period in {metrics_file} - {period}')
 
@@ -189,7 +227,7 @@ def process_validation_metrics(run: ValidationRun | CalibrationRun, metrics_file
         # For each metric in the row, create or update the relevant Metric model
         for metric_name, value in metrics_row.items():
             # Perform case-insensitive lookup for the metric
-            metric = MetricEnum.get_instance(metric_name)
+            metric = MetricEnum.get_instance(str(metric_name))
             if not metric:
                 raise CerfException(f"Could not find metric '{metric_name}' in MetricEnum")
 
@@ -261,10 +299,21 @@ def process_validation_for_validation_run(validation_run: ValidationRun) -> None
             expected_run_type=expected_run_type
         )
 
-    generate_swe_ts_data(validation_run)
+    logger.info('Generating SWE timeseries data')
+    try:
+        generate_secondary_ts_data(validation_run, SecondaryDataEnum.SWE)
+    except Exception as e:
+        logger.error(f'Failed to generate SWE timeseries data: {e}')
+        traceback.print_exc()
+
+    logger.info('Generating Soil Moisture timeseries data')
+    try:
+        generate_secondary_ts_data(validation_run, SecondaryDataEnum.SOIL_MOISTURE)
+    except Exception as e:
+        logger.error(f'Failed to generate Soil Moisture timeseries data: {e}')
+        traceback.print_exc()
 
 
-# Function to process iterations for all workers in a run
 def process_iterations_for_all_workers(calibration_run: CalibrationRun) -> None:
     """
     Process all Iteration objects for the workers of a given CalibrationRun.
@@ -276,14 +325,16 @@ def process_iterations_for_all_workers(calibration_run: CalibrationRun) -> None:
     # Compute best_params_dict once, outside the loop
     best_params_dict: Dict[str, float] = {}
 
+    have_LSTM_flag = have_LSTM(calibration_run)
     if calibration_run.optimization != OptimizationEnum.DDS.db_instance:
-        global_best_params_file = get_global_best_params_file(calibration_run)
-        if not os.path.isfile(global_best_params_file):
-            raise CerfException(f"{global_best_params_file} does not exist")
+        if not have_LSTM_flag:
+            global_best_params_file = get_global_best_params_file(calibration_run)
+            if not os.path.isfile(global_best_params_file):
+                raise CerfException(f"{global_best_params_file} does not exist")
 
-        # Read the global best parameters into a dictionary
-        df = pd.read_csv(global_best_params_file, names=['value', 'name', 'model'], skiprows=1)
-        best_params_dict = pd.Series(df['value'].astype(float).values, index=df['name']).to_dict()
+            # Read the global best parameters into a dictionary
+            df = pd.read_csv(global_best_params_file, names=['value', 'name', 'model'], skiprows=1)
+            best_params_dict = pd.Series(df['value'].astype(float).values, index=df['name']).to_dict()
 
     # Query all Iteration objects for the calibration run and prefetch related metrics and parameters
     iterations = Iteration.objects.filter(calibration_run=calibration_run).order_by(
@@ -292,16 +343,16 @@ def process_iterations_for_all_workers(calibration_run: CalibrationRun) -> None:
 
     # Group the iterations by worker and process them
     for worker_name, worker_iterations in groupby(iterations, key=attrgetter('worker_name')):
-        process_iterations_for_a_worker(calibration_run, worker_name, list(worker_iterations), best_params_dict)
+        process_iterations_for_a_worker(calibration_run, worker_name, list(worker_iterations), best_params_dict, have_LSTM_flag)
 
     # Raise an error if no best iteration was found
-    if not Iteration.objects.filter(calibration_run=calibration_run, best_params=True).exists():
+    if not have_LSTM_flag and not Iteration.objects.filter(calibration_run=calibration_run, best_params=True).exists():
         raise CerfException(f"No best iteration was found for CalibrationRun {calibration_run.id}")
 
 
 # Function to process iterations for a specific worker
 def process_iterations_for_a_worker(calibration_run: CalibrationRun, worker_name: str, iterations: list[Iteration],
-                                    best_params_dict: Dict[str, float]) -> None:
+                                    best_params_dict: Dict[str, float], have_LSTM_flag: bool) -> None:
     """
     Process all iterations for a specific worker in a CalibrationRun.
     It reads the metrics and parameters files for the worker and processes each
@@ -312,6 +363,7 @@ def process_iterations_for_a_worker(calibration_run: CalibrationRun, worker_name
                         Need to prefix with ngen_ and suffix with _worker.
     :param iterations: A list of Iteration objects for the worker.
     :param best_params_dict: Precomputed dictionary of best parameters for comparison.
+    :param have_LSTM_flag: Flag to indicate whether this job has LSTM
     """
     logger.info(f"Processing iterations for {worker_name} for Calibration Job {calibration_run.id}")
 
@@ -329,7 +381,7 @@ def process_iterations_for_a_worker(calibration_run: CalibrationRun, worker_name
     # Check if the files exist
     if not os.path.isfile(metrics_iteration_file):
         raise CerfException(f'{metrics_iteration_file} does not exist for CalibrationRun {calibration_run.id}')
-    if not os.path.isfile(params_iteration_file):
+    if not os.path.isfile(params_iteration_file) and not have_LSTM_flag:
         raise CerfException(f'{params_iteration_file} does not exist for CalibrationRun {calibration_run.id}')
 
     # Check for the best iteration based on optimization type (DDS, GWO, PSO)
@@ -348,43 +400,45 @@ def process_iterations_for_a_worker(calibration_run: CalibrationRun, worker_name
     # Prefetch Iteration objects for efficiency
     iteration_dict = {it.iteration_num: it for it in iterations}
 
-    # Read metrics and parameters files using pandas
-    metrics_df = pd.read_csv(metrics_iteration_file)
-    params_df = pd.read_csv(params_iteration_file)
-
-    # Ensure the metrics and parameters CSV files have the same number of rows
-    if len(metrics_df) != len(params_df):
-        raise CerfException(
-            f'Mismatch in the number of rows between {metrics_iteration_file} and {params_iteration_file} for CalibrationRun {calibration_run.id}'
-        )
-
     metrics_to_create = []  # List to accumulate metrics to be created
     params_to_create = []  # List to accumulate parameters to be created
-
-    # Update the output variables for the worker's iterations
-    update_objective_function_values(metrics_iteration_file, calibration_run, worker_name)
 
     # Track whether a best iteration was set
     best_iteration_found = False
 
-    # Loop over both metrics and parameters DataFrames row by row
-    for _, (metrics_row, params_row) in enumerate(zip(metrics_df.iterrows(), params_df.iterrows())):
-        # Convert the pandas.Series objects to dictionaries
-        metrics_row_dict = metrics_row[1].to_dict()
-        params_row_dict = params_row[1].to_dict()
+    # Process metrics file
+    metrics_df = pd.read_csv(metrics_iteration_file)
+    if not have_LSTM_flag:
+        update_objective_function_values(metrics_iteration_file, calibration_run, worker_name)
 
-        iteration_num = metrics_row_dict['iteration']
+    for _, row in metrics_df.iterrows():
+        row_dict = row.to_dict()
+        iteration_num = row_dict['iteration']
         iteration = iteration_dict.get(iteration_num)
         if not iteration:
-            raise CerfException(f"Iteration {iteration_num} not found for worker {worker_name} in CalibrationRun {calibration_run.id}")
+            raise CerfException(f"Iteration {iteration_num} not found for worker {worker_name}")
+        process_metrics_row_for_calibration(calibration_run, iteration, row_dict, metrics_to_create)
 
-        # Process metrics and parameters for this iteration
-        process_metrics_row_for_calibration(calibration_run, iteration, metrics_row_dict, metrics_to_create)
-        process_params_row(calibration_run, iteration, params_row_dict, params_to_create, best_iteration_for_worker, best_params_dict)
+        if have_LSTM_flag:
+            # For LSTM, there is only 1 iteration so we will mark it as having the best
+            iteration.best_params = True
+            iteration.save(update_fields=['best_params'])
 
-        # Check if this iteration was set as the best
-        if iteration.best_params:
-            best_iteration_found = True
+    # Process parameters file
+    if not have_LSTM_flag:
+        params_df = pd.read_csv(params_iteration_file)
+
+        for _, row in params_df.iterrows():
+            row_dict = row.to_dict()
+            iteration_num = row_dict['iteration']
+            iteration = iteration_dict.get(iteration_num)
+            if not iteration:
+                raise CerfException(f"Iteration {iteration_num} not found for worker {worker_name}")
+            process_params_row(calibration_run, iteration, row_dict, params_to_create, best_iteration_for_worker, best_params_dict)
+
+            # Check if this iteration was set as the best
+            if iteration.best_params:
+                best_iteration_found = True
 
     # Bulk create IterationMetric and IterationParameter objects in chunks
     if metrics_to_create:
@@ -493,13 +547,14 @@ def process_params_row(calibration_run: CalibrationRun,
     params_row = {k: v for k, v in params_row.items() if k != 'iteration'}
 
     # Check if the current params_row matches the global best parameters
+    # The is_best_match logic is done for PSO and GWO.  We actually compare the values of the parameters
     is_best_match = (
             len(params_row) == len(best_params_dict) and
             all(param_name in best_params_dict and math.isclose(float(value), best_params_dict[param_name], rel_tol=1e-9, abs_tol=0.0)
                 for param_name, value in params_row.items())
     )
 
-    # If the iteration is the best (based on matching parameters or best iteration number)
+    # If the iteration is the best (based on matching parameters or best iteration number (from objective_log file for DDS))
     if is_best_match or iteration.iteration_num == best_iteration_for_worker:
         logger.debug(f'{calibration_run.id}_{calibration_run.owner.username} Found best iteration: {iteration.iteration_num}, for {job_description}')
         iteration.best_params = True
@@ -524,7 +579,11 @@ def process_params_row(calibration_run: CalibrationRun,
             calibration_parameter=parameter,
             tuned_value=tuned_value
         )
-        logger.debug(f'{job_description}: Creating Iteration parameter for {param_obj}')
+        logger.debug(
+            f"{job_description}: Creating IterationParameter "
+            f"for iteration={iteration.iteration_num}, param={parameter.name}, value={tuned_value}"
+        )
+
         params_to_create.append(param_obj)
 
 
@@ -551,7 +610,7 @@ def update_objective_function_values(metrics_iteration_file: str, calibration_ru
 
     # Iterate over rows in the DataFrame
     for _, row in metrics_df.iterrows():
-        iteration_num = int(row['iteration'])
+        iteration_num = int(row['iteration'])  # type: ignore[arg-type]
         obj_fun_val = row['objFunVal']
 
         # Retrieve the iteration object from the dictionary
@@ -586,8 +645,8 @@ def read_last_line(filename: str) -> str:
     :param filename: The path to the file.
     :return: The last line of the file as a string.
     """
-    with open(filename, 'rb') as file:
-        return deque(file, maxlen=1).pop().decode().strip()
+    with open(filename, 'r', encoding='utf-8') as file:
+        return deque(file, maxlen=1).pop().strip()
 
 
 # Function to count the number of rows in a CSV file
@@ -603,16 +662,26 @@ def count_rows_in_csv(file_path: str) -> int:
         return sum(1 for _ in file) - 1
 
 
-def parse_duration(duration_str: str) -> timedelta:
+def parse_duration(duration_str: str | None) -> timedelta | None:
     """
-    Converts a duration string (HH:MM:SS) into a timedelta object.
+    Converts a duration string (D-HH:MM:SS or HH:MM:SS) into a timedelta object.
 
-    :param duration_str: The duration string in HH:MM:SS format.
+    :param duration_str: The duration string in D-HH:MM:SS or HH:MM:SS format.
     :return: A timedelta object representing the duration.
     """
-
-    hours, minutes, seconds = map(int, duration_str.split(':'))
-    return timedelta(hours=hours, minutes=minutes, seconds=seconds)
+    if not duration_str:
+        return None
+    try:
+        if '-' in duration_str:
+            days_part, time_part = duration_str.split('-')
+            days = int(days_part)
+        else:
+            time_part = duration_str
+            days = 0
+        hours, minutes, seconds = map(int, time_part.split(':'))
+        return timedelta(days=days, hours=hours, minutes=minutes, seconds=seconds)
+    except (ValueError, TypeError):
+        return None
 
 
 def parse_size_to_kb(size_str: str | None) -> float | None:
@@ -682,12 +751,12 @@ def parse_performance_metrics(file_path: str) -> PerformanceMetrics | None:
                 # Collect data from the .batch line with fallback to None for missing fields
                 batch_metrics = {
                     'slurm_job_id': job_id,
-                    'elapsed_time': parse_duration(row.get('Elapsed', '')) if row.get('Elapsed') else None,
-                    'num_cpus': int(row.get('NCPUS', 0)) if row.get('NCPUS') else None,
-                    'cpu_time': parse_duration(row.get('CPUTime', '')) if row.get('CPUTime') else None,
-                    'max_rss': parse_size_to_kb(row.get('MaxRSS', None)),
-                    'max_disk_read': parse_size_to_kb(row.get('MaxDiskRead', None)),
-                    'max_disk_write': parse_size_to_kb(row.get('MaxDiskWrite', None)),
+                    'run_time': parse_duration(row.get('Elapsed')),
+                    'num_cpus': int(row.get('NCPUS')) if row.get('NCPUS') else None,
+                    'cpu_time': parse_duration(row.get('CPUTime')),
+                    'max_rss': parse_size_to_kb(row.get('MaxRSS')),
+                    'max_disk_read': parse_size_to_kb(row.get('MaxDiskRead')),
+                    'max_disk_write': parse_size_to_kb(row.get('MaxDiskWrite')),
                     'reserved_time': reserved_time  # This will be updated later if available
                 }
             else:
@@ -698,7 +767,7 @@ def parse_performance_metrics(file_path: str) -> PerformanceMetrics | None:
                     logger.warning(f'Missing fields for non-batch JobID {job_id}: {", ".join(missing_fields)}')
 
                 # Save the reserved time from the non-.batch line
-                reserved_time = parse_duration(row.get('Planned', '')) if row.get('Planned') else None
+                reserved_time = parse_duration(row.get('Planned'))
 
     if batch_metrics:
         # Update the reserved_time for the batch metrics

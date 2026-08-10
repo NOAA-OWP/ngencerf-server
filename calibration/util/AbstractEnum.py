@@ -5,8 +5,11 @@ from typing import Type, TypeVar
 from django.core.cache import cache
 from django.db import models
 
-# Create a generic type variable for models
+from calibration.views.cache_prefix import CACHE_PREFIX
+
+# Create a generic type variable for models and Enums
 T = TypeVar('T', bound=models.Model)
+E = TypeVar('E', bound='AbstractEnum')
 
 
 class AbstractEnum(Generic[T], Enum):
@@ -35,7 +38,7 @@ class AbstractEnum(Generic[T], Enum):
         return None
 
     @classmethod
-    def get_aliases(cls) -> dict[Enum, list[str]]:
+    def get_aliases(cls: type[E]) -> dict[E, list[str]]:
         """
         Optionally overridden by subclasses to provide aliases for enum members.
 
@@ -55,10 +58,11 @@ class AbstractEnum(Generic[T], Enum):
         if not cls.get_model():
             return None
 
-        items = cache.get(f'{cls.__name__}_cache')
+        cache_key = f"{CACHE_PREFIX}{cls.__name__}_cache"
+        items = cache.get(cache_key)
         if items is None:
             cls.load_items()
-            items = cache.get(f'{cls.__name__}_cache')
+            items = cache.get(cache_key)
         return items
 
     @classmethod
@@ -78,6 +82,7 @@ class AbstractEnum(Generic[T], Enum):
 
         # Database-synced enum: return names from cached items
         items = cls._get_cached_items()
+        # noinspection PyUnresolvedReferences
         return [item.name for item in items.values()] if items else []
 
     @classmethod
@@ -120,15 +125,17 @@ class AbstractEnum(Generic[T], Enum):
         model = cls.get_model()
 
         if model:
+            cache_key = f"{CACHE_PREFIX}{cls.__name__}_cache"
             # Get any filter criteria specified in the subclass
             filter_criteria = cls.get_filter() or {}
 
             # Query the model using the filter criteria and build a dictionary of items keyed by name
             items = model.objects.filter(**filter_criteria)
+            # noinspection PyUnresolvedReferences
             item_dict = {item.name: item for item in items}
 
             # Store the item dictionary in cache
-            cache.set(f'{cls.__name__}_cache', item_dict, timeout=None)
+            cache.set(cache_key, item_dict, timeout=None)
 
     @classmethod
     def get_instance(cls, name: str) -> T:
@@ -185,6 +192,26 @@ class AbstractEnum(Generic[T], Enum):
                             if the corresponding model instance cannot be found.
         """
         return self.__class__.get_instance(self.value)
+
+    @classmethod
+    def from_name(cls: type[E], name: str) -> E:
+        """
+        Returns the enum member corresponding to the given name or alias.
+        Raises ValueError if no match is found.
+        """
+        name = name.lower()
+
+        # Check direct matches
+        for member in cls:
+            if member.value.lower() == name:
+                return member
+
+        # Check aliases
+        for main_value, alias_list in cls.get_aliases().items():
+            if any(alias.lower() == name for alias in alias_list):
+                return main_value
+
+        raise ValueError(f"No matching enum member for name '{name}' in {cls.__name__}")
 
     @classmethod
     def get_choices_with_fields(cls, fields: list[str] = None, extra_filter: dict[str, Any] = None) -> list[dict[str, Any]]:

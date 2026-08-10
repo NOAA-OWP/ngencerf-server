@@ -9,23 +9,35 @@ logger = logging.getLogger(__name__)
 @cache  # Cache the project root lookup
 def get_project_root() -> str:
     """
-    Finds the Django project root by searching for `manage.py`.
-    We use this to avoid importing settings.py
-    """
-    current_dir = os.path.dirname(os.path.abspath(__file__))  # Ensure we start from a directory
+    Finds and returns the root directory of the Django project by searching upwards
+    from this file's location until it finds 'manage.py'.
 
-    while current_dir != os.path.dirname(current_dir):  # Stop at the filesystem root
+    This avoids importing Django settings and provides a reliable way to compute
+    paths relative to the project root.
+
+    The result is cached.
+    """
+    current_dir = os.path.dirname(os.path.abspath(__file__))  # Start from this file's directory
+
+    while current_dir != os.path.dirname(current_dir):  # Traverse up until the root
         if "manage.py" in os.listdir(current_dir):
             return current_dir  # Found the project root
-        current_dir = os.path.dirname(current_dir)  # Move up one level
+        current_dir = os.path.dirname(current_dir)  # Go up one level
 
-    return os.getcwd()  # Fallback (shouldn't happen)
+    return os.getcwd()  # Fallback if manage.py is not found (shouldn't happen)
 
 
+# Cached project base directory
 BASE_DIR = get_project_root()
 
 
 def called_from() -> str:
+    """
+    Returns a string indicating which function called the caller of this function,
+    along with the filename and line number, relative to the project root.
+
+    Useful for detailed debug logging.
+    """
     stack = inspect.stack()
 
     if len(stack) < 3:
@@ -40,3 +52,26 @@ def called_from() -> str:
     relative_path = os.path.relpath(caller_filename, BASE_DIR)
 
     return f'called from {caller_name} in {relative_path}:{caller_lineno}'
+
+
+def get_caller_name() -> str:
+    """
+    Returns the name of the view function that directly called this method.
+
+    This skips the first frame (this function) and returns the caller's name,
+    unwrapping common decorators like @api_view to reveal the original view name.
+    """
+    frame = inspect.currentframe()
+    if frame is not None:
+        frame = frame.f_back  # Go up one frame to the caller
+        if frame is not None:
+            func_name = frame.f_code.co_name
+
+            # Attempt to unwrap common decorator patterns
+            maybe_self = frame.f_locals.get('self') or frame.f_locals.get('func') or frame.f_locals.get('view_func')
+            if maybe_self and hasattr(maybe_self, '__name__'):
+                return maybe_self.__name__
+
+            return func_name
+
+    return "unknown"
