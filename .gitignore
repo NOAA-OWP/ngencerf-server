@@ -5,7 +5,7 @@ __pycache__/
 # Virtual Envrionments
 venv*
 *.venv*
-cerfServer/.env
+cerfServer/.env*
 cerfServer/local_settings.py
 
 # OS generated files
@@ -24,7 +24,6 @@ logs/
 data
 .aws_credentials
 .gitlab_token
-ngencerf_services.override.env
 postgres_db.override.env
 
 .load_static

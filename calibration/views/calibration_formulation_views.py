@@ -207,7 +207,8 @@ def save_formulation_tab(request) -> Response:
     if error_return:
         return error_return
 
-    run.user_formulation_name = validator.get('formulation_name')
+    if not run.gage:
+        return ResponseError('Gage must be specified before selecting formulation')
 
     # Validate modules and formulation constraints
     error_message = validate_modules(new_module_names)
@@ -234,8 +235,16 @@ def save_formulation_tab(request) -> Response:
 
     # Fetch all formulations and determine changes
     existing_formulations_qs = CalibrationFormulation.objects.filter(calibration_run=run)
-    existing_formulations_list = list(existing_formulations_qs.select_related('module'))
-    existing_module_names = {f.module.name for f in existing_formulations_list}
+    existing_formulations_list = list(existing_formulations_qs.only("id", "module_id"))
+
+    existing_module_ids = {f.module_id for f in existing_formulations_list}
+
+    modules_by_id = get_cached_modules_by_id()
+    existing_module_names = {
+        modules_by_id[mid].name
+        for mid in existing_module_ids
+        if mid in modules_by_id
+    }
 
     # Determine which modules to delete and add
     to_be_added = new_module_names - existing_module_names
@@ -247,17 +256,30 @@ def save_formulation_tab(request) -> Response:
             logger.info(f"Deleting unused modules: {to_be_unused}")
             delete_unused_formulations(to_be_unused, run)
 
-        # Add new formulations
+        # Refresh the list after inserts/deletes
+        existing_module_ids = set(
+            CalibrationFormulation.objects
+            .filter(calibration_run=run)
+            .values_list("module_id", flat=True)
+        )
+
+        to_create = []
         for module_name in to_be_added:
-            module_instance = get_cached_module_by_name(module_name)
-            # Only create if it doesn't already exist to avoid expensive indexing
-            if not any(f.module_id == module_instance.id for f in existing_formulations_list):
-                CalibrationFormulation.objects.create(calibration_run=run, module=module_instance)
+            m = get_cached_module_by_name(module_name)
+            if m and m.id not in existing_module_ids:
+                to_create.append(CalibrationFormulation(calibration_run=run, module=m))
+
+        if to_create:
+            CalibrationFormulation.objects.bulk_create(to_create, ignore_conflicts=True)
+
+        # Refresh formulations after delete/add
+        existing_formulations_qs = CalibrationFormulation.objects.filter(calibration_run=run)
+        existing_formulations_list = list(existing_formulations_qs.select_related('module'))
 
         # Identify formulations without any calibration parameters, in case there was an error retrieving them
         param_formulation_ids = set(
             CalibrationParameter.objects
-            .filter(calibration_formulation__in=existing_formulations_list)
+            .filter(calibration_formulation__calibration_run=run)
             .values_list('calibration_formulation_id', flat=True)
         )
 
@@ -271,6 +293,7 @@ def save_formulation_tab(request) -> Response:
         if required_formulations_qs.exists() and run.gage:
             logger.info(f"Fetching metadata for modules: {list(to_be_added)}")
             try:
+                # TODO Need to move ths outside of the atomic transaction
                 # Append new errors to the existing list
                 eds_errors.extend(get_module_metadata_from_data_services(run, required_formulations_qs))
             except DataServicesException as e:
@@ -344,12 +367,9 @@ def delete_unused_formulations(to_delete_modules: set[str], run: CalibrationRun)
     ).only("id")
 
     # Delete CalibrationParameters related to the formulations_to_delete
-    param_qs = CalibrationParameter.objects.filter(calibration_formulation__in=formulations_to_delete_qs)
-    while True:
-        batch_ids = list(param_qs.values_list("id", flat=True)[:500])
-        if not batch_ids:
-            break
-        CalibrationParameter.objects.filter(id__in=batch_ids).delete()
+    CalibrationParameter.objects.filter(
+        calibration_formulation__in=formulations_to_delete_qs
+    ).delete()
 
     # Finally, delete the formulations
     formulations_to_delete_qs.delete()
@@ -362,9 +382,11 @@ def validate_modules(module_names: set[str]) -> str | None:
     :param module_names: A set of module names to validate.
     :return: An error message if any module name is invalid; otherwise, None.
     """
-    valid_names = {name for name in module_names if get_cached_module_by_name(name)}
-    if module_names - valid_names:
-        return f'Invalid modules - {module_names - valid_names}'
+    modules_by_id = get_cached_modules_by_id()
+    modules_by_name = {m.name: m for m in modules_by_id.values()}
+    invalid = module_names - set(modules_by_name.keys())
+    if invalid:
+        return f"Invalid modules - {invalid}"
     return None
 
 

@@ -11,7 +11,7 @@
 #   id
 #   gage_id
 #   status
-#   user_formulation_name
+#   job_name
 #   calibration_start_period
 #   calibration_end_period
 #   submit_date

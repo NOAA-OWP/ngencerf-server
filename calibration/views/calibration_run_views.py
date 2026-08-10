@@ -3,6 +3,7 @@ import logging
 import os
 from datetime import datetime, timezone
 
+import requests
 from django.conf import settings
 from django.db import transaction
 from django.forms import model_to_dict
@@ -13,50 +14,77 @@ from rest_framework.decorators import api_view
 from rest_framework.request import Request
 from rest_framework.response import Response
 
-from calibration.enums import StatusEnum
+from calibration.enums import StatusEnum, ValidationType
 from calibration.enums_vanilla import JobType, SecondaryDataEnum
-from calibration.models import Iteration, ValidationRun, ForecastRun, CalibrationRun, Status, ColdStartRun
+from calibration.models import Iteration, ValidationRun, ForecastRun, CalibrationRun, Status, ColdStartRun, VerificationRun
+from calibration.models.base_run import BaseRun
 from calibration.run_util.run_common import cancel_job_common, submit_job
-from calibration.run_util.run_ngen_cal_pw import SlurmStatusEnum, run_calibration_job_callback_pw, run_validation_job_callback_pw, \
+from calibration.run_util.run_ngen_cal_pw import SlurmCallbackStatusEnum, run_calibration_job_callback_pw, run_validation_job_callback_pw, \
     run_forecast_job_callback_pw, run_cold_start_job_callback_pw, run_verification_job_callback_pw
 from calibration.util.calibration_validators import CalibrationRunSerializer, GenericResponseSerializer, \
     ErrorResponseSerializer, ReportIterationSerializer, SubmitCalibrationJobResponseSerializer, GetIterationsResponseSerializer, \
     CalibrationJobSlurmCallbackRequestSerializer, ValidationJobSlurmCallbackRequestSerializer, EmptySerializer, \
-    GetStatusRequestSerializer, GetStatusResponseSerializer, GetStatusForComparisonRequestSerializer, GetStatusForComparisonResponseSerializer, \
+    GetStatusForCalibrationResponseSerializer, GetStatusForComparisonRequestSerializer, GetStatusForComparisonResponseSerializer, \
     CalibrationOrValidationOrColdStartOrForecastOrVerificationRunSerializer, ForecastJobSlurmCallbackRequestSerializer, CancelJobResponseSerializer, \
-    ValidationRunSerializer, GenericResponseSerializerWithValidator, RunCalibrationJob, MPINodesRulesSerializer, MPINodesRulesResponseSerializer, \
-    ColdStartJobSlurmCallbackRequestSerializer, VerificationJobSlurmCallbackRequestSerializer
+    ValidationRunSerializer, GenericResponseSerializerWithValidator, RunCalibrationJob, ColdStartJobSlurmCallbackRequestSerializer, \
+    VerificationJobSlurmCallbackRequestSerializer, GetStatusForValidationResponseSerializer, \
+    GetStatusForForecastResponseSerializer, GetStatusForVerificationResponseSerializer, GetStatusRequestSerializer
 from calibration.views import ngen_cal_input
 from calibration.views.calibration_secondary_data_views import generate_secondary_ts_data
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import ResponseError, get_calibration_run, handle_exceptions, validate_response, validate_request, \
     generate_custom_token, TOKEN_SLURM_SCOPE, get_validation_run, get_forecast_run, get_user_email, \
-    get_job_description, get_elapsed_str, readonly_transaction, truncate_large_fields, auth_scope_required, get_cold_start_run, get_verification_run, \
-    join_with_or
+    get_job_description, get_elapsed_str, readonly_transaction, auth_scope_required, get_cold_start_run, get_verification_run, \
+    join_with_or, get_calibration_runs_bulk
 from calibration.views.end_of_job_processing import read_calibration_output
 
 logger = logging.getLogger(__name__)
 
 
-def parse_failure_messages(value):
+def normalize_failure_messages(value) -> list[dict]:
     """
-    Parse a failure_messages field:
-    - Return None if the value is None.
-    - If it's JSON, return the parsed object.
-    - Otherwise, return the raw string.
+    Normalize failure_messages into a canonical list[dict] form.
+
+    Accepts:
+      - None
+      - JSON string (dict or list)
+      - dict
+      - list
+      - legacy string
+
+    Returns:
+      - list[dict]
     """
     if value is None:
-        return None
-    try:
-        return json.loads(value)
-    except (TypeError, json.JSONDecodeError):
+        return []
+
+    # Parse JSON if needed
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return [{
+                "source": "legacy",
+                "message": value,
+            }]
+
+    if isinstance(value, dict):
+        return [value]
+
+    if isinstance(value, list):
         return value
+
+    # Defensive fallback
+    return [{
+        "source": "unknown",
+        "message": str(value),
+    }]
 
 
 @extend_schema(
     request=GetStatusRequestSerializer,
     responses={
-        200: GetStatusResponseSerializer,
+        200: GetStatusForCalibrationResponseSerializer,
         400: OpenApiResponse(
             response=ErrorResponseSerializer,
             description="Validation error or parsing error"
@@ -72,12 +100,13 @@ def parse_failure_messages(value):
 @handle_exceptions
 def get_status(request: Request) -> Response:
     """
-    Retrieves the status of a calibration job, including associated validation and forecast jobs.
+    Retrieves the status of a calibration, validation, forecast, or verification job.
     Optionally includes performance metrics based on the request parameters.
     Runs in READ ONLY mode to avoid locking contention.
 
-    :param request: HTTP request containing calibration run details.
-    :return: JSON response with the status and associated job details.
+    Read-heavy operations are executed inside a readonly transaction to minimize
+    locking. If Slurm reconciliation is required, the necessary database update
+    is performed outside the readonly transaction.
     """
     data = request.data
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
@@ -87,40 +116,153 @@ def get_status(request: Request) -> Response:
         return error_return
 
     calibration_run_id = validator.get('calibration_run_id')
+    validation_run_id = validator.get('validation_run_id')
+    forecast_run_id = validator.get('forecast_run_id')
+    verification_run_id = validator.get('verification_run_id')
+
     include_performance_metrics = validator.get('include_performance_metrics')
 
-    # All DB access below is read-only
+    if calibration_run_id:
+        serializer_class = GetStatusForCalibrationResponseSerializer
+    elif validation_run_id:
+        serializer_class = GetStatusForValidationResponseSerializer
+    elif forecast_run_id:
+        serializer_class = GetStatusForForecastResponseSerializer
+    else:
+        serializer_class = GetStatusForVerificationResponseSerializer
+
+    # Values captured during readonly phase
+    run = None
+    needs_reconcile = False
+    sacct_status = None
+
+    # ─────────────────────────────────────────────────────────────
+    # READ-ONLY PHASE
+    # ─────────────────────────────────────────────────────────────
     with readonly_transaction():
-        calibration_run, error_return = get_calibration_run(
-            calibration_run_id,
-            request.user,
-            run_status=list(StatusEnum)
-        )
-        if error_return:
-            return error_return
+        if calibration_run_id:
+            run, error_return = get_calibration_run(
+                calibration_run_id, request.user, run_status=list(StatusEnum)
+            )
+            if error_return:
+                return error_return
 
-        # Conditionally retrieve calibration performance metrics
-        calibration_metrics = (
-            get_performance_metrics(calibration_run.performance_metrics)
-            if should_include_metrics(calibration_run.status, include_performance_metrics)
-            else None
-        )
+            logger.info('Calling check_slurm_reconciliation')
+            needs_reconcile, sacct_status = check_slurm_reconciliation(run)
+            logger.info(f"Needs_reconcile={needs_reconcile} sacct_status={sacct_status}")
 
-        # --- Validation runs ---
-        validation_runs = (
-            ValidationRun.objects
-            .filter(calibration_run=calibration_run)
-            .select_related("status")
-            .prefetch_related("performance_metrics")
-        )
+            response = get_status_for_calibration(run, include_performance_metrics)
 
-        # --- Forecast runs ---
-        forecast_runs = (
-            ForecastRun.objects
-            .filter(calibration_run=calibration_run)
-            .select_related("status", "configuration", "cold_start_run__status")
-            .prefetch_related("performance_metrics", "cold_start_run__performance_metrics")
+        elif validation_run_id:
+            run, error_return = get_validation_run(
+                validation_run_id, request.user, run_status=list(StatusEnum)
+            )
+            if error_return:
+                return error_return
+
+            needs_reconcile, sacct_status = check_slurm_reconciliation(run)
+            response = get_status_for_validation(run, include_performance_metrics)
+
+        elif forecast_run_id:
+            # Handle cold start
+            run, error_return = get_forecast_run(
+                forecast_run_id, request.user, run_status=list(StatusEnum)
+            )
+            if error_return:
+                return error_return
+
+            needs_reconcile, sacct_status = check_slurm_reconciliation(run)
+            response = get_status_for_forecast(run, include_performance_metrics)
+
+        else:
+            run, error_return = get_verification_run(
+                verification_run_id, request.user, run_status=list(StatusEnum)
+            )
+            if error_return:
+                return error_return
+
+            needs_reconcile, sacct_status = check_slurm_reconciliation(run)
+            response = get_status_for_verification(run, include_performance_metrics)
+
+    # TODO Can we combine these?
+    # ---------------------------------------------------
+    # WRITE-CAPABLE PHASE (calibration only, conditional)
+    # ---------------------------------------------------
+    if calibration_run_id:
+        if run.status in [StatusEnum.SAVED.db_instance, StatusEnum.READY.db_instance]:
+            error_object, _ = ngen_cal_input.ready_to_run(run)
+            if error_object:
+                # mutate response dict only, not DB objects here
+                if error_object.has_warnings():
+                    response["warnings"] = error_object.warnings
+                if error_object.has_errors():
+                    response["errors"] = error_object.errors
+    # ─────────────────────────────────────────────────────────────
+    # WRITE PHASE (ONLY IF NECESSARY)
+    # ─────────────────────────────────────────────────────────────
+    if needs_reconcile:
+        logger.info('reconciling')
+
+        with transaction.atomic():
+            # Re-fetch the row outside readonly_transaction before mutating
+            run = type(run).objects.select_for_update().get(id=run.id)
+            apply_slurm_reconciliation(run, sacct_status)
+            # Update some fields that were placed by get_status_for_xxx
+            response["status"] = StatusEnum.SERVER_ERROR.value
+            response["message"] = (
+                f"{get_job_description(run)} status updated to SERVER_ERROR "
+                f"due to Slurm inconsistency"
+            )
+            response["failure_messages"] = normalize_failure_messages(run.failure_messages)
+
+    response_validator, error_response = validate_response(serializer_class, response)
+    if error_response:
+        return error_response
+
+    logger.debug(
+        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - '
+        f'{json.dumps(response_validator.data)}'
+    )
+
+    return Response(response_validator.data)
+
+
+def get_status_for_calibration(calibration_run: CalibrationRun, include_performance_metrics: bool) -> dict:
+    """
+    Return the current status of a single CalibrationRun.
+
+    This includes:
+    - Core calibration timing and status fields
+    - Failure messages (if any)
+    - Performance metrics (only if requested and job is DONE or FAILED)
+    - Status summaries for associated BEST and CONTROL ValidationRuns
+
+    All database access is read-only and executed inside a readonly transaction
+    to avoid write contention.
+
+    :param calibration_run: The CalibrationRun instance to inspect.
+    :param include_performance_metrics: Whether to include performance metrics
+        when the run status allows it.
+    :return: A dict suitable for GetStatusForCalibrationResponseSerializer.
+    """
+
+    # Conditionally retrieve calibration performance metrics
+    calibration_metrics = (
+        get_performance_metrics(calibration_run.performance_metrics)
+        if should_include_metrics(calibration_run.status, include_performance_metrics)
+        else None
+    )
+
+    # --- Validation runs - only BEST and CONTROL ---
+    validation_runs = (
+        ValidationRun.objects
+        .filter(
+            calibration_run_id=calibration_run.id,
+            validation_type__in=[ValidationType.VALID_CONTROL.value, ValidationType.VALID_BEST.value]
         )
+        .select_related("status", "performance_metrics")
+        .order_by("id")
+    )
 
     # --- Validation responses ---
     validation_response = []
@@ -133,80 +275,28 @@ def get_status(request: Request) -> Response:
             'submit_date': validation_run.submit_date,
             'sent_date': validation_run.sent_date,
             'run_start': validation_run.run_start,
-            'run_end': validation_run.run_end
+            'run_end': validation_run.run_end,
         }
 
-        fm = parse_failure_messages(validation_run.failure_messages)
-        if fm:
-            validation_data['failure_messages'] = fm
+        validation_failure_message = normalize_failure_messages(validation_run.failure_messages)
+        if validation_failure_message:
+            validation_data['failure_messages'] = validation_failure_message
 
         if validation_run.run_end and validation_run.submit_date:
             validation_data['elapsed_time'] = validation_run.run_end - validation_run.submit_date
-        else:
-            validation_data['elapsed_time'] = None
 
-        if should_include_metrics(validation_run.status, include_performance_metrics):
-            validation_data['performance_metrics'] = get_performance_metrics(validation_run.performance_metrics)
+        validation_metrics = (
+            get_performance_metrics(validation_run.performance_metrics)
+            if should_include_metrics(validation_run.status, include_performance_metrics)
+            else None
+        )
+        if validation_metrics:
+            validation_data['performance_metrics'] = validation_metrics
 
         validation_response.append(validation_data)
 
-    # --- Forecast responses ---
-    forecast_response = []
-    for forecast_run in forecast_runs:
-        forecast_data = {
-            'forecast_run_id': forecast_run.id,
-            'status': forecast_run.status.name,
-            'configuration': forecast_run.configuration.name,
-            'cycle_date': forecast_run.cycle_date,
-            'submit_date': forecast_run.submit_date,
-            'sent_date': forecast_run.sent_date,
-            'run_start': forecast_run.run_start,
-            'run_end': forecast_run.run_end
-        }
-
-        fm = parse_failure_messages(forecast_run.failure_messages)
-        if fm:
-            forecast_data['failure_messages'] = fm
-
-        if forecast_run.run_end and forecast_run.submit_date:
-            forecast_data['elapsed_time'] = forecast_run.run_end - forecast_run.submit_date
-        else:
-            forecast_data['elapsed_time'] = None
-
-        if should_include_metrics(forecast_run.status, include_performance_metrics):
-            forecast_data['performance_metrics'] = get_performance_metrics(forecast_run.performance_metrics)
-
-        # --- Cold start ---
-        cold_start_run = getattr(forecast_run, "cold_start_run", None)
-        if cold_start_run:
-            cold_start_data = {
-                'cold_start_run_id': cold_start_run.id,
-                'status': cold_start_run.status.name,
-                'submit_date': cold_start_run.submit_date,
-                'sent_date': cold_start_run.sent_date,
-                'run_start': cold_start_run.run_start,
-                'run_end': cold_start_run.run_end,
-            }
-
-            fm_cs = parse_failure_messages(cold_start_run.failure_messages)
-            if fm_cs:
-                cold_start_data['failure_messages'] = fm_cs
-
-            if cold_start_run.run_end and cold_start_run.submit_date:
-                cold_start_data['elapsed_time'] = cold_start_run.run_end - cold_start_run.submit_date
-            else:
-                cold_start_data['elapsed_time'] = None
-
-            if should_include_metrics(cold_start_run.status, include_performance_metrics):
-                cold_start_data['performance_metrics'] = get_performance_metrics(cold_start_run.performance_metrics)
-
-            forecast_data['cold_start_run'] = cold_start_data
-
-        forecast_response.append(forecast_data)
-
-    # --- Main response ---
-    response = {
-        'message': f'Calibration Job {calibration_run.id}, status is {calibration_run.status.name}',
+    calibration_data = {
+        'message': f'{get_job_description(calibration_run)}, status is {calibration_run.status.name}',
         'calibration_run_id': calibration_run.id,
         'status': calibration_run.status.name,
         'submit_date': calibration_run.submit_date,
@@ -214,46 +304,227 @@ def get_status(request: Request) -> Response:
         'run_start': calibration_run.run_start,
         'run_end': calibration_run.run_end,
         'validations': validation_response,
-        'forecasts': forecast_response
     }
 
-    fm_cal = parse_failure_messages(calibration_run.failure_messages)
-    if fm_cal:
-        response['failure_messages'] = fm_cal
+    calibration_failure_message = normalize_failure_messages(calibration_run.failure_messages)
+    if calibration_failure_message:
+        calibration_data['failure_messages'] = calibration_failure_message
 
     if calibration_run.run_end and calibration_run.submit_date:
-        response['elapsed_time'] = calibration_run.run_end - calibration_run.submit_date
-    else:
-        response['elapsed_time'] = None
+        calibration_data['elapsed_time'] = calibration_run.run_end - calibration_run.submit_date
 
-    # Conditionally add calibration run performance metrics to response if requested and status is DONE or FAIL
+    # Conditionally add calibration run performance metrics to calibration_data if requested and status is DONE or FAIL
     if calibration_metrics:
-        response['performance_metrics'] = calibration_metrics
+        calibration_data['performance_metrics'] = calibration_metrics
 
-    # Add error/warning messages if applicable
-    if calibration_run.status in [StatusEnum.SAVED.db_instance, StatusEnum.READY.db_instance]:
-        error_object, _ = ngen_cal_input.ready_to_run(calibration_run)
-        if error_object:
-            if error_object.has_warnings():
-                response['warnings'] = error_object.warnings
-            if error_object.has_errors():
-                response['errors'] = error_object.errors
+    return calibration_data
 
-    response_validator, error_response = validate_response(
-        GetStatusResponseSerializer,
-        response,
-        fields_to_truncate=['validations', 'forecasts'],
-        max_length=10
+
+def get_status_for_validation(validation_run: ValidationRun, include_performance_metrics: bool) -> dict:
+    """
+    Return the current status of a single ValidationRun.
+
+    This includes:
+    - Validation timing and status fields
+    - Failure messages (if any)
+    - Performance metrics (only if requested and job is DONE or FAILED)
+
+    All database access is read-only and executed inside a readonly transaction.
+
+    :param validation_run: The ValidationRun instance to inspect.
+    :param include_performance_metrics: Whether to include performance metrics
+        when the run status allows it.
+    :return: A dict suitable for GetStatusForValidationResponseSerializer.
+    """
+
+    # Conditionally retrieve performance metrics
+    validation_metrics = (
+        get_performance_metrics(validation_run.performance_metrics)
+        if should_include_metrics(validation_run.status, include_performance_metrics)
+        else None
     )
-    if error_response:
-        return error_response
 
-    logger.debug(
-        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - '
-        f'{json.dumps(truncate_large_fields(response_validator.data, fields_to_truncate=["validations", "forecasts"], max_length=10))}'
+    validation_data = {
+        'message': f'{get_job_description(validation_run)}, status is {validation_run.status.name}',
+        'calibration_run_id': validation_run.calibration_run.id,
+        'validation_run_id': validation_run.id,
+        'status': validation_run.status.name,
+        'validation_type': validation_run.validation_type,
+        'iteration_num': validation_run.iteration_num,
+        'submit_date': validation_run.submit_date,
+        'sent_date': validation_run.sent_date,
+        'run_start': validation_run.run_start,
+        'run_end': validation_run.run_end
+    }
+
+    validation_failure_message = normalize_failure_messages(validation_run.failure_messages)
+    if validation_failure_message:
+        validation_data['failure_messages'] = validation_failure_message
+
+    if validation_run.run_end and validation_run.submit_date:
+        validation_data['elapsed_time'] = validation_run.run_end - validation_run.submit_date
+
+    # Conditionally add calibration run performance metrics to calibration_data if requested and status is DONE or FAIL
+    if validation_metrics:
+        validation_data['performance_metrics'] = validation_metrics
+
+    return validation_data
+
+
+def get_status_for_forecast(forecast_run: ForecastRun, include_performance_metrics: bool) -> dict:
+    """
+    Return the current status of a single ForecastRun.
+
+    This includes:
+    - Forecast timing, configuration, and status fields
+    - Failure messages (if any)
+    - Performance metrics (only if requested and job is DONE or FAILED)
+    - Cold start run status and metrics, if a cold start exists
+
+    All database access is read-only and executed inside a readonly transaction.
+
+    :param forecast_run: The ForecastRun instance to inspect.
+    :param include_performance_metrics: Whether to include performance metrics
+        when the run status allows it.
+    :return: A dict suitable for GetStatusForForecastResponseSerializer.
+    """
+
+    forecast_data = {
+        'message': f'{get_job_description(forecast_run)}, status is {forecast_run.status.name}',
+        'forecast_run_id': forecast_run.id,
+        'calibration_run_id': forecast_run.calibration_run_id,
+        'status': forecast_run.status.name,
+        'configuration': forecast_run.configuration.name,
+        'cycle_date': forecast_run.cycle_date,
+        'submit_date': forecast_run.submit_date,
+        'sent_date': forecast_run.sent_date,
+        'run_start': forecast_run.run_start,
+        'run_end': forecast_run.run_end
+    }
+
+    forecast_failure_message = normalize_failure_messages(forecast_run.failure_messages)
+    if forecast_failure_message:
+        forecast_data['failure_messages'] = forecast_failure_message
+
+    if forecast_run.run_end and forecast_run.submit_date:
+        forecast_data['elapsed_time'] = forecast_run.run_end - forecast_run.submit_date
+
+    forecast_metrics = (
+        get_performance_metrics(forecast_run.performance_metrics)
+        if should_include_metrics(forecast_run.status, include_performance_metrics)
+        else None
     )
+    if forecast_metrics:
+        forecast_data['performance_metrics'] = forecast_metrics
 
-    return Response(response_validator.data)
+    # Get the cold start run, if it's there
+    cold_start_run = forecast_run.cold_start_run
+    if cold_start_run:
+        cold_start_data = {
+            'cold_start_run_id': cold_start_run.id,
+            'cold_start_date': cold_start_run.cold_start_date,
+            'status': cold_start_run.status.name,
+            'submit_date': cold_start_run.submit_date,
+            'sent_date': cold_start_run.sent_date,
+            'run_start': cold_start_run.run_start,
+            'run_end': cold_start_run.run_end,
+        }
+
+        cold_start_failure_message = normalize_failure_messages(cold_start_run.failure_messages)
+        if cold_start_failure_message:
+            cold_start_data['failure_messages'] = cold_start_failure_message
+
+        if cold_start_run.run_end and cold_start_run.submit_date:
+            cold_start_data['elapsed_time'] = cold_start_run.run_end - cold_start_run.submit_date
+
+        cold_start_metrics = (
+            get_performance_metrics(cold_start_run.performance_metrics)
+            if should_include_metrics(cold_start_run.status, include_performance_metrics)
+            else None
+        )
+        if cold_start_metrics:
+            cold_start_data['performance_metrics'] = cold_start_metrics
+
+        forecast_data['cold_start_run'] = cold_start_data
+
+    return forecast_data
+
+
+def get_status_for_verification(verification_run: VerificationRun, include_performance_metrics: bool) -> dict:
+    """
+    Return the current status of a single VerificationRun.
+
+    This includes:
+    - Verification timing and status fields
+    - Failure messages (if any)
+    - Performance metrics (only if requested and job is DONE or FAILED)
+    - A summarized view of the associated ForecastRun
+
+    All database access is read-only and executed inside a readonly transaction.
+
+    :param verification_run: The VerificationRun instance to inspect.
+    :param include_performance_metrics: Whether to include performance metrics
+        when the run status allows it.
+    :return: A dict suitable for GetStatusForVerificationResponseSerializer.
+    """
+
+    verification_data = {
+        'message': f'{get_job_description(verification_run)}, status is {verification_run.status.name}',
+        'verification_run_id': verification_run.id,
+        'calibration_run_id': verification_run.forecast_run.calibration_run_id,
+        'status': verification_run.status.name,
+        'submit_date': verification_run.submit_date,
+        'sent_date': verification_run.sent_date,
+        'run_start': verification_run.run_start,
+        'run_end': verification_run.run_end
+    }
+
+    verification_failure_message = normalize_failure_messages(verification_run.failure_messages)
+    if verification_failure_message:
+        verification_data['failure_messages'] = verification_failure_message
+
+    if verification_run.run_end and verification_run.submit_date:
+        verification_data['elapsed_time'] = verification_run.run_end - verification_run.submit_date
+
+    verification_metrics = (
+        get_performance_metrics(verification_run.performance_metrics)
+        if should_include_metrics(verification_run.status, include_performance_metrics)
+        else None
+    )
+    if verification_metrics:
+        verification_data['performance_metrics'] = verification_metrics
+
+    # Get the forecast run, which should always be there
+    forecast_run = verification_run.forecast_run
+    forecast_data = {
+        'forecast_run_id': forecast_run.id,
+        'status': forecast_run.status.name,
+        'configuration': forecast_run.configuration.name,
+        'cycle_date': forecast_run.cycle_date,
+        'submit_date': forecast_run.submit_date,
+        'sent_date': forecast_run.sent_date,
+        'run_start': forecast_run.run_start,
+        'run_end': forecast_run.run_end,
+    }
+
+    forecast_failure_message = normalize_failure_messages(forecast_run.failure_messages)
+    if forecast_failure_message:
+        forecast_data['failure_messages'] = forecast_failure_message
+
+    if forecast_run.run_end and forecast_run.submit_date:
+        forecast_data['elapsed_time'] = forecast_run.run_end - forecast_run.submit_date
+
+    forecast_metrics = (
+        get_performance_metrics(forecast_run.performance_metrics)
+        if should_include_metrics(forecast_run.status, include_performance_metrics)
+        else None
+    )
+    if forecast_metrics:
+        forecast_data['performance_metrics'] = forecast_metrics
+
+    verification_data['forecast_run'] = forecast_data
+
+    return verification_data
 
 
 @extend_schema(
@@ -298,45 +569,47 @@ def get_status_for_comparison(request: Request) -> Response:
     }
 
     with readonly_transaction():
+        runs_by_id, errors_by_id = get_calibration_runs_bulk(
+            calibration_run_ids=calibration_run_ids,
+            user=request.user,
+            run_status=list(StatusEnum),
+            include_archived=False,
+        )
+
         for calibration_run_id in calibration_run_ids:
-            calibration_error = None
+            if calibration_run_id in errors_by_id:
+                response['errors'].append({
+                    'calibration_run_id': calibration_run_id,
+                    'message': errors_by_id[calibration_run_id],
+                })
+                continue
 
-            calibration_run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=list(StatusEnum))
-            if error_return:
-                calibration_error = {'calibration_run_id': calibration_run_id, 'message': error_return}
+            calibration_run = runs_by_id[calibration_run_id]
 
-            if not calibration_error:
-                calibration_metrics = (
-                    get_performance_metrics(calibration_run.performance_metrics)
-                    if calibration_run.status in [StatusEnum.DONE.db_instance, StatusEnum.FAILED.db_instance]
-                    else None
+            calibration_metrics = (
+                get_performance_metrics(calibration_run.performance_metrics)
+                if calibration_run.status in [StatusEnum.DONE.db_instance, StatusEnum.FAILED.db_instance]
+                else None
+            )
+            # Prepare the response for this job
+            status_response = {
+                'calibration_run_id': calibration_run.id,
+                'job_name': calibration_run.job_name,
+                'status': calibration_run.status.name,
+                'submit_date': calibration_run.submit_date,
+                'run_start': calibration_run.run_start,
+                'run_end': calibration_run.run_end,
+            }
+
+            if calibration_run.run_end and calibration_run.submit_date:
+                status_response['elapsed_time'] = (
+                        calibration_run.run_end - calibration_run.submit_date
                 )
-                # Prepare the response for this job
-                status_response = {
-                    'calibration_run_id': calibration_run.id,
-                    'formulation_name': calibration_run.user_formulation_name,
-                    'status': calibration_run.status.name,
-                    'submit_date': calibration_run.submit_date,
-                    'run_start': calibration_run.run_start,
-                    'run_end': calibration_run.run_end,
-                    'elapsed_time': (
-                        calibration_run.performance_metrics.run_time
-                        if calibration_run.performance_metrics
-                        else (
-                            calibration_run.run_end - calibration_run.run_start
-                            if calibration_run.run_end and calibration_run.run_start
-                            else None
-                        )
-                    ),
-                }
 
-                if calibration_metrics:
-                    status_response['performance_metrics'] = calibration_metrics
+            if calibration_metrics:
+                status_response['performance_metrics'] = calibration_metrics
 
-                response['statuses'].append(status_response)
-
-            else:
-                response['errors'].append(calibration_error)
+            response['statuses'].append(status_response)
 
     response_validator, error_response = validate_response(GetStatusForComparisonResponseSerializer, response)
     if error_response:
@@ -547,38 +820,6 @@ def process_swe_timeseries(request: Request) -> Response:
     return Response(response_validator.data)
 
 
-@api_view(['GET', 'POST'])
-@handle_exceptions
-def update_mpi_rules(request: Request) -> Response:
-    """
-    Undocumented endpoint for updating the MPI rules
-    """
-    data = request.data if request.method == 'POST' else request.query_params.dict()
-
-    logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
-    validator, error_return = validate_request(MPINodesRulesSerializer, data)
-    if error_return:
-        return error_return
-
-    mpi_rules = validator.get('mpi_rules')
-    if mpi_rules:
-        ngen_cal_input.MPI_NODE_RULES = mpi_rules
-
-    message = "Updated MPI Rules" if mpi_rules else "Current MPI Rules"
-    response = {
-        'message': message,
-        'mpi_rules': ngen_cal_input.MPI_NODE_RULES
-    }
-
-    response_validator, error_response = validate_response(MPINodesRulesResponseSerializer, response)
-    if error_response:
-        return error_response
-    logger.debug(
-        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
-
-    return Response(response_validator.data)
-
-
 @extend_schema(
     request=ReportIterationSerializer,
     responses={
@@ -649,7 +890,12 @@ def report_iteration(request):
             logger.debug(f"Assigned new worker: '{worker_name}' #{worker_number}")
         else:
             # Use get() to fetch the latest iteration for the given worker_name and run
-            existing_iteration = Iteration.objects.filter(calibration_run=run, worker_name=worker_name).order_by('-iteration_num').first()
+            existing_iteration = (
+                Iteration.objects
+                .filter(calibration_run=run, worker_name=worker_name)
+                .only("worker_number")
+                .order_by('-iteration_num').first()
+            )
             if existing_iteration:
                 worker_number = existing_iteration.worker_number
             else:
@@ -777,6 +1023,7 @@ def cancel_job(request: Request) -> Response:
     calibration_run_id = validator.get('calibration_run_id')
     validation_run_id = validator.get('validation_run_id')
     forecast_run_id = validator.get('forecast_run_id')
+    verification_run_id = validator.get('verification_run_id')
 
     # Determine job type and retrieve the appropriate run instance
     if calibration_run_id:
@@ -791,6 +1038,14 @@ def cancel_job(request: Request) -> Response:
         run_type = JobType.VALIDATION.value
         run, error_return = get_validation_run(
             validation_run_id, request.user, run_status=[StatusEnum.RUNNING, StatusEnum.SUBMITTED]
+        )
+        if error_return:
+            return error_return
+
+    elif verification_run_id:
+        run_type = JobType.VERIFICATION.value
+        run, error_return = get_verification_run(
+            verification_run_id, request.user, run_status=[StatusEnum.RUNNING, StatusEnum.SUBMITTED]
         )
         if error_return:
             return error_return
@@ -874,29 +1129,35 @@ def cancel_job(request: Request) -> Response:
     return Response(response_validator.data)
 
 
-def resolve_job_data_dir(run: CalibrationRun) -> str:
+def map_path_to_host(path_to_normalize: str) -> str:
     """
-    Resolves the job data directory for the given CalibrationRun object, converting paths if necessary
-    based on the current settings.
+    Normalize a job path (directory or file path) based on the current settings.
 
-    :param run: The CalibrationRun object.
-    :return: The resolved host path to the job data directory as a plain string.
+    This is used to translate paths stored using the container mount point
+    (settings.NGEN_CAL_MOUNT_POINT) into the host path (settings.NGEN_CAL_DATA_PATH),
+    when those differ.
+
+    :param path_to_normalize: Absolute path under NGEN_CAL_MOUNT_POINT
+    :return: Normalized host path (or the input unchanged if no translation needed)
     :raises ValueError: If the path is not absolute or does not start with the expected root.
     """
-    container_job_data_dir: str = run.job_data_dir
+    if not path_to_normalize:
+        return path_to_normalize
 
     if settings.NGEN_CAL_DATA_PATH and settings.NGEN_CAL_DATA_PATH != settings.NGEN_CAL_MOUNT_POINT:
         # Ensure the absolute path starts with the old root
-        if not os.path.isabs(container_job_data_dir):
-            raise ValueError(f"The path '{container_job_data_dir}' is not absolute.")
-        if not container_job_data_dir.startswith(settings.NGEN_CAL_MOUNT_POINT):
-            raise ValueError(f"The path '{container_job_data_dir}' does not start with the old root '{settings.NGEN_CAL_MOUNT_POINT}'.")
+        if not os.path.isabs(path_to_normalize):
+            raise ValueError(f"The path '{path_to_normalize}' is not absolute.")
+        if not path_to_normalize.startswith(settings.NGEN_CAL_MOUNT_POINT):
+            raise ValueError(
+                f"The path '{path_to_normalize}' does not start with the old root '{settings.NGEN_CAL_MOUNT_POINT}'."
+            )
 
         # Replace the old root with the new root
-        relative_path = os.path.relpath(container_job_data_dir, start=settings.NGEN_CAL_MOUNT_POINT)
+        relative_path = os.path.relpath(path_to_normalize, start=settings.NGEN_CAL_MOUNT_POINT)
         return os.path.join(settings.NGEN_CAL_DATA_PATH, relative_path)
 
-    return container_job_data_dir
+    return path_to_normalize
 
 
 @extend_schema(
@@ -1083,20 +1344,20 @@ def handle_slurm_callback(request: Request, serializer_class, get_run_fn, job_en
 
     run_id = validator.get(next(k for k in validator.keys() if k.endswith("_id")))
     job_status = validator.get("job_status")
-    slurm_status = SlurmStatusEnum(job_status)
+    slurm_status = SlurmCallbackStatusEnum(job_status)
 
     # If Slurm is reporting that the job is now starting, we expect to be in Submitted status
     # For any other status changes, we should be Running or Submitted.  We allow Submitted just in case
     #  1) The job doesn't properly transition to Running
     #  2) To allow a submitted job to be canceled
-    expected_status = [StatusEnum.SUBMITTED] if slurm_status == SlurmStatusEnum.STARTING else [StatusEnum.RUNNING, StatusEnum.SUBMITTED]
+    expected_status = [StatusEnum.SUBMITTED] if slurm_status == SlurmCallbackStatusEnum.STARTING else [StatusEnum.RUNNING, StatusEnum.SUBMITTED]
 
     run, error_return = get_run_fn(run_id, None, run_status=expected_status)
     if error_return:
         return error_return
 
     job_description = f"{get_job_description(run)} (slurm_job_id: {run.slurm_job_id})"
-    if slurm_status == SlurmStatusEnum.STARTING:
+    if slurm_status == SlurmCallbackStatusEnum.STARTING:
         logger.info(f'{job_description} is starting')
         run.status = StatusEnum.RUNNING.db_instance
         run.run_start = datetime.now(timezone.utc)
@@ -1151,3 +1412,175 @@ def get_slurm_token(request: Request) -> Response:
         return error_return
 
     return Response({'access': generate_custom_token(request.user, TOKEN_SLURM_SCOPE)})
+
+
+def check_slurm_reconciliation(run: BaseRun) -> tuple[bool, str | None]:
+    """
+    Determine whether a run requires Slurm reconciliation.
+
+    A run is eligible for reconciliation only if:
+    - it has a slurm_job_id, and
+    - its DB status is active (RUNNING or SUBMITTED).
+
+    Reconciliation is needed when the DB says the job is active but Slurm no longer
+    reports it as active (squeue empty / job not present).
+
+    Race-condition exception:
+    - If Slurm reports the job as not active but sacct_status is "COMPLETED",
+      reconciliation is skipped. This indicates the job finished and the Slurm
+      callback is expected imminently, so the server status should be left unchanged.
+
+    Fallback behavior note:
+    - This relies on the Slurm callback to eventually arrive and update the run.
+      If callbacks are not reliably delivered in some environments, this logic
+      will need to be extended with a retry or timeout-based reconciliation path
+      (e.g., reconcile if the job remains COMPLETED in Slurm for longer than a
+      configured grace period).
+
+    This function performs no database writes and is safe to call inside a readonly transaction.
+
+    :param run: The run object (CalibrationRun / ValidationRun / ForecastRun / VerificationRun),
+        which must inherit from BaseRun.
+    :return: Tuple (needs_reconciliation, sacct_status)
+        - needs_reconciliation: True if the DB indicates an active job but Slurm indicates the job is not active
+          (excluding the COMPLETED race-condition exception).
+        - sacct_status: The terminal status reported by Slurm accounting (sacct), or None/UNKNOWN if indeterminate.
+    """
+    if not run.slurm_job_id:
+        return False, None
+
+    if run.status not in {
+        StatusEnum.SUBMITTED.db_instance,
+        StatusEnum.RUNNING.db_instance,
+    }:
+        return False, None
+
+    slurm_is_active, sacct_status = get_slurm_status(run.slurm_job_id)
+
+    logger.debug(
+        f"{get_job_description(run)}: "
+        f"Slurm active={slurm_is_active}, sacct_status={sacct_status}"
+    )
+
+    # Race-condition exception:
+    if not slurm_is_active and sacct_status == "COMPLETED":
+        logger.info(
+            f"{get_job_description(run)}: slurm inactive but sacct_status=COMPLETED; "
+            f"skipping reconciliation (awaiting callback)"
+        )
+        return False, sacct_status
+
+    if not slurm_is_active:
+        return True, sacct_status
+
+    return False, None
+
+
+def apply_slurm_reconciliation(run: BaseRun, sacct_status: str) -> None:
+    """
+    Escalate a run to SERVER_ERROR due to a Slurm/DB inconsistency.
+
+    This is used when the database indicates the run is active (RUNNING/SUBMITTED),
+    but Slurm indicates the job is no longer active. The run is moved to SERVER_ERROR
+    and a structured reconciliation entry is appended to failure_messages.
+
+    :param run: The run object to mutate (must inherit from BaseRun). This object is expected
+        to be re-fetched under a write-capable transaction (e.g., select_for_update()) by the caller.
+    :param sacct_status: The terminal status reported by Slurm accounting (sacct) for the job.
+    :return: None
+    """
+    original_status = run.status.name
+
+    message = (
+        f"Slurm job {run.slurm_job_id} not active while DB status was "
+        f"{original_status}; sacct_status={sacct_status}"
+    )
+
+    logger.error(f"{get_job_description(run)}: {message}")
+
+    # failure_messages is a TEXT field → treat as JSON string
+    existing = normalize_failure_messages(run.failure_messages)
+
+    existing.append({
+        "source": "slurm",
+        "type": "reconciliation",
+        "sacct_status": sacct_status,
+        "message": message,
+    })
+
+    run.status = StatusEnum.SERVER_ERROR.db_instance
+    run.failure_messages = json.dumps(existing)
+
+    run.save(update_fields=["status", "failure_messages"])
+
+
+def get_slurm_status(slurm_id: int) -> tuple[bool, str | None]:
+    """
+    Query the Slurm status service for the current status of a job.
+
+    Semantics:
+    - If squeue indicates the job is present/active, that is authoritative and the job is treated as active.
+    - If squeue is empty but sacct provides a terminal status, the job is treated as not active and the
+      terminal status is returned.
+    - If the response is non-200, not JSON, or missing usable fields, the job is treated as not active
+      with status "UNKNOWN" (conservative for reconciliation logic).
+
+    :param slurm_id: Slurm job ID to query.
+    :return: Tuple (is_active, sacct_status)
+        - is_active: True if the job is currently active (squeue authoritative), False otherwise.
+        - sacct_status: The terminal status from sacct when available, or "UNKNOWN"/None if indeterminate.
+    """
+    # ----------------------------------
+    # TODO Get rid of this debug code
+    FORCE_SLURM_INACTIVE = False
+    if FORCE_SLURM_INACTIVE:
+        logger.warning(
+            f"FORCE_SLURM_INACTIVE enabled — treating Slurm job {slurm_id} as inactive"
+        )
+        return False, "FORCED_ERROR"
+    # ------------------------------------
+
+    base_url = f"{settings.SLURM_URL.rstrip('/')}/{settings.SLURM_JOB_STATUS_ENDPOINT.lstrip('/')}"
+
+    # Query Slurm for the live job status
+    url = f"{base_url}?slurm_job_id={slurm_id}"
+
+    try:
+        resp = requests.get(url, timeout=10)
+
+        # Non-200 HTTP responses (including 404) are treated as unknown
+        if resp.status_code != 200:
+            logger.error(
+                f"Non-200 response from Slurm for job {slurm_id}: "
+                f"{resp.status_code}\n{resp.text}"
+            )
+            return False, "UNKNOWN"
+
+        # Try to parse JSON response
+        try:
+            data = resp.json()
+        except ValueError:
+            # Log the entire response text when not JSON
+            logger.error(
+                f"Invalid JSON response from Slurm for job {slurm_id}:\n{resp.text}"
+            )
+            return False, "UNKNOWN"
+
+        squeue_status = data.get("squeue")
+        sacct_status = data.get("sacct")
+
+        if squeue_status:
+            # Job still active → squeue authoritative
+            return True, squeue_status
+
+        if sacct_status:
+            # Job finished → sacct authoritative
+            return False, sacct_status
+
+        # Defensive fallback: no usable status provided
+        return False, "UNKNOWN"
+
+    except Exception as ex:
+        logger.exception(f"Error querying Slurm status for job {slurm_id}: {ex}")
+        # Safest assumption: job is gone, status indeterminate
+        return False, "UNKNOWN"

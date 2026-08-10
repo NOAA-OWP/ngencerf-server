@@ -7,7 +7,7 @@ from collections import deque
 from datetime import timedelta
 from itertools import groupby
 from operator import attrgetter
-from typing import Dict
+from typing import cast, Any
 
 import pandas as pd
 from django.db import transaction
@@ -17,16 +17,16 @@ from calibration.enums import OptimizationEnum, ValidationMetricPeriod, Validati
 from calibration.enums_vanilla import SecondaryDataEnum
 from calibration.models import Iteration, CalibrationRun, IterationMetric, IterationParameter, CalibrationParameter, ValidationRun, \
     PerformanceMetrics, ValidationMetrics, NWMRetrospectiveMetrics, IterationResult, ColdStartRun, ForecastRun, \
-    VerificationRun
+    VerificationRun, CalibrationFormulation
 from calibration.models.base_run import BaseRun
-from calibration.util.caching import have_LSTM
+from calibration.util.caching import have_LSTM, get_cached_modules_by_id
 from calibration.util.ngen_locations import get_realization_file_path, get_metrics_iteration_file, \
     get_objective_log_best_file, get_calibration_worker_path, get_global_best_params_file, get_validation_metrics_valid_control_file, \
     get_validation_metrics_valid_best_file, get_validation_metrics_valid_iteration_file, \
     get_validation_performance_file, get_calibration_performance_file, get_validation_metrics_nwm_retrospective_file, get_output_iteration_csv, \
     get_validation_special_performance_file, get_forecast_performance_file, get_verification_performance_file, \
     get_params_iteration_file, get_cold_start_performance_file
-from calibration.views.calibration_secondary_data_views import generate_secondary_ts_data
+from calibration.views.calibration_secondary_data_views import generate_secondary_ts_data, should_generate_swe, should_generate_soil_moisture
 from calibration.views.common import CerfException, get_job_description, find_validation_worker_with_matching_id
 
 logger = logging.getLogger(__name__)
@@ -34,10 +34,38 @@ logger = logging.getLogger(__name__)
 BULK_CREATE_BATCH_SIZE = 1000  # Define a reasonable batch size
 
 
+def to_float_or_nan(value: object) -> float:
+    """
+    Convert arbitrary CSV/pandas values to a float.
+
+    Missing, blank, or NA-like values are converted to NaN (not None) so
+    FloatField(null=False) constraints are satisfied.
+    """
+    # Fast-path for Python None
+    if value is None:
+        return float("nan")
+
+    # Handle pandas/numpy scalar NA safely (NaN, NA, NaT, etc.).
+    # cast(Any, ...) is for the type checker only; pd.isna accepts arbitrary objects at runtime.
+    try:
+        if pd.isna(cast(Any, value)):
+            return float("nan")
+    except Exception:
+        # Non-scalar / unexpected object; fall through to float(), which will raise if invalid
+        pass
+
+    # Treat blank or whitespace-only strings as missing
+    if isinstance(value, str) and not value.strip():
+        return float("nan")
+
+    # Normal numeric conversion (raises if invalid)
+    return float(value)
+
+
 def read_validation_output(validation_run: ValidationRun, failed_so_far: bool) -> None:
     """
-    Processes the output of a validation run by identifying the correct worker, retrieving performance metrics,
-    and updating the validation run's attributes.
+    Processes the output of a validation run by identifying the correct worker,
+    retrieving performance metrics, and updating the validation run's attributes.
 
     :param validation_run: The ValidationRun instance.
     :param failed_so_far: Indicates whether the job has failed up to this point.
@@ -86,13 +114,17 @@ def read_calibration_output(calibration_run: CalibrationRun, failed_so_far: bool
 
     logger.info(f"Processing output for {job_description}, status={calibration_run.status}")
 
+    already_processed = IterationMetric.objects.filter(
+        iteration__calibration_run=calibration_run
+    ).exists()
+
+    if already_processed:
+        raise CerfException(f"End of job processing has already been completed for {job_description}")
+
     with transaction.atomic():
         performance_metrics_file = get_calibration_performance_file(calibration_run)
         create_performance_metrics(calibration_run, performance_metrics_file)
-        calibration_run.save(update_fields=['performance_metrics', 'run_start'])
-
-        if IterationMetric.objects.filter(iteration__calibration_run=calibration_run).exists():
-            raise CerfException(f"End of job processing has already been completed for {job_description}")
+        calibration_run.save(update_fields=['performance_metrics'])
 
         if not failed_so_far:
             # Set the realization file path for the run
@@ -181,7 +213,7 @@ def create_performance_metrics(run: BaseRun, performance_metrics_file: str) -> N
         performance_metrics = PerformanceMetrics.objects.create(run_time=run_time)
 
     run.performance_metrics = performance_metrics
-    run.save(update_fields=['performance_metrics', 'run_start'])
+    run.save(update_fields=['performance_metrics'])
 
 
 def process_validation_metrics(run: ValidationRun | CalibrationRun, metrics_file: str, expected_run_type: str) -> None:
@@ -195,7 +227,7 @@ def process_validation_metrics(run: ValidationRun | CalibrationRun, metrics_file
     """
 
     job_description = get_job_description(run)
-    logger.info(f"Processing '{metrics_file} for {job_description}")
+    logger.info(f"Processing '{metrics_file}' for {job_description}")
 
     # Check if the file exists
     if not os.path.isfile(metrics_file):
@@ -203,7 +235,8 @@ def process_validation_metrics(run: ValidationRun | CalibrationRun, metrics_file
         return
 
     # Read the metrics file using pandas
-    metrics_df = pd.read_csv(metrics_file)
+    # Treat common "blank"/string-missing tokens as NA so they become NaN in pandas
+    metrics_df = pd.read_csv(metrics_file, na_values=['', ' ', 'null', 'None'])
 
     metrics_to_create = []  # List to accumulate metrics to be created
 
@@ -231,7 +264,7 @@ def process_validation_metrics(run: ValidationRun | CalibrationRun, metrics_file
             if not metric:
                 raise CerfException(f"Could not find metric '{metric_name}' in MetricEnum")
 
-            metric_value = float(value) if value is not None else float('nan')
+            metric_value = to_float_or_nan(value)
 
             # Create the Metric object (ValidationMetrics or NWMRetrospectiveMetrics)
             metric_obj = MetricModel(
@@ -249,7 +282,14 @@ def process_validation_metrics(run: ValidationRun | CalibrationRun, metrics_file
 
     # Bulk create the metrics in the database
     if metrics_to_create:
-        MetricModel.objects.bulk_create(metrics_to_create, batch_size=BULK_CREATE_BATCH_SIZE)
+        bad = [m for m in metrics_to_create if m.metric_value is None]
+        if bad:
+            raise CerfException(f"BUG: metric_value None before bulk_create (count={len(bad)})")
+
+        MetricModel.objects.bulk_create(
+            metrics_to_create,
+            batch_size=BULK_CREATE_BATCH_SIZE
+        )
 
 
 def process_validation_for_validation_run(validation_run: ValidationRun) -> None:
@@ -277,7 +317,11 @@ def process_validation_for_validation_run(validation_run: ValidationRun) -> None
         metrics_file = get_validation_metrics_valid_best_file(validation_run.calibration_run)
         expected_run_type = ValidationType.VALID_BEST.value
 
-    if ValidationMetrics.objects.filter(validation_run=validation_run, run_type=expected_run_type).exists():
+    already_done = ValidationMetrics.objects.filter(
+        validation_run=validation_run, run_type=expected_run_type
+    ).exists()
+
+    if already_done:
         raise CerfException(f"End of job processing has already been completed for {job_description}")
 
     process_validation_metrics(
@@ -299,64 +343,221 @@ def process_validation_for_validation_run(validation_run: ValidationRun) -> None
             expected_run_type=expected_run_type
         )
 
-    logger.info('Generating SWE timeseries data')
-    try:
-        generate_secondary_ts_data(validation_run, SecondaryDataEnum.SWE)
-    except Exception as e:
-        logger.error(f'Failed to generate SWE timeseries data: {e}')
-        traceback.print_exc()
+    # ------------------------------------------------------------------
+    # Secondary timeseries (SWE / Soil Moisture) — conditional by modules
+    # ------------------------------------------------------------------
+    modules_by_id = get_cached_modules_by_id()
+    modules_by_name = {m.name: m for m in modules_by_id.values()}
 
-    logger.info('Generating Soil Moisture timeseries data')
-    try:
-        generate_secondary_ts_data(validation_run, SecondaryDataEnum.SOIL_MOISTURE)
-    except Exception as e:
-        logger.error(f'Failed to generate Soil Moisture timeseries data: {e}')
-        traceback.print_exc()
+    formulations = (
+        CalibrationFormulation.objects
+        .filter(calibration_run=validation_run.calibration_run)
+        .only("module_id")
+    )
+
+    module_names_for_job = {modules_by_id[f.module_id].name for f in formulations}
+    modules_by_name_for_job = {name: modules_by_name[name] for name in module_names_for_job}
+
+    if should_generate_swe(modules_by_name_for_job):
+        logger.info("Generating SWE timeseries data")
+        try:
+            generate_secondary_ts_data(validation_run, SecondaryDataEnum.SWE)
+        except Exception as e:
+            logger.error(f"Failed to generate SWE timeseries data: {e}")
+            traceback.print_exc()
+
+    if should_generate_soil_moisture(modules_by_name_for_job):
+        logger.info("Generating Soil Moisture timeseries data")
+        try:
+            generate_secondary_ts_data(validation_run, SecondaryDataEnum.SOIL_MOISTURE)
+        except Exception as e:
+            logger.error(f"Failed to generate Soil Moisture timeseries data: {e}")
+            traceback.print_exc()
 
 
 def process_iterations_for_all_workers(calibration_run: CalibrationRun) -> None:
     """
     Process all Iteration objects for the workers of a given CalibrationRun.
-    It uses prefetching to optimize database queries and processes the iterations
+    It loads all Iteration rows once, groups them by worker, and processes the iterations
     for each worker based on their metrics and parameters.
+
+    NOTE ON NUMERIC VALUES
+    ----------------------
+    We intentionally store raw DB values (including NaN/±Inf if they occur).
+    Any normalization for JSON safety happens at API response time.
 
     :param calibration_run: The CalibrationRun instance.
     """
+
+    # ------------------------------------------------------------
+    # This function operates at the *run* level.
+    #
+    # - Worker-level processing determines which iteration is best
+    # - This function enforces run-level invariants:
+    #     * Best-params dictionary loading
+    #     * Calling per-worker processing
+    #     * Verifying that exactly one best iteration exists
+    # ------------------------------------------------------------
     # Compute best_params_dict once, outside the loop
-    best_params_dict: Dict[str, float] = {}
+    best_params_dict: dict[str, float] = {}
 
     have_LSTM_flag = have_LSTM(calibration_run)
+
+    logger.debug(
+        f"[BESTPARAMS CHECK] Run {calibration_run.id} using optimization={calibration_run.optimization}; "
+        f"DDS={calibration_run.optimization == OptimizationEnum.DDS.db_instance}, "
+        f"LSTM={have_LSTM_flag}"
+    )
+
+    # ----------------------------------------------------------------------
+    # NON-DDS branch (GWO / PSO)
+    # Only load global best params if NOT DDS AND NOT LSTM
+    # ----------------------------------------------------------------------
     if calibration_run.optimization != OptimizationEnum.DDS.db_instance:
         if not have_LSTM_flag:
             global_best_params_file = get_global_best_params_file(calibration_run)
+
+            logger.debug(
+                f"[BESTPARAMS CHECK] Non-DDS + Non-LSTM: expecting global_best_params_file={global_best_params_file}"
+            )
+
             if not os.path.isfile(global_best_params_file):
+                logger.error(
+                    f"[BESTPARAMS ERROR] global_best_params_file does NOT exist for run {calibration_run.id}: "
+                    f"{global_best_params_file}"
+                )
                 raise CerfException(f"{global_best_params_file} does not exist")
 
+            # File exists — load it
+            logger.debug(
+                f"[BESTPARAMS CHECK] Loading global best params file for run {calibration_run.id}"
+            )
             # Read the global best parameters into a dictionary
+
             df = pd.read_csv(global_best_params_file, names=['value', 'name', 'model'], skiprows=1)
-            best_params_dict = pd.Series(df['value'].astype(float).values, index=df['name']).to_dict()
+
+            # IMPORTANT:
+            # - params_match_best() expects numeric values (float/None) so it can use math.isclose.
+            # - We do NOT "sanitize" (NaN/±Inf -> None) here; we just coerce to float.
+            best_params_dict = {
+                str(name): float(value)
+                for name, value in zip(df['name'], df['value'])
+            }
+
+            logger.debug(
+                f"[BESTPARAMS CHECK] Loaded {len(best_params_dict)} best params for run {calibration_run.id}: "
+                f"{list(best_params_dict.keys())[:10]}..."
+            )
+
+    # ----------------------------------------------------------------------
+    # DDS branch — SHOULD NOT USE global best params
+    # But we add diagnostics if the file exists
+    # ----------------------------------------------------------------------
+    else:
+        global_best_params_file = get_global_best_params_file(calibration_run)
+        if os.path.isfile(global_best_params_file):
+            logger.error(
+                f"[DDS WARNING] global_best_params_file EXISTS for DDS run {calibration_run.id}: "
+                f"{global_best_params_file}. DDS should not produce this file."
+            )
+        else:
+            logger.debug(
+                f"[DDS OK] No global_best_params_file present for DDS run {calibration_run.id}"
+            )
+
+        # Explicitly ensure no params are used
+        best_params_dict = {}
 
     # Query all Iteration objects for the calibration run and prefetch related metrics and parameters
-    iterations = Iteration.objects.filter(calibration_run=calibration_run).order_by(
-        'worker_name', 'iteration_num'
-    ).prefetch_related('iterationmetric_set', 'iterationparameter_set')
+    iterations = list(
+        Iteration.objects
+        .filter(calibration_run_id=calibration_run.id)
+        .only("id", "worker_name", "iteration_num", "best_params")
+        .order_by("worker_name", "iteration_num")
+    )
 
+    # Load all CalibrationParameter rows ONCE for this run
+    job_parameters = CalibrationParameter.objects.filter(
+        calibration_formulation__calibration_run_id=calibration_run.id
+    )
+    params_lookup = {p.name.lower(): p for p in job_parameters}
+
+    # ----------------------------------------------------------------------
     # Group the iterations by worker and process them
+    # ----------------------------------------------------------------------
     for worker_name, worker_iterations in groupby(iterations, key=attrgetter('worker_name')):
-        process_iterations_for_a_worker(calibration_run, worker_name, list(worker_iterations), best_params_dict, have_LSTM_flag)
+        process_iterations_for_a_worker(
+            calibration_run,
+            worker_name,
+            list(worker_iterations),
+            best_params_dict,
+            have_LSTM_flag,
+            params_lookup
+        )
 
-    # Raise an error if no best iteration was found
-    if not have_LSTM_flag and not Iteration.objects.filter(calibration_run=calibration_run, best_params=True).exists():
-        raise CerfException(f"No best iteration was found for CalibrationRun {calibration_run.id}")
+    # ----------------------------------------------------------------------
+    # FINAL DIAGNOSTIC — Make sure exactly one best iteration exists
+    # Applies to DDS, GWO/PSO, LSTM
+    # ----------------------------------------------------------------------
+    best_list = list(
+        Iteration.objects
+        .filter(calibration_run=calibration_run, best_params=True)
+        .values_list("id", "iteration_num", "worker_name")
+    )
+
+    if len(best_list) == 0:
+        logger.error(
+            f"[BESTPARAMS ERROR] No best iteration found after processing for run {calibration_run.id}. "
+            f"(optimization={calibration_run.optimization}, LSTM={have_LSTM_flag})"
+        )
+    elif len(best_list) > 1:
+        logger.error(
+            f"[BESTPARAMS ERROR] Multiple ({len(best_list)}) best iterations found for run {calibration_run.id}. "
+            f"Expected exactly one. Details: {best_list}"
+        )
+    else:
+        logger.debug(
+            f"[BESTPARAMS OK] Exactly one best iteration found for run {calibration_run.id}: {best_list[0]}"
+        )
+
+    # ----------------------------------------------------------------------
+    # Final check — only runs without LSTM require best iteration detection
+    # ----------------------------------------------------------------------
+    if not have_LSTM_flag:
+        # Raise an error if no best iteration was found
+        has_best = Iteration.objects.filter(
+            calibration_run=calibration_run, best_params=True
+        ).exists()
+
+        if not has_best:
+            raise CerfException(f"No best iteration was found for CalibrationRun {calibration_run.id}")
 
 
 # Function to process iterations for a specific worker
-def process_iterations_for_a_worker(calibration_run: CalibrationRun, worker_name: str, iterations: list[Iteration],
-                                    best_params_dict: Dict[str, float], have_LSTM_flag: bool) -> None:
+def process_iterations_for_a_worker(
+        calibration_run: CalibrationRun,
+        worker_name: str,
+        iterations: list[Iteration],
+        best_params_dict: dict[str, float],
+        have_LSTM_flag: bool,
+        params_lookup: dict[str, CalibrationParameter]
+) -> None:
     """
     Process all iterations for a specific worker in a CalibrationRun.
     It reads the metrics and parameters files for the worker and processes each
     iteration for metrics and parameters creation.
+
+    Best-iteration rules:
+      - DDS: best iteration number is read from objective_log_best_file
+      - GWO/PSO: best iteration is determined by matching parameters against global_best_params_file
+      - LSTM: only one iteration exists and is always best
+
+    NOTE ON NUMERIC VALUES
+    ----------------------
+    We store the numeric values as given (including NaN/±Inf if present).
+    We still coerce parameter values to float so matching (math.isclose) works.
+    This may raise if the parameters CSV contains non-numeric values.
+    JSON-safety normalization happens at API response construction time.
 
     :param calibration_run: The CalibrationRun instance.
     :param worker_name: The name of the worker. This is the middle part of the worker name.
@@ -364,8 +565,30 @@ def process_iterations_for_a_worker(calibration_run: CalibrationRun, worker_name
     :param iterations: A list of Iteration objects for the worker.
     :param best_params_dict: Precomputed dictionary of best parameters for comparison.
     :param have_LSTM_flag: Flag to indicate whether this job has LSTM
+    :param params_lookup: Mapping of lowercased parameter names to CalibrationParameter objects
     """
+
     logger.info(f"Processing iterations for {worker_name} for Calibration Job {calibration_run.id}")
+
+    # ------------------------------------------------------------
+    # Worker-level best-iteration determination happens here.
+    #
+    # Rules:
+    #
+    # DDS:
+    #   - Best iteration is read from objective_log_best_file
+    #
+    # GWO / PSO:
+    #   - Best iteration is determined by matching parameters
+    #     against global_best_params_file
+    #
+    # LSTM:
+    #   - Only one iteration exists and is always best
+    #
+    # This is the ONLY function that sets iteration.best_params.
+    # ------------------------------------------------------------
+
+    job_description = f"Calibration Job {calibration_run.id}, user: {calibration_run.owner.username}"
 
     # Get the worker's path
     worker_path = get_calibration_worker_path(calibration_run, worker_name)
@@ -400,70 +623,116 @@ def process_iterations_for_a_worker(calibration_run: CalibrationRun, worker_name
     # Prefetch Iteration objects for efficiency
     iteration_dict = {it.iteration_num: it for it in iterations}
 
-    metrics_to_create = []  # List to accumulate metrics to be created
-    params_to_create = []  # List to accumulate parameters to be created
+    metrics_to_create: list[IterationMetric] = []
+    params_to_create: list[IterationParameter] = []
+
+    # Collect best_params updates instead of saving per-iteration
+    iterations_to_update_best_flag: list[Iteration] = []
 
     # Track whether a best iteration was set
     best_iteration_found = False
 
     # Process metrics file
-    metrics_df = pd.read_csv(metrics_iteration_file)
+    # Treat common "blank"/string-missing tokens as NA so they become NaN in pandas
+    metrics_df = pd.read_csv(metrics_iteration_file, na_values=["", " ", "null", "None"])
+
     if not have_LSTM_flag:
         update_objective_function_values(metrics_iteration_file, calibration_run, worker_name)
 
     for _, row in metrics_df.iterrows():
-        row_dict = row.to_dict()
-        iteration_num = row_dict['iteration']
+        iteration_num = int(row['iteration'])
+
+        # Raw values (no NaN/Inf cleanup). Keep as-is for DB write.
+        row_dict = {
+            str(k): row[k]
+            for k in row.index
+            if k != 'iteration'
+        }
+
         iteration = iteration_dict.get(iteration_num)
         if not iteration:
             raise CerfException(f"Iteration {iteration_num} not found for worker {worker_name}")
-        process_metrics_row_for_calibration(calibration_run, iteration, row_dict, metrics_to_create)
+
+        process_metrics_row_for_calibration(iteration, row_dict, metrics_to_create, job_description)
 
         if have_LSTM_flag:
             # For LSTM, there is only 1 iteration so we will mark it as having the best
             iteration.best_params = True
-            iteration.save(update_fields=['best_params'])
+            iterations_to_update_best_flag.append(iteration)  # buffer update
 
     # Process parameters file
     if not have_LSTM_flag:
         params_df = pd.read_csv(params_iteration_file)
 
+        # # Prefetch CalibrationParameter objects once per calibration_run
+        # job_parameters = CalibrationParameter.objects.filter(
+        #     calibration_formulation__calibration_run_id=calibration_run.id
+        # )
+        # params_lookup = {p.name.lower(): p for p in job_parameters}
+
         for _, row in params_df.iterrows():
-            row_dict = row.to_dict()
-            iteration_num = row_dict['iteration']
+            iteration_num = int(row['iteration'])
+
             iteration = iteration_dict.get(iteration_num)
             if not iteration:
                 raise CerfException(f"Iteration {iteration_num} not found for worker {worker_name}")
-            process_params_row(calibration_run, iteration, row_dict, params_to_create, best_iteration_for_worker, best_params_dict)
 
-            # Check if this iteration was set as the best
+            # IMPORTANT:
+            # - params_match_best() uses math.isclose, so we must coerce to float.
+            # - We do NOT sanitize (NaN/±Inf -> None); we just float() the value.
+            params_row = {
+                str(k): float(row[k])
+                for k in row.index
+                if k != 'iteration'
+            }
+
+            is_best_match = params_match_best(params_row, best_params_dict)
+
+            iteration.best_params = (
+                    is_best_match or
+                    iteration.iteration_num == best_iteration_for_worker
+            )
+
             if iteration.best_params:
                 best_iteration_found = True
 
-    # Bulk create IterationMetric and IterationParameter objects in chunks
-    if metrics_to_create:
-        for i in range(0, len(metrics_to_create), BULK_CREATE_BATCH_SIZE):
-            batch = metrics_to_create[i:i + BULK_CREATE_BATCH_SIZE]
-            try:
-                IterationMetric.objects.bulk_create(batch)
-            except Exception as e:
-                logger.error(f"Error inserting IterationMetric batch {i // BULK_CREATE_BATCH_SIZE + 1}: {e}")
-                for metric in batch:
-                    logger.error(
-                        f"Failed IterationMetric: Iteration {metric.iteration.iteration_num}, Metric {metric.metric}, Value {metric.metric_value}")
-                raise  # Re-raise exception after logging details
+            # Buffer update — saved once via bulk_update
+            iterations_to_update_best_flag.append(iteration)
 
+            # Create parameters
+            process_params_row(
+                iteration,
+                params_row,
+                params_to_create,
+                params_lookup,
+                job_description
+            )
+
+    # Bulk create IterationMetric and IterationParameter objects with Django batching
+    if metrics_to_create:
+        bad = [m for m in metrics_to_create if m.metric_value is None]
+        if bad:
+            raise CerfException(f"BUG: metric_value None before bulk_create (count={len(bad)})")
+
+        IterationMetric.objects.bulk_create(
+            metrics_to_create,
+            batch_size=BULK_CREATE_BATCH_SIZE
+        )
+
+    # Bulk create parameters
     if params_to_create:
-        for i in range(0, len(params_to_create), BULK_CREATE_BATCH_SIZE):
-            batch = params_to_create[i:i + BULK_CREATE_BATCH_SIZE]
-            try:
-                IterationParameter.objects.bulk_create(batch)
-            except Exception as e:
-                logger.error(f"Error inserting IterationParameter batch {i // BULK_CREATE_BATCH_SIZE + 1}: {e}")
-                for param in batch:
-                    logger.error(
-                        f"Failed IterationParameter: Iteration {param.iteration.iteration_num}, Parameter {param.calibration_parameter.name}, Value {param.tuned_value}")
-                raise  # Re-raise exception after logging details
+        IterationParameter.objects.bulk_create(
+            params_to_create,
+            batch_size=BULK_CREATE_BATCH_SIZE
+        )
+
+    # Single bulk update for best_params instead of thousands of saves
+    if iterations_to_update_best_flag:
+        Iteration.objects.bulk_update(
+            iterations_to_update_best_flag,
+            ['best_params'],
+            batch_size=BULK_CREATE_BATCH_SIZE,
+        )
 
     # Log a warning if no best iteration was found for the worker
     if not best_iteration_found:
@@ -487,20 +756,25 @@ def process_iterations_for_a_worker(calibration_run: CalibrationRun, worker_name
 
 
 # Function to process a single metrics row
-def process_metrics_row_for_calibration(calibration_run: CalibrationRun,
-                                        iteration: Iteration,
-                                        metrics_row: dict[str, float | None],
-                                        metrics_to_create: list[IterationMetric]) -> None:
+def process_metrics_row_for_calibration(
+        iteration: Iteration,
+        metrics_row: dict[str, object],
+        metrics_to_create: list[IterationMetric],
+        job_description: str
+) -> None:
     """
     Process a single row from the metrics file and create IterationMetric objects.
 
-    :param calibration_run: The CalibrationRun instance.
+     NOTE ON NUMERIC VALUES
+    ----------------------
+    This function does not sanitize numeric values; it stores what it is given.
+    Any JSON-safety normalization (NaN/±Inf -> None) is done later at API response time.
+
     :param iteration: The Iteration object for the current iteration.
     :param metrics_row: The row of metrics data from the file.
     :param metrics_to_create: The list to accumulate created IterationMetric objects.
+    :param job_description: Job identifier string used for logging.
     """
-    job_description = get_job_description(calibration_run)
-
     # Get rid of 'iteration' and 'objFunVal' columns
     metrics_row = {k: v for k, v in metrics_row.items() if k not in ['iteration', 'objFunVal']}
 
@@ -511,8 +785,7 @@ def process_metrics_row_for_calibration(calibration_run: CalibrationRun,
         if not metric:
             raise CerfException(f"Could not find metric '{metric_name}'")
 
-        # Set metric_value to NaN if missing
-        metric_value = float(value) if value is not None else float('nan')
+        metric_value = to_float_or_nan(value)
 
         metric_obj = IterationMetric(
             iteration=iteration,
@@ -524,56 +797,44 @@ def process_metrics_row_for_calibration(calibration_run: CalibrationRun,
 
 
 # Function to process a single parameters row
-def process_params_row(calibration_run: CalibrationRun,
-                       iteration: Iteration,
-                       params_row: dict[str, float | None],
-                       params_to_create: list[IterationParameter],
-                       best_iteration_for_worker: int,
-                       best_params_dict: Dict[str, float]) -> None:
+def process_params_row(
+        iteration: Iteration,
+        params_row: dict[str, float],
+        params_to_create: list[IterationParameter],
+        params_lookup: dict[str, CalibrationParameter],
+        job_description: str
+) -> None:
     """
-    Process a single row from the parameters file and create IterationParameter objects.
-    Determine if the iteration represents the best set of parameters and set the `best_params` flag on the Iteration.
+    Create IterationParameter objects for a single iteration.
 
-    :param calibration_run: The CalibrationRun instance.
+    This function:
+    - Converts one row from the parameters CSV into IterationParameter records
+    - Performs case-insensitive parameter lookup
+    - Buffers objects for bulk_create
+
+    Best-iteration selection is handled in process_iterations_for_a_worker().
+
+    NOTE ON NUMERIC VALUES
+    ----------------------
+    This function does not sanitize numeric values; it stores what it is given.
+    Any JSON-safety normalization (NaN/±Inf -> None) is done later at API response time.
+
     :param iteration: The Iteration object for the current iteration.
-    :param params_row: The row of parameter data from the file.
-    :param params_to_create: The list to accumulate created IterationParameter objects.
-    :param best_iteration_for_worker: The best iteration number for the worker, used to mark the best parameters.
-    :param best_params_dict: Precomputed dictionary of best parameters for comparison.
+    :param params_row: The row of parameter data from the file (excluding 'iteration').
+    :param params_to_create: Accumulator list for IterationParameter objects.
+    :param params_lookup: Mapping of lowercased parameter names to CalibrationParameter objects.
+    :param job_description: Job identifier string used for logging.
     """
-    job_description = get_job_description(calibration_run)
 
-    # Filter out the 'iteration' column
-    params_row = {k: v for k, v in params_row.items() if k != 'iteration'}
-
-    # Check if the current params_row matches the global best parameters
-    # The is_best_match logic is done for PSO and GWO.  We actually compare the values of the parameters
-    is_best_match = (
-            len(params_row) == len(best_params_dict) and
-            all(param_name in best_params_dict and math.isclose(float(value), best_params_dict[param_name], rel_tol=1e-9, abs_tol=0.0)
-                for param_name, value in params_row.items())
-    )
-
-    # If the iteration is the best (based on matching parameters or best iteration number (from objective_log file for DDS))
-    if is_best_match or iteration.iteration_num == best_iteration_for_worker:
-        logger.debug(f'{calibration_run.id}_{calibration_run.owner.username} Found best iteration: {iteration.iteration_num}, for {job_description}')
-        iteration.best_params = True
-    else:
-        iteration.best_params = False
-
-    # Save the iteration after setting the best_params flag
-    iteration.save(update_fields=['best_params'])
-
-    # Prefetch CalibrationParameter objects for quick lookup
-    params_lookup = {p.name.lower(): p for p in CalibrationParameter.objects.all()}
-
-    for param_name, value in params_row.items():
+    # ----------------------------------------------------------------------
+    # Create IterationParameter objects
+    # ----------------------------------------------------------------------
+    for param_name, tuned_value in params_row.items():
         # Perform case-insensitive lookup for the parameter
         parameter = params_lookup.get(param_name.lower())
         if not parameter:
             raise CerfException(f"Could not find parameter '{param_name}' referenced in params_iteration_file")
 
-        tuned_value = float(value) if value is not None else None
         param_obj = IterationParameter(
             iteration=iteration,
             calibration_parameter=parameter,
@@ -595,11 +856,11 @@ def update_objective_function_values(metrics_iteration_file: str, calibration_ru
     :param calibration_run: The CalibrationRun instance to which the iterations belong.
     :param worker_name: The name of the worker whose iterations are being updated.
     """
-    # Fetch only the fields needed using .values_list()
     iterations_dict = {
         iteration_num: Iteration(id=iteration_id, objective_function_value=None)  # Initialize without value
         for iteration_id, iteration_num in Iteration.objects.filter(
-            calibration_run=calibration_run, worker_name=worker_name
+            calibration_run_id=calibration_run.id,
+            worker_name=worker_name
         ).values_list("id", "iteration_num")
     }
 
@@ -617,7 +878,9 @@ def update_objective_function_values(metrics_iteration_file: str, calibration_ru
         iteration = iterations_dict.get(iteration_num)
         if not iteration:
             raise CerfException(
-                f"Cannot find Iteration object for calibration run {calibration_run.id}, worker {worker_name}, iteration {iteration_num}. Ngen-cal did not report this iteration")
+                f"Cannot find Iteration object for calibration run {calibration_run.id}, "
+                f"worker {worker_name}, iteration {iteration_num}. Ngen-cal did not report this iteration"
+            )
 
         logger.debug(
             f'{calibration_run.id}_{calibration_run.owner.username} Updating iteration {iteration_num} '
@@ -778,3 +1041,57 @@ def parse_performance_metrics(file_path: str) -> PerformanceMetrics | None:
         return metrics
 
     return None
+
+
+def params_match_best(params_row: dict[str, float], best_params_dict: dict[str, float]) -> bool:
+    """
+    Determine whether a row of tuned parameters exactly matches the known global-best parameters.
+
+    Rules:
+    - Used only for GWO/PSO jobs. DDS never uses parameter matching.
+    - Parameter names must match exactly (case-insensitive).
+    - Value comparison:
+        * NaN matches NaN
+        * +Inf matches +Inf
+        * -Inf matches -Inf
+        * otherwise values must match within math.isclose tolerance.
+    """
+    # If we have no global best params (DDS or missing file), never match.
+    if not best_params_dict:
+        return False
+
+    # Normalize keys to avoid CSV header casing mismatches.
+    row = {k.lower(): v for k, v in params_row.items()}
+    best = {k.lower(): v for k, v in best_params_dict.items()}
+
+    # Strict: same parameter set size
+    if len(row) != len(best):
+        return False
+
+    # Strict: same parameter names
+    if row.keys() != best.keys():
+        return False
+
+    # For each global-best parameter:
+    # - Require it to exist in the row
+    # - Require its value to match (None must match None; floats within tolerance)
+    for name, b in best.items():
+        v = row[name]
+
+        # NaN matches NaN only
+        if math.isnan(v) or math.isnan(b):
+            if math.isnan(v) and math.isnan(b):
+                continue
+            return False
+
+        # +Inf/-Inf must match exactly (including sign)
+        if math.isinf(v) or math.isinf(b):
+            if v == b:
+                continue
+            return False
+
+        # Normal finite float compare
+        if not math.isclose(v, b, rel_tol=1e-9, abs_tol=0.0):
+            return False
+
+    return True

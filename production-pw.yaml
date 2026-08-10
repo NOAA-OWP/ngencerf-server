@@ -9,7 +9,7 @@ services:
       - ./redis/redis.conf.prod:/usr/local/etc/redis/redis.conf:ro
     ports:
       - "6379:6379"
-    restart: no  # ensure Redis is recreated fresh on each deploy; no auto-restart
+    restart: no  # Do not auto-restart Redis on crash or daemon restart. Does NOT force recreation on deploy.
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -42,8 +42,8 @@ services:
     environment:
       - NGEN_CAL_DATA_PATH=${NGEN_CAL_DATA_PATH}
     env_file:
-      - path: ./ngencerf_services.env
+      - path: ./cerfServer/.env-docker-prod
         required: true
-      - path: ./ngencerf_services.override.env
-        required: false
+      - path: cerfServer/.env-override
+        required: true
     privileged: true

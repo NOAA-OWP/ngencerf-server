@@ -8,11 +8,11 @@ from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiRespon
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
-from calibration.enums import OptimizationEnum, StatusEnum, MetricEnum
+from calibration.enums import OptimizationEnum, MetricEnum
 from calibration.models import Optimization, CalibrationOptimizationInput, CalibrationStopCriteria, CalibrationRun
 from calibration.util.caching import have_LSTM
-from calibration.util.calibration_validators import CalibrationRunSerializer, LoadOptimizationResponseSerializer, \
-    SaveOptimizationRequestSerializer, ErrorResponseSerializer, GenericResponseSerializer
+from calibration.util.calibration_validators import LoadOptimizationResponseSerializer, \
+    SaveOptimizationRequestSerializer, ErrorResponseSerializer, GenericResponseSerializer, EmptySerializer
 from calibration.views import ngen_cal_input
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import get_calibration_run, ResponseError, handle_exceptions, validate_response, validate_request, get_user_email, \
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 @extend_schema(
-    request=CalibrationRunSerializer,
+    request=EmptySerializer,
     responses={
         200: LoadOptimizationResponseSerializer,
         400: OpenApiResponse(
@@ -55,18 +55,14 @@ def load_optimization_tab(request) -> Response:
 
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
 
-    validator, error_return = validate_request(CalibrationRunSerializer, data)
+    validator, error_return = validate_request(EmptySerializer, data)
     if error_return:
         return error_return
 
-    calibration_run_id = validator.get('calibration_run_id')
-
-    run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=list(StatusEnum))
-    if error_return:
-        return error_return
-
-    metrics = MetricEnum.get_choices_with_fields(fields=['name', 'display_name', 'categorical', 'event_based'],
-                                                 extra_filter={'objective_function': True})
+    metrics = MetricEnum.get_choices_with_fields(
+        fields=['name', 'display_name', 'categorical', 'event_based'],
+        extra_filter={'objective_function': True}
+    )
 
     optimization_list = OptimizationEnum.get_choices_with_fields(
         fields=['name', 'description', 'is_active']
@@ -80,11 +76,10 @@ def load_optimization_tab(request) -> Response:
             )
         )
 
-    ngen_cal_input.ready_to_run(run)
-    response = {'calibration_run_id': run.id, 'status': run.status.name,
-                'metrics': metrics,
-                'optimizations': optimization_list
-                }
+    response = {
+        'metrics': metrics,
+        'optimizations': optimization_list
+    }
 
     response = {key: value for key, value in response.items() if value not in [None, '', [], {}]}
 

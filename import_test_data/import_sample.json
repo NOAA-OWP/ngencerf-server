@@ -7,7 +7,8 @@
             "end_time": "2022-12-31T23:00:00+00:00"
         },
         "job_data_dir": "/ngencerf/data/ngen-cal-work/run_calib/330_peter",
-        "num_catchments": 7
+        "num_catchments": 7,
+        "forcing_source_actual": "AORC"
     },
     "run_after_import": false,
     "gage_id": "01123000",
@@ -19,7 +20,7 @@
         "CFE-S",
         "T-Route"
     ],
-    "formulation_name": "my-cfe-noah",
+    "job_name": "my-cfe-noah",
     "use_sloth": true,
     "sloth_parameters": [
         {
@@ -107,6 +108,7 @@
         "logging_enabled": true,
         "modules": {
             "noah-owp-modular": "info",
+            "forcing": "info",
             "cfe-s": "info",
             "ngen": "info",
             "t-route": "info"

@@ -4,10 +4,11 @@ import sys
 
 from django.apps import AppConfig
 from django.conf import settings
-from django.core.cache import caches
 
+from calibration.util.cloud_util import check_aws_credentials, S3CredentialsExpired
 from calibration.util.db_diagnostics import patch_ensure_connection_with_diagnostics
 from calibration.util.git_util import print_git_info_all
+from calibration.views.mpi_rules import log_mpi_rules
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,7 @@ class CalibrationConfig(AppConfig):
     name = 'calibration'
 
     def ready(self):
+
         # -------------------------------------------------------------
         # Detect dev server or gunicorn
         # -------------------------------------------------------------
@@ -61,6 +63,13 @@ class CalibrationConfig(AppConfig):
         # Banner + basic info
         # -------------------------------------------------------------
         if running_dev_server or running_gunicorn:
+            # Fail fast. Do NOT let the server limp along with bad creds.
+            try:
+                check_aws_credentials()
+            except S3CredentialsExpired:
+                logger.error("AWS credential sanity check failed at startup")
+                raise
+
             print_banner()
         else:
             # Management command
@@ -82,7 +91,10 @@ class CalibrationConfig(AppConfig):
         logger.info(f'NGWPC Enterprise Data Server url: {settings.ENTERPRISE_DATA_URL}\n')
         logger.info(f'NGEN_CAL_MOUNT_POINT: {settings.NGEN_CAL_MOUNT_POINT}')
         logger.info(f'NGEN_STATIC_DIR: {settings.NGEN_STATIC_DIR}')
+        logger.info(f'NGENCERF_ARCHIVE_S3_PATH: {settings.NGENCERF_ARCHIVE_S3_PATH}')
         logger.info(f'DJANGO DEBUG: {settings.DEBUG}')
+        logger.info(f'USE_BMI_FORCING: {settings.USE_BMI_FORCING}')
+        log_mpi_rules()
 
         from calibration.util.ngen_locations import check_files
 

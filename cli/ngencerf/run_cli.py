@@ -24,9 +24,6 @@ from ngencerf.cli_functions import (
     cancel_job,
     handle_export_display,
     list_jobs,
-    upload_observational_data,
-    upload_forcing_data,
-    upload_geopackage_data,
     download_zip, archive_job, unarchive_job, about, generate_regionalization_files, job_status, update_and_get_gage_status, lock_job, unlock_job,
 )
 from ngencerf.cli_user import ngen_login, ngen_register
@@ -283,11 +280,6 @@ def main():
         display=cmd_args.show
     ))
 
-    forcing_parser = add_parser("upload-forcing", "Upload a directory of forcing files for a calibration job")
-    forcing_parser.add_argument("run_id", type=int, help="Calibration job ID")
-    forcing_parser.add_argument("forcing_dir", help="Path to directory containing forcing files")
-    forcing_parser.set_defaults(func=lambda cmd_args: upload_forcing_data(cmd_args.forcing_dir, cmd_args.run_id))
-
     gage_status_parser = add_parser("gage-status", "Query or update gage active status", hidden=True)
     gage_status_parser.add_argument("gage_id", type=str, help="Gage id")
     gage_status_parser.add_argument(
@@ -297,11 +289,6 @@ def main():
         help="Desired active state (true/false). If omitted, just query current status."
     )
     gage_status_parser.set_defaults(func=lambda cmd_args: update_and_get_gage_status(cmd_args.gage_id, cmd_args.is_active))
-
-    gpkg_parser = add_parser("upload-geopkg", "Upload a GPKG file for a calibration job")
-    gpkg_parser.add_argument("run_id", type=int, help="Calibration job ID")
-    gpkg_parser.add_argument("gpkg_file", help="Path to the geopackage (.gpkg) file")
-    gpkg_parser.set_defaults(func=lambda cmd_args: upload_geopackage_data(cmd_args.gpkg_file, cmd_args.run_id))
 
     import_parser = add_parser("import", "Create job from a JSON file")
     import_parser.add_argument("input_file", help="Path to the JSON file")
@@ -452,11 +439,6 @@ def main():
         help="One or more calibration job IDs or a Markdown list file"
     )
     lock_parser.set_defaults(func=lambda cmd_args: lock_job(_normalize_cli_arg(cmd_args.run_ids)))
-
-    observation_parser = add_parser("upload-obs", "Upload observational data CSV for a calibration job")
-    observation_parser.add_argument("run_id", type=int, help="Calibration job ID")
-    observation_parser.add_argument("csv_file", help="Path to the observational CSV file")
-    observation_parser.set_defaults(func=lambda cmd_args: upload_observational_data(cmd_args.csv_file, cmd_args.run_id))
 
     register_parser = add_parser("register", "Register new user")
     register_parser.add_argument("email", nargs="?", help="Email address")

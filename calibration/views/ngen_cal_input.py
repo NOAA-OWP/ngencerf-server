@@ -11,24 +11,26 @@ from django.db import transaction
 from django.db.models import F
 from toml import TomlEncoder
 
-from calibration.enums import StatusEnum, ForcingSourceEnum, ObservationalSourceEnum, DataTypeEnum, GeopackageSourceEnum
+from calibration.enums import StatusEnum, DataTypeEnum
 from calibration.enums_vanilla import NgenEnvironmentEnum
 from calibration.models import CalibrationOptimizationInput, CalibrationStopCriteria, CalibrationSlothParam, \
     CalibrationParameter, CalibrationFormulation, CalibrationRun
 from calibration.util.caching import get_cached_optimization_inputs, have_LSTM, get_cached_modules_by_id
 from calibration.util.file_util import get_single_file
-from calibration.util.geopkg import get_geometry_from_gpkg, normalize_gpkg
+from calibration.util.geopkg import normalize_gpkg
 from calibration.util.ngen_locations import CFE_LIB, TOPMD_LIB, SFT_LIB, SLOTH_LIB, SMP_LIB, LASAM_LIB, NOAH_LIB, NGEN_EXE, \
     PARQUET_DIR, get_forcing_dir_for_job, get_observational_dir_for_job, \
-    get_observational_file_for_job, get_geopackage_dir_for_job, \
+    get_geopackage_dir_for_job, \
     PET_LIB, SNOW17_LIB, SAC_LIB, NWM_RETROSPECTIVE_DIR, get_bmi_config_dir_for_module, get_bmi_config_key, UEB_LIB, NGEN_MODULE_PARAMETERS, \
-    PARALLEL_NGEN_EXE, PARTITION_GENERATOR_EXE
+    PARALLEL_NGEN_EXE, PARTITION_GENERATOR_EXE, BMI_FORCING_TEMPLATES
 from calibration.views.calibration_formulation_views import validate_formulation
 from calibration.views.calibration_secondary_data_views import should_generate_swe, should_generate_soil_moisture
 from calibration.views.calibration_tuning_views import get_full_evaluation_date_range, validate_time_range_against_data
 from calibration.views.called_from import called_from
 from calibration.views.common import TOKEN_NGEN_SCOPE, generate_custom_token, SLOTH, format_datetime, join_with_or, ErrorReport, readonly_transaction
-from cerfServer.settings import NGEN_ENVIRONMENT
+from calibration.views.data_services import should_use_bmi_forcing
+from calibration.views.mpi_rules import get_mpi_nodes
+from cerfServer.settings import NGEN_ENVIRONMENT, NGEN_BMI_FORCING_WORK_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +49,6 @@ CONFIG_TEMPLATE = {
         "output_swe": False,
         # Soil Moisture output - Only True for soil moisture modules
         "output_sm": False,
-        "sm_profile_depth": 1,
-        "sm_frac_depth": 0.4
     },
 
     "Calibration": {
@@ -101,8 +101,12 @@ CONFIG_TEMPLATE = {
     },
 
     "Forcing": {
-        "forcing_provider": "csv",
-        "forcing_dir": ""
+        "forcing_provider": "",
+        "root_dir": NGEN_BMI_FORCING_WORK_DIR,
+        "forcing_configuration": "",
+        "forcing_dir": "",
+        "forcing_template_dir": BMI_FORCING_TEMPLATES,
+
     },
 
     "DataFile": {
@@ -152,8 +156,7 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
     the path to the generated configuration file if applicable.
 
     - `errors`: Problems the user can fix. These prevent the job from being marked as ready.
-    - `fatal`: Critical issues such as structural problems in uploaded files. These may
-               require intervention beyond user correction (e.g., broken CSV format).
+    - `fatal`: Critical issues that may require intervention beyond user correction (e.g., broken CSV format).
 
     The job status is updated to:
     - `READY` if no issues are found,
@@ -175,6 +178,8 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
     # READ-ONLY PHASE
     # -----------------------------
     with readonly_transaction():
+        use_bmi = should_use_bmi_forcing(run)
+
         allowed_status_names = [StatusEnum.SAVED.value, StatusEnum.READY.value]
         if build:
             allowed_status_names.append(StatusEnum.SUBMITTED.value)
@@ -210,72 +215,52 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
         modules_by_id = get_cached_modules_by_id()  # authoritative, no DB or disk after first hit
         modules_by_name = {m.name: m for m in modules_by_id.values()}  # lightweight derived view for name-based lookups
 
-        catchments = None
         # Validate and configure the gage ID and station name
         if not is_missing(run.gage, 'gage_id', error_object):
             general['basin'] = run.gage.gage_id
             calibration['station_name'] = run.gage.station_name
 
-            # Determine the source of the geopackage data (user-uploaded or EDS)
             if not is_missing(run.geopackage_source, 'Geopackage source', error_object):
                 geopackage_dir = get_geopackage_dir_for_job(run)
-                is_geopackage_upload = run.geopackage_source == GeopackageSourceEnum.UPLOAD.db_instance
 
-                if is_geopackage_upload:
-                    geopackage_file = get_single_file(geopackage_dir)
-                    if geopackage_file:
-                        # For user uploads, use the job-specific location directly
-                        datafile['hydrofab_file'] = geopackage_file
-                    else:
-                        error_object.add_warning('Geopackage data must be uploaded')
-                else:
-                    if run.geopackage_eds_file_path and build:
-                        # For data from Data Services, normalize the CRS and copy to job-specific location
-                        try:
-                            normalize_gpkg(run.geopackage_eds_file_path, geopackage_dir, output_is_dir=True)
-                        except FileNotFoundError:
-                            run.geopackage_eds_file_path = None
+                if run.geopackage_eds_file_path and build:
+                    # For data from Data Services, normalize the CRS and copy to job-specific location
+                    try:
+                        normalize_gpkg(run.geopackage_eds_file_path, geopackage_dir, output_is_dir=True)
+                    except FileNotFoundError:
+                        run.geopackage_eds_file_path = None
 
-                    geopackage_file = get_single_file(geopackage_dir)
-                    if geopackage_file:
-                        datafile['hydrofab_file'] = geopackage_file
+                geopackage_file = get_single_file(geopackage_dir)
+                if geopackage_file:
+                    datafile['hydrofab_file'] = geopackage_file
 
-                if datafile.get('hydrofab_file') and os.path.exists(datafile['hydrofab_file']):
-                    catchments = list(get_geometry_from_gpkg(datafile['hydrofab_file'])['catchments'].keys())
-
-                    num_catchments = len(catchments)
-                    run.num_catchments = num_catchments
-                    logger.info(f"Found {num_catchments} catchments in {datafile['hydrofab_file']}: {catchments}")
-
-            # Determine the source of the forcing data (user-uploaded or EDS)
+            # Determine the source of the forcing data
             if not is_missing(run.forcing_source_requested, 'Forcing source', error_object):
-                forcing_dir = get_forcing_dir_for_job(run)
-                is_forcing_upload = run.forcing_source_requested == ForcingSourceEnum.UPLOAD.db_instance
-
-                if is_forcing_upload and (not forcing_dir or not os.path.exists(forcing_dir)):
-                    error_object.add_warning('Forcing data must be uploaded')
+                if use_bmi:
+                    logger.info("Using BMI forcing (USE_BMI_FORCING enabled, CONUS + AORC)")
+                    forcing_dir = None
+                    forcing_provider = 'bmi'
+                    forcing_configuration = "aorc"
                 else:
+                    logger.info("Using CSV forcing (BMI disabled or conditions not met)")
+                    forcing_dir = get_forcing_dir_for_job(run)
+                    forcing_provider = 'csv'
+                    forcing_configuration = ""
+
+                if not use_bmi:
+                    # CSV forcing path rules apply
                     if not is_missing(run.forcing_eds_dir_path, "Forcing directory", error_object):
                         pass
 
                 forcing['forcing_dir'] = forcing_dir
+                forcing['forcing_provider'] = forcing_provider
+                forcing['forcing_configuration'] = forcing_configuration
 
-            # Determine the source of observational data (user-uploaded or EDS)
             if not is_missing(run.observational_source, 'Observational source', error_object):
                 observational_dir = get_observational_dir_for_job(run)
-                observational_file = get_observational_file_for_job(run)
-                is_observational_upload = run.observational_source == ObservationalSourceEnum.UPLOAD.db_instance
 
-                if is_observational_upload:
-                    user_uploaded_observational_file = get_single_file(observational_dir)
-                    if not user_uploaded_observational_file:
-                        error_object.add_warning('Observational data must be uploaded')
-                    elif build and user_uploaded_observational_file != observational_file:
-                        logger.info(f"Renaming observational file from {user_uploaded_observational_file} to {observational_file}")
-                        os.rename(user_uploaded_observational_file, observational_file)
-                else:
-                    if not is_missing(run.observational_eds_file_path, "Observational file", error_object):
-                        pass
+                if not is_missing(run.observational_eds_file_path, "Observational file", error_object):
+                    pass
 
                 datafile['obs_dir'] = observational_dir
 
@@ -290,10 +275,11 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
             # Need to set parquet file based on domain
             datafile['attributes_file'] = os.path.join(PARQUET_DIR, f'{run.gage.domain.name.lower()}_model_attributes.parquet')
 
+            general['formulation'] = run.job_name
+
         formulations = CalibrationFormulation.objects.filter(calibration_run=run).only("module_id")
 
-        if not is_missing(formulations, 'Modules', error_object) and not is_missing(run.user_formulation_name, 'Formulation name', error_object):
-            general['formulation'] = run.user_formulation_name
+        if not is_missing(formulations, 'Modules', error_object) and not is_missing(run.job_name, 'Formulation name', error_object):
 
             # Extract only the modules actually used in THIS calibration job
             module_names_for_job = {modules_by_id[f.module_id].name for f in formulations}
@@ -403,7 +389,7 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
         # This field is not required from user
         calibration['save_output_iter'] = int(run.save_output_iteration or 0)
 
-        calibration['restart'] = 0  # TODO ???
+        calibration['restart'] = 0
 
         stop_criteria = CalibrationStopCriteria.objects.filter(calibration_run=run).first()
         if not is_missing(stop_criteria, 'Stop criteria (number of iterations)', error_object, have_LSTM_flag=have_LSTM_flag):
@@ -414,7 +400,7 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
             error_object.add_warning(
                 f"The plot iteration frequency, {run.save_plot_iteration_frequency}, must be <= the stop criteria (number of iteration) {stop_criteria.value}")
 
-        calibration['start_iteration'] = 0  # TODO ????'
+        calibration['start_iteration'] = 0
 
         if run.streamflow_threshold:
             calibration['streamflow_threshold'] = run.streamflow_threshold
@@ -493,12 +479,11 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
                     p['model'] = modules_by_id[p['calibration_formulation__module_id']].name
                 write_parameter_files(params, calibration['calib_parameter_file'])
 
-        if NGEN_ENVIRONMENT == NgenEnvironmentEnum.PARALLEL_WORKS:
+        if build and NGEN_ENVIRONMENT == NgenEnvironmentEnum.PARALLEL_WORKS:
             config['Parallel'] = parallel
-            if catchments:
-                run.mpi_nprocs = get_mpi_nodes(num_catchments)
-                parallel['nprocs'] = run.mpi_nprocs
-                run.node_type = get_node_type(num_catchments)
+            run.mpi_nprocs = get_mpi_nodes(run.num_catchments)
+            parallel['nprocs'] = run.mpi_nprocs
+            run.node_type = get_node_type(run.num_catchments)
 
     # -----------------------------
     # WRITE PHASE
@@ -511,7 +496,7 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
                 run.status = StatusEnum.READY.db_instance
             elif run.status == StatusEnum.READY.db_instance and (error_object.has_errors() or error_object.has_warnings()):
                 run.status = StatusEnum.SAVED.db_instance
-     
+
         run.save()
 
     # -----------------------------
@@ -612,27 +597,6 @@ def is_missing(value: Any, label: str, report: ErrorReport, have_LSTM_flag: bool
     return False
 
 
-# Global table of MPI rules.  Can be updated dynamically with endpoint update_mpi_rules
-# Each pair represents [max_catchments, num_nodes]
-MPI_NODE_RULES = [
-    [10, 1],
-    [50, 2],
-    [250, 8],
-    [-1, 16]
-]
-
-
-def get_mpi_nodes(num_catchments: int) -> int:
-
-    mpi_nodes = None
-    for max_catchments, mpi_nodes in MPI_NODE_RULES:
-        if max_catchments == -1 or num_catchments <= max_catchments:
-            break
-
-    logger.info(f'{num_catchments} catchments using {mpi_nodes} nodes')
-    return mpi_nodes
-
-
 # Global table of node type rules.
 # Each pair represents [max_catchments, node_type]
 NODE_TYPE_RULES = [
@@ -642,7 +606,6 @@ NODE_TYPE_RULES = [
 
 
 def get_node_type(num_catchments: int) -> str:
-
     node_type = None
     for max_catchments, node_type in NODE_TYPE_RULES:
         if max_catchments == -1 or num_catchments <= max_catchments:

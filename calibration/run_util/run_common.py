@@ -16,7 +16,7 @@ from django.db import transaction
 from mswm.manager import build_fcst, build_calib
 from rest_framework.response import Response
 
-from calibration.enums import StatusEnum, ValidationType, SlurmStatusEnum, ForcingSourceEnum, ObservationalSourceEnum
+from calibration.enums import StatusEnum, ValidationType, SlurmCallbackStatusEnum
 from calibration.enums_vanilla import JobType
 from calibration.models import CalibrationRun, ValidationRun, Iteration, ForecastRun, ColdStartRun, VerificationRun
 from calibration.models.base_run import BaseRun
@@ -31,6 +31,7 @@ from calibration.util.ngen_locations import get_calibration_input_file, get_vali
     get_cold_start_git_info_file
 from calibration.views import ngen_cal_input
 from calibration.views.common import ResponseError, CerfException, create_validation_run_internal, get_job_description, write_ngen_logging_file
+from calibration.views.data_services import should_use_bmi_forcing
 from calibration.views.end_of_job_processing import read_validation_output, read_calibration_output, read_forecast_output, \
     read_cold_start_output, read_verification_output
 from calibration.views.forecast_input import create_forecast_input
@@ -345,21 +346,21 @@ def run_forecast_job(forecast_run: ForecastRun) -> None:
     )
 
 
-def run_verification_job(verification_job: VerificationRun) -> None:
+def run_verification_job(verification_run: VerificationRun) -> None:
     """
     Start a verification job by determining input and output file paths.
 
     This function is intended to be passed as an argument to `submit_job`
     and not called directly.
 
-    :param verification_job: The VerificationRun object representing the job.
+    :param verification_run: The VerificationRun object representing the job.
     """
-    stdout_file = get_verification_stdout_file(verification_job)
+    stdout_file = get_verification_stdout_file(verification_run)
 
     execute_job(
-        verification_job,
+        verification_run,
         {
-            'verification_config': get_verification_yaml_config_file(verification_job),
+            'verification_config': get_verification_yaml_config_file(verification_run),
         },
         stdout_file,
         simulate=settings.SIMULATE_FLAGS.get(JobType.VERIFICATION, False)
@@ -620,11 +621,10 @@ def process_validation_output_and_maybe_create_best(validation_run: ValidationRu
     transaction.on_commit(_finish)
 
 
-
 def run_generic_job_end_callback(
         run: BaseRun,
-        status: Future | SlurmStatusEnum,
-        check_if_failed: Callable[[BaseRun, Future | SlurmStatusEnum], bool],
+        status: Future | SlurmCallbackStatusEnum,
+        check_if_failed: Callable[[BaseRun, Future | SlurmCallbackStatusEnum], bool],
         finalize_func: Callable[[BaseRun, bool], None]
 ) -> None:
     """
@@ -797,29 +797,34 @@ def final_preprocessing_for_calibration(run: CalibrationRun) -> list[str]:
     """
     errors: list[str] = []
 
-    # Subset forcing data
-    if run.forcing_source_requested != ForcingSourceEnum.UPLOAD.db_instance:
+    date_range = DateTimeRange(
+        min(run.calibration_start_period, run.validation_start_period),
+        max(run.calibration_end_period, run.validation_end_period),
+    )
+
+    use_bmi = should_use_bmi_forcing(run)
+
+    # ─────────────────────────────────────────────────────────────
+    # Forcing data
+    # ─────────────────────────────────────────────────────────────
+    # Subset only CSV data, not BMI
+    if not use_bmi:
         subset_directory_by_time_range(
             run,
             run.forcing_eds_dir_path,
             get_forcing_dir_for_job(run),
-            DateTimeRange(
-                min(run.calibration_start_period, run.validation_start_period),
-                max(run.calibration_end_period, run.validation_end_period)
-            )
+            date_range
         )
 
-    # Subset observational data
-    if run.observational_source != ObservationalSourceEnum.UPLOAD.db_instance:
-        subset_by_time_range(
-            run,
-            run.observational_eds_file_path,
-            get_observational_file_for_job(run),
-            DateTimeRange(
-                min(run.calibration_start_period, run.validation_start_period),
-                max(run.calibration_end_period, run.validation_end_period)
-            )
-        )
+    # ─────────────────────────────────────────────────────────────
+    # Observational data
+    # ─────────────────────────────────────────────────────────────
+    subset_by_time_range(
+        run,
+        run.observational_eds_file_path,
+        get_observational_file_for_job(run),
+        date_range
+    )
 
     return errors
 
@@ -899,7 +904,7 @@ def subset_directory_by_time_range(
     - If running on a high-performance instance (e.g., AWS EC2 with high network bandwidth), this value can be increased.
     - If running on a slow or metered connection, keeping this at 4 prevents potential slowdowns.
     """
-    start_time = time.time()
+    start_time = time.perf_counter()
     os.makedirs(output_directory, exist_ok=True)
 
     files_in = _list_dir_files(input_directory)
@@ -918,7 +923,7 @@ def subset_directory_by_time_range(
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         list(ex.map(_process, file_pairs))
 
-    elapsed = time.time() - start_time
+    elapsed = time.perf_counter() - start_time
     logger.info(f"Finished subsetting directory {input_directory} in {elapsed:.2f}s "
                 f"for Calibration Job {run.id}")
 

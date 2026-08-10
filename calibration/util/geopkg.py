@@ -1,14 +1,19 @@
 import gc
 import logging
 import os
+import shutil
 import sqlite3
+import tempfile
 import time
 import traceback
+import uuid
 from contextlib import contextmanager
 from functools import lru_cache
 from io import BytesIO
 from itertools import cycle
 from pathlib import Path
+from typing import Literal
+from urllib.parse import urlparse
 
 import fiona
 import geopandas as gpd
@@ -72,8 +77,48 @@ def _pp(orig: str, local: str) -> str:
 def _localize_gpkg(gpkg_path: str):
     # Always use persistent cache for GeoPackages. Infer suffix for robustness.
     ext = os.path.splitext(str(gpkg_path))[1] or ".gpkg"
-    with localize_to_path(gpkg_path, enable_cache=True, suffix=ext) as (orig, local):
-        yield orig, local
+
+    # localize_to_path() returns:
+    #   orig        = the original path/URL (string)
+    #   cached_path = path to the cached local file under /var/tmp/fsspec-cache
+    with localize_to_path(gpkg_path, enable_cache=True, suffix=ext) as (orig, cached_path):
+
+        # Preserve original basename so downstream code can extract gage_id.
+        original_name = os.path.basename(cached_path)  # e.g., "01123000.gpkg"
+
+        # Strip extension cleanly, rebuild a correct filename
+        if original_name.endswith(ext):
+            name_no_ext = original_name[:-len(ext)]
+        else:
+            name_no_ext = original_name
+
+        pid = os.getpid()
+        unique_suffix = uuid.uuid4().hex
+
+        # Final per-process temp file, e.g.
+        #   /tmp/01123000__pid1234_3f8c2a9e6b4f4d2a9c1e8f7a6b5c4d3e.gpkg
+        tmp_local_path = os.path.join(
+            tempfile.gettempdir(),
+            f"{name_no_ext}__pid{pid}_{unique_suffix}{ext}"
+        )
+
+        # Make the per-process isolated copy
+        shutil.copy(cached_path, tmp_local_path)
+
+        # The contextmanager 'yield' returns a tuple (orig, tmp_local_path)
+        # back to the caller of _localize_gpkg().
+        #
+        # Argument 1: orig            → the original remote/local path for logging/debug
+        # Argument 2: tmp_local_path  → the private per-process copy to actually read
+        try:
+            yield orig, tmp_local_path
+        finally:
+            # Cleanup the per-process temp file.
+            if os.path.exists(tmp_local_path):
+                try:
+                    os.remove(tmp_local_path)
+                except Exception:
+                    pass
 
 
 # ----------------------------
@@ -324,7 +369,16 @@ def normalize_gpkg(gpkg_path: str, output_path: str, *, output_is_dir: bool = Fa
     :param output_is_dir: If True, force output_path to be interpreted as a directory, even if it does not exist.
     """
     with _localize_gpkg(gpkg_path) as (orig_path, local_path):
-        input_filename = os.path.basename(local_path)
+        # NOTE:
+        #   _localize_gpkg() returns a per-process temporary *copy* of the GeoPackage.
+        #   That copy is given a unique filename (PID + random suffix) to avoid
+        #   SQLite/GDAL locking across concurrent processes.
+        #
+        #   orig_path is the original source path/URL and must be used for
+        #   stable output naming. The randomized local filename must never
+        #   propagate into the final output path.
+        #
+        input_filename = os.path.basename(urlparse(str(orig_path)).path)
 
         # Determine final output file path
         if output_is_dir or (os.path.exists(output_path) and os.path.isdir(output_path)):
@@ -381,7 +435,7 @@ def normalize_gpkg(gpkg_path: str, output_path: str, *, output_is_dir: bool = Fa
 
                 # Write spatial layer
                 # Use 'w' for the first layer (create file), then 'a' to append additional layers.
-                mode = "w" if not os.path.exists(output_path) else "a"
+                mode: Literal["w", "a"] = "w" if not os.path.exists(output_path) else "a"
                 gdf_out.to_file(Path(output_path), layer=layer_name, driver="GPKG", mode=mode)
                 spatial_layers.append(layer_name)
 

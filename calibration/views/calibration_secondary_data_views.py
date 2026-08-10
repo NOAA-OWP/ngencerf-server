@@ -140,9 +140,9 @@ def get_or_create_secondary_plots(run: ValidationRun, date: str, data_type: Seco
             '--direct_s3'
         ]
         logger.info(f"Calling {cfg['map_func'].__name__} with arguments: {args}")
-        start_time = time.time()
+        start_time = time.perf_counter()
         cfg["map_func"](args)
-        elapsed_time = time.time() - start_time
+        elapsed_time = time.perf_counter() - start_time
         logger.info(f"Finished running {cfg['map_func'].__name__} in {elapsed_time:.2f} seconds")
     else:
         logger.info(f"{prefix.upper()} files already exist in {plot_dir} for {get_job_description(run)}")
@@ -169,6 +169,7 @@ def generate_secondary_ts_data(validation_run: ValidationRun, data_type: Seconda
     :return: None
     """
     if validation_run.validation_type == ValidationType.VALID_CONTROL.value:
+        logger.info(f"Skipping data generation for {ValidationType.VALID_CONTROL.value}")
         return
 
     # Generate timeseries images.
@@ -201,9 +202,9 @@ def generate_secondary_ts_data(validation_run: ValidationRun, data_type: Seconda
     ]
 
     logger.info(f"Calling {ts_func.__name__} with arguments: {args}")
-    start_time = time.time()
+    start_time = time.perf_counter()
     ts_func(args)
-    elapsed_time = time.time() - start_time
+    elapsed_time = time.perf_counter() - start_time
     logger.info(f"Finished running {ts_func.__name__} in {elapsed_time:.2f} seconds")
 
 

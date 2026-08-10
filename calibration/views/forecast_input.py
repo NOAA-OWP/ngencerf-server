@@ -3,11 +3,11 @@ import logging
 
 from calibration.enums import StatusEnum
 from calibration.models import ForecastRun, ColdStartRun
-from calibration.util.ngen_locations import get_forecast_dir, FORECAST_FORCING_TEMPLATES, get_cold_start_dir
+from calibration.util.ngen_locations import get_forecast_dir, BMI_FORCING_TEMPLATES, get_cold_start_dir
 from calibration.views.called_from import called_from
 from calibration.views.common import format_datetime, join_with_or, ErrorReport, readonly_transaction
 from calibration.views.ngen_cal_input import build_config
-from cerfServer.settings import NGEN_FORECAST_WORK_DIR
+from cerfServer.settings import NGEN_BMI_FORCING_WORK_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -17,10 +17,10 @@ CONFIG_TEMPLATE = {
 
     "Forcing": {
         "forcing_provider": "bmi",
-        "root_dir": NGEN_FORECAST_WORK_DIR,
+        "root_dir": NGEN_BMI_FORCING_WORK_DIR,
         "forcing_configuration": "",
         "cycle_datetime": None,
-        "forcing_template_dir": FORECAST_FORCING_TEMPLATES,
+        "forcing_template_dir": BMI_FORCING_TEMPLATES,
         "cold_start_datetime": None
     }
 

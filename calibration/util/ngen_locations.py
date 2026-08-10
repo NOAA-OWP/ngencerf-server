@@ -15,7 +15,7 @@ static_dirs = [
     NWM_RETROSPECTIVE_DIR := os.path.join(settings.NGEN_STATIC_DIR, 'nwm_retrospective'),
     PARQUET_DIR := os.path.join(settings.NGEN_STATIC_DIR, 'parquet'),
     NGEN_MODULE_PARAMETERS := os.path.join(settings.NGEN_STATIC_DIR, 'module_parameter_files'),
-    FORECAST_FORCING_TEMPLATES := os.path.join(settings.NGEN_STATIC_DIR, 'forecast_forcing_templates'),
+    BMI_FORCING_TEMPLATES := os.path.join(settings.NGEN_STATIC_DIR, 'bmi_forcing_templates'),
     VERF_DATA := os.path.join(settings.NGEN_STATIC_DIR, 'verification_data')
 ]
 
@@ -35,7 +35,6 @@ files = [
     SAC_LIB := os.path.join(settings.NGEN_REPO_ROOT, 'extern', 'sac-sma', 'cmake_build', 'libsacbmi.so'),
     UEB_LIB := os.path.join(settings.NGEN_REPO_ROOT, 'extern', 'ueb-bmi', 'cmake_build', 'src', 'libbmiuebcxx.so'),
     VERF_CROSSWALK_NGEN_FILE := os.path.join(VERF_DATA, 'usgs_ngen_crosswalk_all_domains.parquet'),
-    VERF_GAGE_HYDROFABRIC_FILE := os.path.join(VERF_DATA, 'gage_hydrofabric_all_domains.parquet'),
 ]
 
 
@@ -60,7 +59,7 @@ def get_gage_dir(run: CalibrationRun) -> str:
     return os.path.join(
         run.job_data_dir,
         f"{objective_function_name.lower()}_{optimization_name.lower()}",
-        run.user_formulation_name,
+        run.job_name,
         run.gage.gage_id
     )
 
@@ -281,10 +280,6 @@ def get_forecast_forcing_config_file(forecast_run: ForecastRun) -> str:
     return os.path.join(get_forecast_dir(forecast_run), f'forecast_forcing_config.yaml')
 
 
-# def get_forecast_forcing_cycle_config_file(forecast_run: ForecastRun) -> str:
-#     return os.path.join(get_forecast_dir(forecast_run), f'{forecast_run.cycle.internal_name}_config.yaml')
-
-
 def get_cold_start_output_file(forecast_run: ForecastRun) -> str | None:
     if not forecast_run.cold_start_run:
         return None
@@ -301,6 +296,30 @@ def get_cold_start_stdout_file(cold_start_run: ColdStartRun) -> str:
 
 def get_forecast_stdout_file(forecast_run: ForecastRun) -> str:
     return os.path.join(get_forecast_dir(forecast_run), 'forecast_stdout.log')
+
+
+def get_cold_start_ngen_stdout_file(cold_start_run: ColdStartRun) -> str:
+    return os.path.join(get_cold_start_dir(cold_start_run), 'ngen_stdout_stderr.log')
+
+
+def get_forecast_ngen_stdout_file(forecast_run: ForecastRun) -> str:
+    return os.path.join(get_forecast_dir(forecast_run), 'ngen_stdout_stderr.log')
+
+
+def get_cold_start_mswm_log_file(cold_start_run: ColdStartRun) -> str:
+    return os.path.join(get_cold_start_dir(cold_start_run), 'logs', 'mswm.log')
+
+
+def get_forecast_mswm_log_file(forecast_run: ForecastRun) -> str:
+    return os.path.join(get_forecast_dir(forecast_run), 'logs', 'mswm.log')
+
+
+def get_cold_start_ngen_log_file(cold_start_run: ColdStartRun) -> str:
+    return os.path.join(get_cold_start_dir(cold_start_run), 'logs', 'ngen.log')
+
+
+def get_forecast_ngen_log_file(forecast_run: ForecastRun) -> str:
+    return os.path.join(get_forecast_dir(forecast_run), 'logs', 'ngen.log')
 
 
 def get_cold_start_performance_file(cold_start_run: ColdStartRun) -> str:
@@ -325,6 +344,10 @@ def get_verification_run_dir(run: VerificationRun) -> str:
 
 def get_verification_yaml_config_file(run: VerificationRun) -> str:
     return os.path.join(get_verification_run_dir(run), f'verification_{run.id}_config.yaml')
+
+
+def get_verification_log_file(run: VerificationRun) -> str:
+    return os.path.join(get_verification_run_dir(run), 'verification.log')
 
 
 def get_verification_stdout_file(run: VerificationRun) -> str:

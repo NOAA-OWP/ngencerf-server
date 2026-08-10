@@ -7,7 +7,7 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from rest_framework import status
 
-from calibration.enums import StatusEnum, SlurmStatusEnum
+from calibration.enums import StatusEnum, SlurmCallbackStatusEnum
 from calibration.models import CalibrationRun, ValidationRun, ForecastRun, ColdStartRun, VerificationRun
 from calibration.models.base_run import BaseRun
 from calibration.run_util.run_common import set_job_status, run_generic_job_end_callback, finalize_calibration_after_callback, \
@@ -75,7 +75,7 @@ def submit_job_to_slurm(run: BaseRun, owner: User, arguments: dict[str, str], st
     elif isinstance(run, VerificationRun):
         url_endpoint = settings.SLURM_SUBMIT_VERIFICATION_JOB_ENDPOINT
         payload = {
-            'verification_job_id': (None, run.id),
+            'verification_run_id': (None, run.id),
             'verification_config': (None, arguments['verification_config']),
             'stdout_file': (None, stdout_file),
         }
@@ -108,7 +108,7 @@ def submit_job_to_slurm(run: BaseRun, owner: User, arguments: dict[str, str], st
     logger.info(f"{job_description} submitted successfully! slurm_job_id: {run.slurm_job_id}")
 
 
-def check_pw_for_failure(run: BaseRun, slurm_status: SlurmStatusEnum) -> bool:
+def check_pw_for_failure(run: BaseRun, slurm_status: SlurmCallbackStatusEnum) -> bool:
     """
     Checks the status of a job executed in a Parallel Works environment and updates its status accordingly.
 
@@ -119,11 +119,11 @@ def check_pw_for_failure(run: BaseRun, slurm_status: SlurmStatusEnum) -> bool:
     :param slurm_status: The SlurmStatusEnum indicating the job's completion status.
     :return: True if the job failed or was canceled, False otherwise.
     """
-    if slurm_status == SlurmStatusEnum.CANCELED:
+    if slurm_status == SlurmCallbackStatusEnum.CANCELED:
         logger.error(f"{get_job_description(run)} was cancelled")
         set_job_status(run, StatusEnum.CANCELLED)
         return True
-    elif slurm_status == SlurmStatusEnum.FAILED:
+    elif slurm_status == SlurmCallbackStatusEnum.FAILED:
         logger.error(f"{get_job_description(run)} ending due to abnormal return code {slurm_status}")
         set_job_status(run, StatusEnum.FAILED)
         return True

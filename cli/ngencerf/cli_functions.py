@@ -1,6 +1,6 @@
 """
 Module providing CLI functionality for interacting with ngen calibration job endpoints.
-Supports operations like uploading data, submitting/deleting/cancelling jobs, and
+Supports operations like submitting/deleting/cancelling jobs, and
 importing/exporting configurations.
 """
 import itertools
@@ -11,9 +11,8 @@ import tempfile
 import threading
 import time
 import zipfile
-from contextlib import ExitStack
 from datetime import datetime
-from typing import Callable
+from typing import Callable, Any
 
 import requests
 import tabulate
@@ -209,111 +208,13 @@ def about(output_path: str | None = None) -> int:
         "/calibration/get_git_info/",
         headers={"Content-Type": "application/json"}
     )
-    if not success:
+    if not success or not response_json:
         return 1
 
-    if response_json and (git_info := response_json.get("git_info")):
-        with open(final_path, "w", encoding="utf-8") as f:
-            json.dump(git_info, f, indent=2)
+    with open(final_path, "w", encoding="utf-8") as f:
+        json.dump(response_json, f, indent=2)
 
     print(f"ngenCerf 'about' info saved to {final_path}")
-    return 0
-
-
-def upload_geopackage_data(geopackage_file: str, calibration_run_id: int) -> int:
-    """
-    Uploads a geopackage file for a given calibration run.
-
-    :param geopackage_file: Path to the .gpkg file.
-    :param calibration_run_id: ID of the calibration run.
-    :returns: 0 on success, 1 on failure.
-    """
-    print(f"Uploading geopackage: {geopackage_file} for calibration_run_id: {calibration_run_id}")
-    with open(geopackage_file, "rb") as f:
-        response_json, success = post_with_spinner_and_retry(
-            "Uploading geopackage...",
-            "/calibration/upload_geopackage_data/",
-            headers={},  # ← no static Authorization header
-            files={"geopackage_file": f},
-            data={"calibration_run_id": calibration_run_id, "return_geopackage_url": "false"},
-        )
-    if not success:
-        return 1
-    if message := response_json.get("message"):
-        print(message)
-    if warnings := response_json.get("warnings"):
-        print("Warnings:")
-        for w in warnings:
-            print(f"   {w}")
-    return 0
-
-
-def upload_observational_data(observational_file: str, calibration_run_id: int) -> int:
-    """
-    Uploads observational data (CSV) for a given calibration run.
-
-    :param observational_file: Path to observational CSV.
-    :param calibration_run_id: ID of the calibration run.
-    :returns: 0 on success, 1 on failure.
-    """
-    print(f"Uploading observational data: {observational_file} for calibration_run_id: {calibration_run_id}")
-    with open(observational_file, "rb") as f:
-        response_json, success = post_with_spinner_and_retry(
-            "Uploading observational data...",
-            "/calibration/upload_observational_data/",
-            headers={},  # ← no static Authorization header
-            files={"observational_file": f},
-            data={"calibration_run_id": calibration_run_id},
-        )
-    if not success:
-        return 1
-    if message := response_json.get("message"):
-        print(message)
-    if warnings := response_json.get("warnings"):
-        print("Warnings:")
-        for w in warnings:
-            print(f"   {w}")
-    return 0
-
-
-def upload_forcing_data(forcing_dir: str, calibration_run_id: int) -> int:
-    """
-    Uploads all files in a directory as forcing data for a given calibration run.
-
-    :param forcing_dir: Path to directory containing forcing files.
-    :param calibration_run_id: ID of the calibration run.
-    :returns: 0 on success, 1 on failure.
-    """
-    print(f"Uploading forcing data from directory: '{forcing_dir}' for calibration_run_id: {calibration_run_id}")
-
-    # noinspection PyAbstractClass
-    with ExitStack() as stack:
-        # Collect files from directory
-        files = [
-            ('files', (fname, stack.enter_context(open(os.path.join(forcing_dir, fname), 'rb'))))
-            for fname in sorted(os.listdir(forcing_dir))
-            if os.path.isfile(os.path.join(forcing_dir, fname))
-        ]
-
-        if not files:
-            print("No forcing data files found to upload.")
-            return 1
-
-        response_json, success = post_with_spinner_and_retry(
-            "Uploading forcing data...",
-            "/calibration/upload_forcing_data/",
-            headers={},  # ← no static Authorization header
-            files=files,
-            data={"calibration_run_id": calibration_run_id},
-        )
-    if not success:
-        return 1
-    if message := response_json.get("message"):
-        print(message)
-    if warnings := response_json.get("warnings"):
-        print("Warnings:")
-        for w in warnings:
-            print(f"   {w}")
     return 0
 
 
@@ -585,7 +486,7 @@ def list_jobs(output_path: str | None = None, filters: dict | None = None, sort:
     # ───────────────────────────────
     # Construct payload
     # ───────────────────────────────
-    payload = {}
+    payload: dict[str, Any] = {"include_modules": True}
     if filters:
         payload["filters"] = filters
     if sort:
@@ -623,16 +524,22 @@ def list_jobs(output_path: str | None = None, filters: dict | None = None, sort:
             job.get("status") or "-",
             (job.get("calibration_start_period") or "-").replace("T", " ").split(".")[0],
             (job.get("calibration_end_period") or "-").replace("T", " ").split(".")[0],
-            job.get("formulation_name") or "-",
+            job.get("job_name") or "-",
             job.get("objective_function") or "-",
             job.get("optimization_algorithm") or "-",
             (job.get("created_at") or "-").replace("T", " ").split(".")[0],
+            (job.get("last_updated_on") or "-").replace("T", " ").split(".")[0],
+            (job.get("submit_date") or "-").replace("T", " ").split(".")[0],
+            "yes" if job.get("is_archived") else "no",
+            "yes" if job.get("is_locked") else "no",
             ", ".join(job.get("modules", []))
         ])
 
     headers = [
         "Run ID", "Gage", "Status", "Start", "End",
-        "Formulation", "Objective", "Optimization", "Created", "Modules"
+        "Formulation", "Objective", "Optimization",
+        "Created", "Last Updated", "Submitted",
+        "Archived", "Locked", "Modules"
     ]
 
     markdown_table = tabulate.tabulate(rows, headers=headers, tablefmt="github")
@@ -912,7 +819,7 @@ def _pretty_print_job(calibration_run_id: int, data: dict) -> None:
     print(data.get("description", "").strip())
     print()
 
-    print(f"Formulation Name: {data.get('formulation_name')}")
+    print(f"Job Name: {data.get('job_name')}")
     print(f"Modules: {', '.join(data.get('modules', []))}")
     print()
 
@@ -1023,7 +930,7 @@ def _process_job_action(
         *,
         require_confirmation: bool = False,
         confirm_keyword: str = "delete",
-        pre_display_func: Callable[[int], int] | None = None,
+        pre_display_func: Callable[..., int] | None = None,
 ) -> int:
     """
     Common handler for job actions (delete, archive, lock, unlock).

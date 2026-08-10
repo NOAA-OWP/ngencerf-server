@@ -9,16 +9,20 @@ from rest_framework.decorators import api_view
 from rest_framework.request import Request
 from rest_framework.response import Response
 
-from calibration.enums import ForecastConfigEnum, StatusEnum
+from calibration.enums import ForecastConfigEnum, StatusEnum, LogName
+from calibration.models import ForecastRun, ColdStartRun
 from calibration.run_util.run_common import submit_job
 from calibration.util.calibration_validators import ErrorResponseSerializer, LoadForecastTabResponseSerializer, \
     ForecastRunSerializer, CreateAndRunForecastResponseSerializer, DeleteForecastRunResponseSerializer, CalibrationRunSerializer, \
     ForecastRunDataResponseSerializer
-from calibration.util.ngen_locations import get_forecast_dir, get_forecast_output_file, get_cold_start_output_file
+from calibration.util.ngen_locations import get_forecast_dir, get_forecast_output_file, get_cold_start_output_file, \
+    get_cold_start_stdout_file, get_forecast_stdout_file, get_cold_start_ngen_stdout_file, get_forecast_ngen_stdout_file, \
+    get_cold_start_mswm_log_file, get_forecast_mswm_log_file, get_cold_start_ngen_log_file, get_forecast_ngen_log_file
 from calibration.views.calibration_secondary_data_views import read_csv_as_json
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import handle_exceptions, validate_response, validate_request, get_forecast_run, create_forecast_run_internal, \
-    ResponseError, get_user_email, get_elapsed_str, readonly_transaction, get_calibration_run, truncate_large_fields
+    ResponseError, get_user_email, get_elapsed_str, readonly_transaction, get_calibration_run, truncate_large_fields, \
+    CerfException
 
 logger = logging.getLogger(__name__)
 
@@ -67,8 +71,8 @@ def load_forecast_tab(request: Request) -> Response:
 
     with readonly_transaction():
         configuration_values = ForecastConfigEnum.get_choices_with_fields(
-            fields=['name', 'data_sources', 'time_range',
-                    'cycle_start', 'cycle_end', 'cycle_freq', 'fcst_win', 'fcst_timestep', 'availability_lag',
+            fields=['name', 'data_sources',
+                    'cycle_start', 'cycle_end', 'cycle_freq', 'fcst_win', 'availability_lag',
                     'order'  # included ONLY so we can sort
                     ],
             extra_filter={'domain': calibration_run.gage.domain}
@@ -318,3 +322,47 @@ def delete_forecast_job(request: Request) -> Response:
         f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
 
     return Response(response_validator.data)
+
+
+def get_forecast_log(forecast_run: ForecastRun, log_name: LogName) -> str:
+    """
+    Fetches the appropriate log file for a specific forecast run.
+
+    - Supports logs like `ngen.stdout` and `forecast.stdout`.
+
+    :param forecast_run: The ForecastRun object for which the log is retrieved.
+    :param log_name: The LogName enum specifying the log type.
+    :return: The path to the log file.
+    """
+    if log_name == LogName.FORECAST_STDOUT:
+        return get_forecast_stdout_file(forecast_run)
+    elif log_name == LogName.NGEN_STDOUT:
+        return get_forecast_ngen_stdout_file(forecast_run)
+    elif log_name == LogName.MSWM:
+        return get_forecast_mswm_log_file(forecast_run)
+    elif log_name == LogName.NGEN:
+        return get_forecast_ngen_log_file(forecast_run)
+
+    raise CerfException(f'Invalid log_name: {log_name}')
+
+
+def get_cold_start_log(cold_start_run: ColdStartRun, log_name: LogName) -> str:
+    """
+    Fetches the appropriate log file for a specific cold start run.
+
+    - Supports logs like `ngen.stdout` and `cold_start.stdout`.
+
+    :param cold_start_run: The ColdStartRun object for which the log is retrieved.
+    :param log_name: The LogName enum specifying the log type.
+    :return: The path to the log file.
+    """
+    if log_name == LogName.COLD_START_STDOUT:
+        return get_cold_start_stdout_file(cold_start_run)
+    elif log_name == LogName.NGEN_STDOUT:
+        return get_cold_start_ngen_stdout_file(cold_start_run)
+    elif log_name == LogName.MSWM:
+        return get_cold_start_mswm_log_file(cold_start_run)
+    elif log_name == LogName.NGEN:
+        return get_cold_start_ngen_log_file(cold_start_run)
+
+    raise CerfException(f'Invalid log_name: {log_name}')

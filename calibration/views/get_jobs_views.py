@@ -1,8 +1,7 @@
 import json
 import logging
-from typing import Any, Type, Literal
+from typing import Any, Type, Literal, cast
 
-from django.contrib.auth import get_user_model
 from django.db.models import Q, Exists, OuterRef, Count, Subquery, When, CharField, Value, F, Case, Min, Max
 from django.db.models.functions import Lower
 from drf_spectacular.utils import extend_schema, OpenApiResponse
@@ -13,20 +12,18 @@ from rest_framework.response import Response
 from calibration.enums import GetValidationJobsScope, StatusEnum, ValidationType
 from calibration.enums_vanilla import CalibrationSortField, ForecastSortField, VerificationSortField
 from calibration.models import CalibrationFormulation, CalibrationRun, CalibrationStopCriteria, \
-    ValidationRun, IterationParameter, ForecastRun, VerificationRun
+    ValidationRun, IterationParameter, ForecastRun, VerificationRun, CustomUser
 from calibration.util.caching import get_cached_modules_by_id
 from calibration.util.calibration_validators import ErrorResponseSerializer, \
     GetCalibrationJobsResponseSerializer, CalibrationRunSerializer, GetValidationJobsResponseSerializer, \
     GetForecastJobsResponseSerializer, GetVerificationJobsResponseSerializer, CalibrationPaginationSerializer, \
     ForecastPaginationSerializer, VerificationPaginationSerializer, GetCalibrationJobIDsResponseSerializer
-from calibration.views.calibration_evaluation_views import downloadable_statuses
+from calibration.views.calibration_download_views import downloadable_statuses
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import handle_exceptions, validate_request, validate_response, truncate_large_fields, get_calibration_run, \
     get_user_email, get_elapsed_str, readonly_transaction
 
 logger = logging.getLogger(__name__)
-
-User = get_user_model()
 
 """
 Job Retrieval Endpoints for Calibration, Forecast, and Verification
@@ -61,9 +58,10 @@ Use this general shape for every request (omit keys you are not using):
             modules: list of module names
         date_filter:
             operator: "before" | "after" | "between"
-            create_date: YYYY-MM-DD     # before/after
-            start_date: YYYY-MM-DD      # between
-            end_date: YYYY-MM-DD        # between
+            create_date: ISO-8601 datetime (e.g., "2025-01-01T12:34:56Z")
+            start_date: ISO-8601 datetime (e.g., "2025-01-01T00:00:00-05:00")
+            end_date: ISO-8601 datetime (e.g., "2025-02-01T23:59:59Z")
+
         id_filter:
             operator: "before" | "after" | "between"
             id: integer                 # before/after
@@ -95,8 +93,9 @@ Full example:
             },
             "date_filter": {
                 "operator": "after",
-                "create_date": "2025-01-01"
-            },
+                "create_date": "2025-01-01T00:00:00Z"
+        }
+
             "id_filter": {
                 "operator": "before",
                 "id": 500
@@ -114,9 +113,10 @@ Date range example:
         "filters": {
             "date_filter": {
                 "operator": "between",
-                "start_date": "2025-01-01",
-                "end_date": "2025-02-01"
+                "start_date": "2025-01-01T00:00:00-05:00",
+                "end_date": "2025-02-01T23:59:59Z"
             }
+
         }
     }
 
@@ -203,15 +203,13 @@ def get_calibration_jobs_for_evaluation(request: Request) -> Response:
     get_gages = validator.get("get_gages")
 
     jobs, total_count, date_range, id_range, gage_list = get_jobs(
-        request.user,
+        auth_user(request),
         run_status=[StatusEnum.DONE, StatusEnum.FAILED, StatusEnum.CANCELLED, StatusEnum.SERVER_ERROR],
         include_validation_data=GetValidationJobsScope.STATUS,
-        include_stop_criteria=True,
+        require_both_validations_done=True,
         limit=limit,
-        offset=offset,
-        filters=filters,
-        sort=sort,
-        ids_only=ids_only,
+        offset=offset, filters=filters,
+        sort=sort, ids_only=ids_only,
         get_gages=get_gages
     )
 
@@ -230,13 +228,13 @@ def get_calibration_jobs_for_evaluation(request: Request) -> Response:
     else:
         serializer_class = GetCalibrationJobsResponseSerializer
 
-    response_validator, error_response = validate_response(serializer_class, response, fields_to_truncate=['jobs'])
+    response_validator, error_response = validate_response(serializer_class, response, fields_to_truncate=['jobs', 'gages'], max_length=10)
     if error_response:
         return error_response
 
     logger.debug(
         f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - '
-        f'{json.dumps(truncate_large_fields(response_validator.data, fields_to_truncate=["jobs"], max_length=10))}'
+        f'{json.dumps(truncate_large_fields(response_validator.data, fields_to_truncate=["jobs", "gages"], max_length=10))}'
     )
     return Response(response_validator.data)
 
@@ -281,10 +279,10 @@ def get_calibration_jobs_for_forecast(request: Request) -> Response:
     get_gages = validator.get("get_gages")
 
     jobs, total_count, date_range, id_range, gage_list = get_jobs(
-        request.user,
+        auth_user(request),
         run_status=[StatusEnum.DONE],
-        include_validation_data=GetValidationJobsScope.DONE,
-        include_stop_criteria=True,
+        include_validation_data=None,
+        require_both_validations_done=True,
         limit=limit,
         offset=offset,
         filters=filters,
@@ -308,13 +306,13 @@ def get_calibration_jobs_for_forecast(request: Request) -> Response:
     else:
         serializer_class = GetCalibrationJobsResponseSerializer
 
-    response_validator, error_response = validate_response(serializer_class, response, fields_to_truncate=['jobs'], max_length=10)
+    response_validator, error_response = validate_response(serializer_class, response, fields_to_truncate=['jobs', 'gages'], max_length=10)
     if error_response:
         return error_response
 
     logger.debug(
         f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - '
-        f'{json.dumps(truncate_large_fields(response_validator.data, fields_to_truncate=["jobs"], max_length=10))}'
+        f'{json.dumps(truncate_large_fields(response_validator.data, fields_to_truncate=["jobs", "gages"], max_length=10))}'
     )
     return Response(response_validator.data)
 
@@ -363,12 +361,13 @@ def get_calibration_jobs(request):
     ids_only = validator.get("ids_only")
     filters, sort = _normalize_filters_and_sort(filters, sort)
     get_gages = validator.get("get_gages")
+    include_modules = validator.get("include_modules")
 
     jobs, total_count, date_range, id_range, gage_list = get_jobs(
-        request.user,
+        auth_user(request),
         run_status=list(StatusEnum),
         include_validation_data=GetValidationJobsScope.STATUS,
-        include_stop_criteria=True,
+        include_modules=include_modules,
         limit=limit,
         offset=offset,
         filters=filters,
@@ -392,13 +391,13 @@ def get_calibration_jobs(request):
     else:
         serializer_class = GetCalibrationJobsResponseSerializer
 
-    response_validator, error_response = validate_response(serializer_class, response, fields_to_truncate=['jobs'], max_length=10)
+    response_validator, error_response = validate_response(serializer_class, response, fields_to_truncate=['jobs', 'gages'], max_length=10)
     if error_response:
         return error_response
 
     logger.debug(
         f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - '
-        f'{json.dumps(truncate_large_fields(response_validator.data, fields_to_truncate=["jobs"], max_length=10))}'
+        f'{json.dumps(truncate_large_fields(response_validator.data, fields_to_truncate=["jobs", "gages"], max_length=10))}'
     )
     return Response(response_validator.data)
 
@@ -676,10 +675,11 @@ def resolve_sort(sort: dict | None, enum_class: Type[CalibrationSortField | Fore
 
 
 def get_jobs(
-        user: User,
+        user: CustomUser,
         run_status: list[StatusEnum] = None,
-        include_validation_data: GetValidationJobsScope = None,
-        include_stop_criteria: bool = False,
+        include_validation_data: GetValidationJobsScope | None = None,
+        require_both_validations_done: bool = False,
+        include_modules: bool = False,
         limit: int | None = None,
         offset: int = 0,
         filters: dict[str, Any] | None = None,
@@ -697,14 +697,14 @@ def get_jobs(
     :param run_status: Optional list of StatusEnum values to filter jobs (e.g., DONE, FAILED).
     :param include_validation_data: Determines the level of validation data to include:
         - 'status': Includes validation status details for associated validation runs.
-        - 'done': Filters to include only calibration jobs where both valid_control and valid_best are DONE.
-    :param include_stop_criteria: Whether to include stop_criteria in the queryset.
+    :param include_modules: Whether to include module list in the queryset.
     :param limit: Optional maximum number of rows to return (for pagination). If None, return all.
     :param offset: Optional number of rows to skip before returning results (for pagination).
     :param filters: Optional dict of filter criteria (e.g. gage_id, status, modules).
     :param sort: Optional dict { "field": "created_at", "direction": "asc" or "desc" }.
     :param ids_only: Only return the ids of the calibration jobs.
     :param get_gages: return the set of gages used by all the jobs
+    :param require_both_validations_done: If True, only include calibration jobs where both VALID_CONTROL and VALID_BEST validation runs exist and are DONE.
     :return: Tuple (results, total_count, date_range, id_range, gage_list). 
         - total_count reflects total rows BEFORE pagination.
         - date_range reflects the possible range of created_at dates for this job type 
@@ -909,10 +909,8 @@ def get_jobs(
         #   • combined_status has been computed
         #   • validation annotations exist
         #   • any user "status" filter is run against the final combined_status
-        #
-        # Only applies when include_validation_data == DONE.
         # ─────────────────────────────────────────────────────────────
-        if include_validation_data == GetValidationJobsScope.DONE:
+        if require_both_validations_done:
             base_qs = base_qs.annotate(
                 has_valid_control_done=Exists(
                     ValidationRun.objects.filter(
@@ -977,7 +975,7 @@ def get_jobs(
         calibration_runs_qs = (
             ordered_qs.values(
                 "id", "gage__gage_id", "gage__domain__name", "submit_date", "updated_at",
-                "user_formulation_name", "calibration_start_period", "calibration_end_period",
+                "job_name", "calibration_start_period", "calibration_end_period",
                 "status__name", "combined_status", "job_genesis", "created_at",
                 "objective_function__name", "optimization__name",
                 "is_archived", "is_locked"
@@ -986,6 +984,21 @@ def get_jobs(
 
         calibration_runs = list(calibration_runs_qs)
         run_ids = [r["id"] for r in calibration_runs]
+
+        # ───── Preload modules if requested ─────
+        modules_map: dict[int, list[str]] = {}
+
+        if include_modules and run_ids:
+            modules_qs = (
+                CalibrationFormulation.objects
+                .filter(calibration_run_id__in=run_ids)
+                .select_related("module")
+                .order_by("-id")
+                .values_list("calibration_run_id", "module__name")
+            )
+
+            for run_id, module_name in modules_qs:
+                modules_map.setdefault(run_id, []).append(module_name)
 
         # ───── Precompute which runs include an LSTM module ─────
         lstm_run_ids = set(
@@ -1012,15 +1025,17 @@ def get_jobs(
             for v in validations_qs:
                 validations_map.setdefault(v["calibration_run_id"], []).append(v)
 
-        # Preload stop criteria if requested
-        stop_criteria_map: dict[int, str] = {}
-        if include_stop_criteria:
-            stop_qs = (
-                CalibrationStopCriteria.objects
-                .filter(calibration_run_id__in=run_ids)
-                .values("calibration_run_id", "value")
-            )
-            stop_criteria_map = {sc["calibration_run_id"]: sc["value"] for sc in stop_qs}
+        # Preload stop criteria
+        stop_qs = (
+            CalibrationStopCriteria.objects
+            .filter(calibration_run_id__in=run_ids)
+            .values("calibration_run_id", "value")
+        )
+
+        stop_criteria_map: dict[int, str | None] = {
+            sc["calibration_run_id"]: sc["value"]
+            for sc in stop_qs
+        }
 
         results = []
         for run in calibration_runs:
@@ -1036,7 +1051,7 @@ def get_jobs(
                 'is_locked': run['is_locked'],
                 'is_lstm': run_id in lstm_run_ids,
                 'submit_date': run['submit_date'],
-                'formulation_name': run['user_formulation_name'],
+                'job_name': run['job_name'],
                 'calibration_start_period': run['calibration_start_period'],
                 'calibration_end_period': run['calibration_end_period'],
                 'job_genesis': run['job_genesis'],
@@ -1044,6 +1059,9 @@ def get_jobs(
                 'last_updated_on': run['updated_at'],
                 'is_downloadable': StatusEnum.from_name(run['status__name']) in downloadable_statuses,
             }
+
+            if include_modules:
+                result['modules'] = modules_map.get(run_id, [])
 
             # Include detailed validation status if requested
             if include_validation_data == GetValidationJobsScope.STATUS:
@@ -1056,9 +1074,7 @@ def get_jobs(
                     for v in validations_map.get(run_id, [])
                 ]
 
-            # Include stop criteria if requested
-            if include_stop_criteria:
-                result['stop_criteria'] = stop_criteria_map.get(run_id)
+            result['stop_criteria'] = stop_criteria_map.get(run_id)
 
             results.append(result)
 
@@ -1197,7 +1213,7 @@ def get_validation_jobs(request: Request) -> Response:
 
 
 def get_forecast_jobs_internal(
-        user: User,
+        user: CustomUser,
         run_status: list[StatusEnum] | None = None,
         limit: int | None = None,
         offset: int = 0,
@@ -1251,7 +1267,6 @@ def get_forecast_jobs_internal(
                 'calibration_run_id',
                 'configuration__name',
                 'configuration__domain__name',
-                'created_at',
                 'cycle_date',
                 'submit_date',
                 'calibration_run__gage__gage_id',
@@ -1334,7 +1349,7 @@ def get_forecast_jobs(request: Request) -> Response:
     filters, sort = _normalize_filters_and_sort(filters, sort)
 
     forecast_jobs, total_count, date_range, id_range = get_forecast_jobs_internal(
-        request.user,
+        auth_user(request),
         run_status=None,
         limit=limit,
         offset=offset,
@@ -1402,7 +1417,8 @@ def get_forecast_jobs_for_verification(request: Request) -> Response:
     filters, sort = _normalize_filters_and_sort(filters, sort)
 
     forecast_jobs, total_count, date_range, id_range = get_forecast_jobs_internal(
-        request.user, run_status=[StatusEnum.DONE],
+        auth_user(request),
+        run_status=[StatusEnum.DONE],
         limit=limit,
         offset=offset,
         filters=filters,
@@ -1432,7 +1448,7 @@ def get_forecast_jobs_for_verification(request: Request) -> Response:
 
 
 def get_verification_jobs_internal(
-        user: User,
+        user: CustomUser,
         run_status: list[StatusEnum] | None = None,
         limit: int | None = None,
         offset: int = 0,
@@ -1483,8 +1499,7 @@ def get_verification_jobs_internal(
                 "id",
                 "forecast_run_id",
                 "status__name",
-                "created_at",
-                "submit_date",
+                "submit_date"
             )
         )
 
@@ -1540,7 +1555,7 @@ def get_verification_jobs(request: Request) -> Response:
     filters, sort = _normalize_filters_and_sort(filters, sort)
 
     verification_jobs, total_count, date_range, id_range = get_verification_jobs_internal(
-        request.user,
+        auth_user(request),
         run_status=None,
         limit=limit,
         offset=offset,
@@ -1588,3 +1603,20 @@ def compute_range(model, query: Q) -> tuple[
         [agg['min_created_at'], agg['max_created_at']],
         [agg['min_job_id'], agg['max_job_id']],
     )
+
+
+def auth_user(request: Request) -> CustomUser:
+    """
+    Return the authenticated user as the concrete CustomUser type.
+
+    At runtime, all API views in this module are protected by DRF authentication
+    (e.g. IsAuthenticated / JWT), so request.user is guaranteed to be a CustomUser.
+    However, DRF types request.user as AbstractBaseUser | AnonymousUser for static
+    analysis, which causes false-positive type warnings.
+
+    This helper centralizes the explicit cast at the API boundary so that:
+      - View code stays clean and readable
+      - Internal helpers can assume a concrete CustomUser
+      - We do not rely on fragile IDE type inference heuristics
+    """
+    return cast(CustomUser, request.user)

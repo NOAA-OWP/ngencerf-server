@@ -7,7 +7,7 @@ from django.conf import settings
 from django.db import transaction
 from django.db.models import QuerySet
 
-from calibration.enums import ForcingSourceEnum
+from calibration.enums import ForcingSourceEnum, DomainEnum
 from calibration.models import CalibrationParameter, CalibrationFormulation, CalibrationRun
 from calibration.util.caching import get_cached_module_by_name, get_cached_modules_by_id
 from calibration.util.calibration_validators import ModuleDataListSerializer, S3FileValidator
@@ -41,7 +41,7 @@ def fetch_from_data_services(method: str, url: str, headers: dict = None, payloa
         logger.info(f"Data Services payload: {payload}")
 
     try:
-        start_time = time.time()  # Record the start time for performance tracking
+        start_time = time.perf_counter()  # Record the start time for performance tracking
 
         # Send the appropriate HTTP request based on the method
         if method == 'GET':
@@ -52,7 +52,7 @@ def fetch_from_data_services(method: str, url: str, headers: dict = None, payloa
             raise DataServicesException(f"Unsupported HTTP method: {method}")
 
         # Log the time taken for the request
-        elapsed_time = time.time() - start_time
+        elapsed_time = time.perf_counter() - start_time
         minutes, seconds = divmod(elapsed_time, 60)  # Convert to minutes and seconds
         logger.info(f"Request to {url} took {int(minutes)}:{int(seconds):02} (minutes:seconds).")
 
@@ -197,6 +197,15 @@ def clear_times(run: CalibrationRun, cli: bool = False):
         run.validation_eval_end_period = None
 
 
+def should_use_bmi_forcing(run: CalibrationRun) -> bool:
+    # Use BMI forcing only if CONUS + AORC and a gage is present
+    if run.gage is None:
+        return False
+
+    # Use BMI forcing only if Conus and AORC
+    return settings.USE_BMI_FORCING and run.gage.domain == DomainEnum.CONUS.db_instance and run.forcing_source_requested == ForcingSourceEnum.AORC.db_instance
+
+
 def get_forcing_data_from_s3(run: CalibrationRun, forcing_source_name: str):
     """
     Attempts to retrieve forcing data from configured S3 directories.
@@ -207,6 +216,10 @@ def get_forcing_data_from_s3(run: CalibrationRun, forcing_source_name: str):
     :param forcing_source_name: The name of the forcing source to retrieve data for.
     :raises DataServicesException: If the forcing data cannot be found in the local S3 directories.
     """
+    if should_use_bmi_forcing(run):
+        logger.info("Skipping forcing retrieval for CONUS and AORC")
+        return
+
     forcing_containers = (
         settings.FORCING_DATA_DIRS_AORC
         if forcing_source_name == ForcingSourceEnum.AORC.value
@@ -306,61 +319,60 @@ def get_module_metadata_from_data_services(run: CalibrationRun,
     to_update: list[CalibrationParameter] = []
 
     # Save module parameters to the database
-    with transaction.atomic():
-        for module in module_metadata.get('modules'):
-            module_name = module['module_name']
-            # See if we have optional field
-            error = module.get('error')
-            if error:
-                eds_errors.append({
-                    'name': 'parameters',
-                    'message': error,
-                    'status_code': None
-                })
-                continue
+    for module in module_metadata.get('modules'):
+        module_name = module['module_name']
+        # See if we have optional field
+        error = module.get('error')
+        if error:
+            eds_errors.append({
+                'name': 'parameters',
+                'message': error,
+                'status_code': None
+            })
+            continue
 
-            if module_name in extra_names:
-                # Ignore any extra names that Data Services sent us
-                logger.warning(f'Ignoring extra module from Data Services - {module_name}')
-                continue
+        if module_name in extra_names:
+            # Ignore any extra names that Data Services sent us
+            logger.warning(f'Ignoring extra module from Data Services - {module_name}')
+            continue
 
-            # Resolve module via cache
-            module_instance = get_cached_module_by_name(module_name)
-            calibration_formulation = formulation_map.get(module_instance.id if module_instance else None)
-            if not calibration_formulation:
-                raise DataServicesException(f"No formulation found for module {module_name}")
+        # Resolve module via cache
+        module_instance = get_cached_module_by_name(module_name)
+        calibration_formulation = formulation_map.get(module_instance.id if module_instance else None)
+        if not calibration_formulation:
+            raise DataServicesException(f"No formulation found for module {module_name}")
 
-            # New (cloud-agnostic, no FUSE mount needed):
-            src_prefix = module['parameter_file']['uri']  # e.g. "s3://bucket/path/to/dir/"
-            dst_dir = get_bmi_config_dir_for_module(run, module_name)  # local directory path
+        # New (cloud-agnostic, no FUSE mount needed):
+        src_prefix = module['parameter_file']['uri']  # e.g. "s3://bucket/path/to/dir/"
+        dst_dir = get_bmi_config_dir_for_module(run, module_name)  # local directory path
 
-            # copy the BMI parameters
-            _ = copy_tree(src_prefix, dst_dir)
+        # copy the BMI parameters
+        _ = copy_tree(src_prefix, dst_dir)
 
-            # Save or update parameters for the module
-            parameters = module.get('calibrate_parameters', [])
-            if not parameters:
-                logger.warning(f"Module '{module_name}' has no calibratable parameters.")
-            else:
-                for param in parameters:
-                    # Data Services gives us initial_value, min and max as Strings because sometimes crap appears.
+        # Save or update parameters for the module
+        parameters = module.get('calibrate_parameters', [])
+        if not parameters:
+            logger.warning(f"Module '{module_name}' has no calibratable parameters.")
+        else:
+            for param in parameters:
+                # Data Services gives us initial_value, min and max as Strings because sometimes crap appears.
 
-                    # Convert values to floats safely
-                    initial_value = safe_float(param.get('initial_value'), "Initial value", param.get('name'), module_name)
-                    min_value = safe_float(param.get('min'), "Minimum value", param.get('name'), module_name)
-                    max_value = safe_float(param.get('max'), "Maximum value", param.get('name'), module_name)
+                # Convert values to floats safely
+                initial_value = safe_float(param.get('initial_value'), "Initial value", param.get('name'), module_name)
+                min_value = safe_float(param.get('min'), "Minimum value", param.get('name'), module_name)
+                max_value = safe_float(param.get('max'), "Maximum value", param.get('name'), module_name)
 
-                    new_param = CalibrationParameter(
-                        name=param['name'],
-                        calibration_formulation=calibration_formulation,
-                        data_type=param['data_type'],
-                        description=param['description'],
-                        initial_value=initial_value,
-                        minimum=min_value,
-                        maximum=max_value,
-                        units=param['units']
-                    )
-                    new_params.append(new_param)
+                new_param = CalibrationParameter(
+                    name=param['name'],
+                    calibration_formulation=calibration_formulation,
+                    data_type=param['data_type'],
+                    description=param['description'],
+                    initial_value=initial_value,
+                    minimum=min_value,
+                    maximum=max_value,
+                    units=param['units']
+                )
+                new_params.append(new_param)
 
         # Bulk insert (ignore_conflicts ensures no crash if they already exist)
         if new_params:

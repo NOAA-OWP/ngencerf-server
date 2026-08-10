@@ -78,7 +78,7 @@ class CalibrationSortField(Enum):
     CALIBRATION_RUN_ID = ("calibration_run_id", "id")
     GAGE_ID = ("gage_id", "gage__gage_id")
     DOMAIN_NAME = ("domain_name", "gage__domain__name")
-    FORMULATION_NAME = ("formulation_name", "user_formulation_name")
+    JOB_NAME = ("job_name", "job_name")
     SUBMIT_DATE = ("submit_date", "submit_date")
     CREATED_AT = ("created_at", "created_at")
     LAST_UPDATED_ON = ("last_updated_on", "updated_at")

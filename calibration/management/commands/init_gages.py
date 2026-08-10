@@ -7,39 +7,56 @@ from django.contrib.auth import get_user_model
 from django.core.exceptions import ObjectDoesNotExist
 from django.core.management.base import BaseCommand, CommandError
 
-from calibration.enums import DomainEnum
-from calibration.models import Gage, Rfc, CustomUser
+from calibration.models import Gage, Rfc, CustomUser, Domain
 from cerfServer.settings import BASE_DIR
 
 logger = logging.getLogger(__name__)
 
-# Gages are loaded from several files
-# 1 USGS files
-# 2 NWMv3 files.  These are the NWM calibratable gages
-# 3 Mapping files to get nws_id
-# 4 Additional gages
+# Build lookup dicts as case-insensitive (uppercased keys)
+domain_dict = {
+    d["name"].upper(): d["id"]
+    for d in Domain.objects.only("id", "name").values("id", "name")
+}
 
-alaska_domain = DomainEnum.get_instance('Alaska')
-hawaii_domain = DomainEnum.get_instance('Hawaii')
-puerto_rico_domain = DomainEnum.get_instance('Puerto_Rico')
-conus_domain = DomainEnum.get_instance('CONUS')
+rfc_dict = {
+    rfc["name"].upper(): rfc["id"]
+    for rfc in Rfc.objects.only("id", "name").values("id", "name")
+}
 
-rfc_dict = {rfc['name']: rfc['id'] for rfc in list(Rfc.objects.only('id', 'name').values('id', 'name'))}
-
-gages = {}
+# In-memory staging area keyed by gage_id; each value is a dict of Gage fields suitable for update_or_create().
+gages: dict[str, dict] = {}
 
 
 class Command(BaseCommand):
     help = "Initialize Gage table"
 
     def add_arguments(self, parser):
-        parser.add_argument('--data_dir', type=str, help='Path to directory containing gage files.')
+        """
+        Configure CLI arguments for the management command.
+
+        --data_dir: Directory containing:
+          - gages.csv (primary input)
+          - inactive_gages.csv (optional overrides applied after gages.csv is read)
+        """
+        parser.add_argument("--data_dir", type=str, help="Path to directory containing gage files.")
 
     def handle(self, *args, **options):
-        """Main entry point — wrapped with try/except to raise CommandError on any failure."""
+        """
+        Main entry point for the command.
+
+        Workflow:
+        1) Resolve input directory and admin user.
+        2) Read all gage records from gages.csv into the in-memory `gages` dict.
+        3) Apply inactive_gages.csv overrides (if present) by forcing is_active=False for listed gage_ids.
+        4) Upsert records into the Gage table via update_or_create().
+
+        Note:
+        - This command currently matches records by gage_id only. If you ever expect multiple agencies
+          per gage_id, you should change the lookup to use (gage_id, agency) to match the DB constraint.
+        """
         try:
-            data_dir = Path(options['data_dir']) if options['data_dir'] else Path(BASE_DIR) / 'calibration/management/commands/gage_data'
-            logger.info(f'Reading data from {data_dir}')
+            data_dir = Path(options["data_dir"]) if options["data_dir"] else Path(BASE_DIR) / "calibration/management/commands/gage_data"
+            logger.info(f"Reading data from {data_dir}")
 
             if not data_dir.is_dir():
                 msg = f"{data_dir} must be a directory containing the data files."
@@ -49,156 +66,38 @@ class Command(BaseCommand):
             # Gage.objects.all().delete()
 
             try:
-                # need to get a user that is guaranteed to be there, such as admin
-                user = get_user_model().objects.get(email='admin@nextgenwaterprediction.com')
+                # Need a user that is guaranteed to exist
+                user = get_user_model().objects.get(email="admin@nextgenwaterprediction.com")
             except ObjectDoesNotExist:
-                logger.error('********************************')
-                logger.error('** Admin user does not exist. **')
-                logger.error('********************************')
-                msg = "Admin user does not exist. Cannot proceed with gage initialization."
-                raise CommandError(msg)
+                logger.error("********************************")
+                logger.error("** Admin user does not exist. **")
+                logger.error("********************************")
+                raise CommandError("Admin user does not exist. Cannot proceed with gage initialization.")
 
             logger.info(f"In init_gages: email: {cast(CustomUser, user).email}")
 
-            # -----------------------------------------------------------
-            # Run all data-loading steps. Any exception bubbles to outer handler.
-            # -----------------------------------------------------------
-            add_usgs_gages(data_dir / 'USGS_gages_CONUS.csv', conus_domain)
-            add_usgs_gages(data_dir / 'USGS_gages_AK.csv', alaska_domain)
-            add_usgs_gages(data_dir / 'USGS_gages_HI.csv', hawaii_domain)
-            add_usgs_gages(data_dir / 'USGS_gages_PR.csv', puerto_rico_domain)
+            # Load primary file (all gage attributes)
+            read_gages(data_dir / "gages.csv")
 
-            add_nwm_v3(data_dir / 'NWMv3_calibration_basins_CONUS.csv', conus_domain)
-            add_nwm_v3(data_dir / 'NWMv3_calibration_basins_AK.csv', alaska_domain)
-            add_nwm_v3(data_dir / 'NWMv3_calibration_basins_HI.csv', hawaii_domain)
-            add_nwm_v3(data_dir / 'NWMv3_calibration_basins_PR.csv', puerto_rico_domain)
+            # Apply inactive overrides last (optional)
+            inactive_path = data_dir / "inactive_gages.csv"
+            if inactive_path.exists():
+                apply_inactive_overrides(inactive_path)
+            else:
+                logger.info(f"{inactive_path} not found; skipping inactive overrides")
 
-            # Some extra manually added gages
-            with (data_dir / 'Supplemental - AK.csv').open() as file:
-                # Skip the first 2 lines before header
-                for _ in range(2):
-                    next(file)
-                reader = csv.DictReader(file, delimiter=',')
-                gage_count = 0
-                row: dict[str, str]
-                for row in reader:
-                    gage_count += 1
-                    gage_id = row.get('gage_id')
-                    # These are all new gages
-                    gage = {
-                        'gage_id': gage_id,
-                        'nws_id': row.get('nws_id'),
-                        'longitude': row.get('long'),
-                        'latitude': row.get('lat'),
-                        'station_name': row.get('station_name'),
-                        'is_active': True,
-                        'nwm_v3_calibration': False,
-                        'headwater_calibration': True,
-                        'domain_id': alaska_domain.id
-                    }
-                    gages[gage_id] = gage
-            logger.info(f'Processed {gage_count} gages from {file.name}.')
-
-            with (data_dir / 'Supplemental - CONUS.csv').open() as file:
-                # Skip the first line before header
-                for _ in range(1):
-                    next(file)
-                reader = csv.DictReader(file, delimiter='|')
-                new_count = 0
-                existing_count = 0
-                gage_count = 0
-                row: dict[str, str]
-                for row in reader:
-                    gage_count += 1
-                    gage_id = row.get('gage_id')
-                    gage = gages.get(gage_id)
-                    # These gages should already exist, so we'll check for that.
-                    # We'll create it, just in case it doesn't
-                    if not gage:
-                        new_count += 1
-                        gage = {'gage_id': gage_id, 'is_active': True, 'domain_id': conus_domain.id}
-                        gages[gage_id] = gage
-                    else:
-                        existing_count += 1
-
-                    # Use new value only if old value doesn't exist
-                    nws_id = row.get('nws_id').strip() or gage.get('nws_id')
-                    station_name = row.get('station_name') or gage.get('station_name')
-                    agency = row.get('agency') or gage.get('agency')
-                    rfc = row.get('rfc')
-                    rfc_id = rfc_dict[rfc.strip()] if rfc else None
-
-                    gage.update({
-                        'nws_id': nws_id or None,
-                        'station_name': (station_name or '').strip(),
-                        'rfc_id': rfc_id,
-                        'headwater_calibration': True,
-                        'agency': (agency or '').strip()
-                    })
-
-                    gages[gage_id] = gage
-            logger.info(f'Processed {gage_count} gages from {file.name}.  {new_count} were new.  {existing_count} existing.')
-
-            # This file maps NWS id with USGS id
-            with (data_dir / 'ALL_USGS-HADS_SITES.txt').open() as file:
-                # Skip the first 4 lines
-                for _ in range(4):
-                    next(file)
-                reader = csv.DictReader(file, delimiter='|', fieldnames=['nws_id', 'gage_id', 'goes_id', 'nws_hsa', 'latitude', 'longitude', 'station_name'])
-                gage_count = 0
-                skip_count = 0
-                row: dict[str, str]
-                for row in reader:
-                    nws_id = row.get('nws_id', '').strip()
-                    gage_id = row.get('gage_id', '').strip()
-                    gage = gages.get(gage_id)
-                    if not gage:
-                        # logger.info(f"Can't find gage_id '{gage_id}' referenced in ALL_USGS-HADS_SITES.txt")
-                        # According to Yuqiong, there are reservoir gage and not streamflow gages, so we can ignore them
-                        skip_count += 1
-                        continue
-                    gage_count += 1
-
-                    if 'latitude' not in gage or gage['latitude'] is None:
-                        logger.info(f'Adding lat/long for gage {gage_id}')
-                        # The ALL_USGS-HADS_SITES.txt file has all longitude values as positive, even though they are in the Western hemisphere.  So we'll switch it.
-                        gage['latitude'] = dms_to_dd(row.get('latitude').strip())
-                        gage['longitude'] = dms_to_dd('-' + row.get('longitude').strip())
-                    if 'station_name' not in gage or gage['station_name'] is None:
-                        gage['station_name'] = row.get('station_name')
-
-                    gage['nws_id'] = nws_id
-            logger.info(f'Processed {gage_count} gages from {file.name}.  Skipped {skip_count} gages assumed to be non-streamflow gages.')
-
-            add_additional_gages(data_dir / 'RFC Additional NextGen Calibration Basin List - AK.csv', alaska_domain)
-            add_additional_gages(data_dir / 'RFC Additional NextGen Calibration Basin List - CONUS.csv', conus_domain)
-            add_additional_gages(data_dir / 'RFC Additional NextGen Calibration Basin List - PR.csv', puerto_rico_domain)
-            add_additional_gages(data_dir / 'RFC Additional NextGen Calibration Basin List - HI.csv', hawaii_domain)
-
-            # Deactivate gages.  This one should be done last
-            with (data_dir / 'inactive_gages.csv').open() as file:
-                inactive_count = 0
-                for raw in file:
-                    line = raw.strip()
-                    # Skip empty lines or comments
-                    if not line or line.startswith('#'):
-                        continue
-
-                    gage_id = line
-                    if gage_id in gages:
-                        gages[gage_id]['is_active'] = False
-                        inactive_count += 1
-                    else:
-                        logger.warning(f"Could not find gage_id '{gage_id}' in loaded gages for deactivation")
-
-                logger.info(f'Processed {inactive_count} inactive gages from {file.name}.')
-
-            logger.info('')
-            logger.info('Creating objects.... this will take a minute or two')
+            # Write to DB
+            logger.info("")
+            logger.info("Creating objects.... this will take a minute or two")
             row_num = 0
-            unique_field = 'gage_id'
+
+            # IMPORTANT:
+            # The model has a uniqueness constraint on (gage_id, agency), but this loader currently upserts by gage_id only.
+            # If the input data ever contains the same gage_id under multiple agencies, you must include agency in the lookup.
+            unique_field = "gage_id"
+
             for gage in gages.values():
-                gage['created_by'] = user
+                gage["created_by"] = user
                 try:
                     Gage.objects.update_or_create(
                         defaults={key: value for key, value in gage.items() if key != unique_field},
@@ -206,10 +105,11 @@ class Command(BaseCommand):
                     )
 
                 except Exception as e:
-                    raise CommandError(f'Error adding gage - {gage} - {e}')
+                    raise CommandError(f"Error adding gage - {gage} - {e}")
+
                 row_num += 1
                 if row_num % 1000 == 0:
-                    logger.info(f'{row_num} of {len(gages)}...')
+                    logger.info(f"{row_num} of {len(gages)}...")
 
             logger.info("init_gages completed successfully.")
 
@@ -221,150 +121,233 @@ class Command(BaseCommand):
             raise CommandError(f"init_gages failed: {e}")
 
 
-def add_additional_gages(gage_file, domain):
-    with Path(gage_file).open() as file:
-        reader = csv.reader(file, delimiter=',')
-        row_num = 0
-        gage_count = 0
-        row: list[str]
-        for row in reader:
-            row_num += 1
-            # Skip the first lines
-            if row_num <= 1:
+def apply_inactive_overrides(inactive_file: Path) -> None:
+    """
+    Read inactive_gages.csv and mark matching gages as inactive in the in-memory dict.
+
+    File format:
+      - One gage_id per line
+      - Empty lines and lines starting with '#' are ignored
+
+    Behavior:
+      - If a gage_id exists in the staged `gages` dict, its 'is_active' field is set to False.
+      - If a gage_id does not exist in `gages`, a warning is logged and the line is ignored.
+    """
+    inactive_count = 0
+    with inactive_file.open() as file:
+        for raw in file:
+            line = raw.strip()
+            if not line or line.startswith("#"):
                 continue
 
-            rfc = row[0]
-            rfc_id = rfc_dict[rfc]
-            for nws_id in row[1:]:
-                # Find this nws_id in our collection
-                gage = next((item for item in gages.values() if item.get('nws_id') == nws_id), None)
-                if not gage:
-                    logger.info(f"Could not find gage with nws_id {nws_id} for rfc {rfc}")
-                    continue
-                gage_count += 1
-                gage['rfc_id'] = rfc_id
-                gage['domain_id'] = domain.id
-                # All of these gages have headwater_calibration flag on regardless of nwm_v3_calibration
-                gage['headwater_calibration'] = True
-    logger.info(f'Processed {gage_count} gages from {file.name}.')
-
-
-def add_usgs_gages(usgs_file, domain):
-    # Read the main file and supplement with info from the previous file, if available for that gage
-    with Path(usgs_file).open() as file:
-        # Skip the first 34 lines, including the header
-        for _ in range(34):
-            next(file)
-        reader = csv.DictReader(file, delimiter='\t',
-                                fieldnames=['agency_name', 'gage_id', 'station_name', 'site_type', 'latitude', 'longitude', 'lat_long_accuracy',
-                                            'lat_Long_datum', 'altitude', 'altitude_accuracy', 'altitude_datum', 'huc', 'drainage_area'])
-
-        gage_count = 0
-        row: dict[str, str]
-        for row in reader:
-            gage_count += 1
-            gage_id = row.get('gage_id')
-            # There shouldn't be any overlap in the USGS files, so we should always be creating a new entry.
-            gage = gages.get(gage_id)
-            if not gage:
-                gage = {'gage_id': gage_id, 'is_active': True, 'nwm_v3_calibration': False, 'headwater_calibration': False}
-                gages[gage_id] = gage
-
-            agency = row.get('agency_name')
-            station_name = row.get('station_name')
-            site_type = row.get('site_type')
-            latitude = float(row.get('latitude'))
-            longitude = float(row.get('longitude'))
-            lat_long_accuracy = row.get('lat_long_accuracy', '')
-            lat_long_datum = row.get('lat_long_datum', '')
-            altitude = float(row.get('altitude')) if row.get('altitude') else None
-            altitude_accuracy = row.get('altitude_accuracy', '')
-            altitude_datum = row.get('altitude_datum', '')
-            huc = row.get('huc')
-            drainage_area = float(row.get('drainage_area')) if row.get('drainage_area') else None
-
-            gage.update({'agency': agency, 'station_name': station_name, 'site_type': site_type,
-                         'lat_long_accuracy': lat_long_accuracy, 'lat_long_datum': lat_long_datum,
-                         'altitude': altitude, 'altitude_accuracy': altitude_accuracy, 'altitude_datum': altitude_datum, 'huc': huc,
-                         'drainage_area': drainage_area, 'latitude': latitude, 'longitude': longitude, 'domain_id': domain.id})
-
-    logger.info(f'Processed {gage_count} gages from {file.name}.')
-
-
-def add_nwm_v3(nwm_v3_file, domain):
-    with Path(nwm_v3_file).open() as file:
-        reader = csv.DictReader(file, delimiter=',')
-        new_count = 0
-        existing_count = 0
-        gage_count = 0
-        row: dict[str, str]
-        for row in reader:
-            gage_count += 1
-            gage_id = row.get('ID')
-            gage = gages.get(gage_id)
-            if not gage:
-                new_count += 1
-                longitude = None if row.get('longitd') == 'NA' else float(row.get('longitd'))
-                latitude = None if row.get('latitud') == 'NA' else float(row.get('latitud'))
-                gage = {'gage_id': gage_id, 'is_active': True,
-                        'nwm_v3_calibration': True, 'headwater_calibration': True,
-                        'latitude': latitude, 'longitude': longitude,
-                        'domain_id': domain.id}
-                gages[gage_id] = gage
+            gage_id = line
+            if gage_id in gages:
+                gages[gage_id]["is_active"] = False
+                inactive_count += 1
             else:
-                # If it already exists, update this flag
-                existing_count += 1
-                gage['nwm_v3_calibration'] = True
-                gage['headwater_calibration'] = True
+                logger.warning(f"Could not find gage_id '{gage_id}' in loaded gages for deactivation")
 
-            rfc = row.get('rfc')
-            gage['rfc_id'] = rfc_dict[rfc] if rfc else None
-            gages[gage_id] = gage
-    logger.info(f'Processed {gage_count} gages from {file.name}.  {new_count} were new.  {existing_count} existing')
+    logger.info(f"Processed {inactive_count} inactive gages from {inactive_file.name}.")
 
 
-def dms_to_dd(lat_long_str):
-    d, m, s = tuple(lat_long_str.split(' '))
-    if d[0] == '-':
-        dd = float(d) - float(m) / 60 - float(s) / 3600
-    else:
-        dd = float(d) + float(m) / 60 + float(s) / 3600
+def parse_bool(val: str | None) -> bool | None:
+    """
+    Parse a boolean value from CSV text.
 
-    return dd
+    Returns:
+      - True  for 'true'
+      - False for 'false'
+      - None  for '' or None
 
-#
-# bounding_boxes = [{'name': 'Alaska', 'upper_right': {'lat': 51.229087747767466, 'long': -157.68842},
-#                    'lower_left': {'lat': 71.352561, 'long': -139.55319}},
-#                   {'name': 'Hawaii', 'upper_right': {'lat': 18.91727560534605, 'long': -160.33116},
-#                    'lower_left': {'lat': 22.23238695135951, 'long': -154.80833743387433}},
-#                   {'name': 'Puerto Rico', 'upper_right': {'lat': 17.91217576734767, 'long': -67.33337},
-#                    'lower_left': {'lat': 18.51609472983729, 'long': -64.48663}},
-#                   ]
-#
-# # Normalize the longitude, so we don't have to worry about negatives
-# for b in bounding_boxes:
-#     b['upper_right']['long'] += 180
-#     b['lower_left']['long'] += 180
+    Note:
+      This function preserves missing values by returning None.
+      Callers must replace None with an explicit default before
+      assigning to model fields that are null=False.
+    """
+    if val is None:
+        return None
+    v = val.strip().lower()
+    if v == "":
+        return None
+    if v == "true":
+        return True
+    if v == "false":
+        return False
+    raise ValueError(f"Invalid boolean value '{val}' (expected 'true' or 'false')")
 
-#
-# def calculate_domain(lat, long):
-#     lat = float(lat)
-#     long = float(long) + 180.0
-#     # Oder matters.  Do the unambiguous ones first
-#     puerto_rico = next(item for item in bounding_boxes if item['name'] == 'Puerto Rico')
-#     if (puerto_rico['lower_left']['lat'] < lat < puerto_rico['upper_right']['lat']
-#             and puerto_rico['lower_left']['long'] < lat < puerto_rico['upper_right']['long']):
-#         return puerto_rico_domain
-#
-#     hawaii = next(item for item in bounding_boxes if item['name'] == 'Hawaii')
-#     if (hawaii['lower_left']['lat'] < lat < hawaii['upper_right']['lat']
-#             and hawaii['lower_left']['long'] < lat < hawaii['upper_right']['long']):
-#         return hawaii_domain
-#
-#     alaska = next(item for item in bounding_boxes if item['name'] == 'Alaska')
-#     # For alaska, where just going to check if the lat/long is West of the Eastern border
-#     if long < alaska['upper_right']['long']:
-#         return alaska_domain
-#
-#     # Assume anything else is Conus
-#     return conus_domain
+
+def parse_float(val: str | None) -> float | None:
+    """
+    Parse a float value from the CSV.
+
+    Returns:
+      - None when the input is '' or None (suitable for nullable DB fields)
+      - float(...) otherwise
+
+    Raises:
+      - ValueError if the input is non-empty but not a valid float.
+    """
+    if val is None:
+        return None
+    v = val.strip()
+    if v == "":
+        return None
+    return float(v)
+
+
+def parse_str(val: str | None) -> str | None:
+    """
+    Parse a string value from the CSV.
+
+    Returns:
+      - None when the input is '' or None (suitable for nullable DB fields)
+      - the stripped string otherwise
+    """
+    if val is None:
+        return None
+    v = val.strip()
+    return v if v != "" else None
+
+
+def require_str(row: dict[str, str], key: str, *, row_num: int, file_name: str, allow_empty: bool = False) -> str:
+    """
+    Read a required string column.
+
+    - By default, the value must be non-empty after stripping.
+    - If allow_empty=True, the column must exist, but may be an empty string.
+
+    Use allow_empty=True for fields that are null=False but allow '' at the DB level
+    (e.g., station_name).
+    """
+    if key not in row:
+        raise CommandError(f"{file_name}: missing required column '{key}' on row {row_num}")
+
+    raw = row.get(key)
+    if raw is None:
+        raise CommandError(f"{file_name}: missing required '{key}' on row {row_num}")
+
+    value = raw.strip()
+
+    if not value and not allow_empty:
+        raise CommandError(f"{file_name}: missing required '{key}' on row {row_num}")
+
+    return value  # may be '' if allow_empty=True
+
+
+def domain_id_from_value(domain_value: str | None, *, row_num: int, file_name: str) -> int:
+    """
+    Convert CSV domain value -> Domain FK id (case-insensitive).
+
+    The CSV contains a Domain "name" value; this function looks it up in `domain_dict`
+    and returns the corresponding DB id.
+
+    Domain is required (Gage.domain is null=False).
+    """
+    name = (domain_value or "").strip()
+    if not name:
+        raise CommandError(f"{file_name}: missing required 'domain' on row {row_num}")
+
+    key = name.upper()
+    try:
+        return domain_dict[key]
+    except KeyError:
+        raise CommandError(f"{file_name}: unknown domain '{name}' on row {row_num}")
+
+
+def rfc_id_from_value(rfc_value: str | None, *, row_num: int, file_name: str) -> int | None:
+    """
+    Convert CSV RFC value -> RFC FK id (case-insensitive).
+
+    The CSV contains an RFC "name" value; this function looks it up in `rfc_dict`
+    and returns the corresponding DB id.
+
+    RFC is optional (Gage.rfc is null=True):
+      - None / '' / whitespace -> None
+      - otherwise must exist in rfc_dict
+    """
+    rfc_name = (rfc_value or "").strip()
+    if not rfc_name:
+        return None
+
+    key = rfc_name.upper()
+    try:
+        return rfc_dict[key]
+    except KeyError:
+        raise CommandError(f"{file_name}: unknown rfc '{rfc_name}' on row {row_num}")
+
+
+def read_gages(gages_file: Path) -> None:
+    """
+    Read gages.csv into the global `gages` dict.
+
+    - Uses the CSV header via DictReader (no hard-coded columns / required list).
+    - Validates required (null=False) Gage fields that do not have safe "blank" semantics:
+        * gage_id
+        * agency
+        * station_name
+        * huc
+        * domain (resolved to domain_id)
+    - Parses booleans and ensures they never become None before writing to null=False model fields:
+        * is_active
+        * headwater_calibration
+        * nwm_v3_calibration
+      (If blank in the CSV, the loader applies the model’s defaults explicitly.)
+    - Allows blanks for nullable fields:
+        * nws_id
+        * rfc (resolved to rfc_id)
+        * latitude, longitude, altitude
+        * drainage_area
+    """
+    if not gages_file.exists():
+        raise CommandError(f"{gages_file} does not exist")
+
+    with gages_file.open(newline="") as file:
+        reader = csv.DictReader(file, delimiter=",")
+
+        gage_count = 0
+        for row_num, row in enumerate(reader, start=2):  # header is row 1
+            gage_count += 1
+
+            gage_id = require_str(row, "gage_id", row_num=row_num, file_name=gages_file.name)
+            agency = require_str(row, "agency", row_num=row_num, file_name=gages_file.name)
+            station_name = require_str(row, "station_name", row_num=row_num, file_name=gages_file.name, allow_empty=True)
+            huc = require_str(row, "huc", row_num=row_num, file_name=gages_file.name, allow_empty=True)
+
+            domain_id = domain_id_from_value(row.get("domain"), row_num=row_num, file_name=gages_file.name)
+            rfc_id = rfc_id_from_value(row.get("rfc"), row_num=row_num, file_name=gages_file.name)
+
+            is_active = parse_bool(row.get("is_active"))
+            headwater_calibration = parse_bool(row.get("headwater_calibration"))
+            nwm_v3_calibration = parse_bool(row.get("nwm_v3_calibration"))
+
+            # Ensure null=False booleans never get None (model has defaults; keep it explicit here)
+            is_active = True if is_active is None else is_active
+            headwater_calibration = False if headwater_calibration is None else headwater_calibration
+            nwm_v3_calibration = False if nwm_v3_calibration is None else nwm_v3_calibration
+
+            # Stage/update in global dict; later we upsert into DB.
+            gage = gages.get(gage_id)
+            if not gage:
+                gage = {"gage_id": gage_id}
+                gages[gage_id] = gage
+
+            gage.update(
+                {
+                    "gage_id": gage_id,
+                    "nws_id": parse_str(row.get("nws_id")),
+                    "rfc_id": rfc_id,
+                    "nwm_v3_calibration": nwm_v3_calibration,
+                    "headwater_calibration": headwater_calibration,
+                    "agency": agency,
+                    "station_name": station_name,
+                    "latitude": parse_float(row.get("latitude")),
+                    "longitude": parse_float(row.get("longitude")),
+                    "altitude": parse_float(row.get("altitude")),
+                    "huc": huc,
+                    "drainage_area": parse_float(row.get("drainage_area")),
+                    "domain_id": domain_id,
+                    "is_active": is_active,
+                }
+            )
+
+    logger.info(f"Processed {gage_count} gages from {gages_file.name}.")

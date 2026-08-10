@@ -29,17 +29,10 @@ class StatusEnum(AbstractEnum):
 
 class ForcingSourceEnum(AbstractEnum):
     """
-    Enum for Forcing Sources, with alias support for 'Upload' or 'User Upload' entries.
+    Enum for Forcing Sources
     """
-    UPLOAD = 'User Upload'
     AORC = 'AORC'
     NWM_RETROSPECTIVE = 'NWM Retrospective'
-
-    @classmethod
-    def get_aliases(cls):
-        return {
-            cls.UPLOAD: ['Upload', 'User Upload']
-        }
 
     @classmethod
     def get_model(cls) -> Type[ForcingSource]:
@@ -53,15 +46,10 @@ class ForcingSourceEnum(AbstractEnum):
 
 class ObservationalSourceEnum(AbstractEnum):
     """
-    Enum for Observational Sources, with alias support for 'Upload' or 'User Upload' entries.
+    Enum for Observational Sources
     """
-    UPLOAD = 'User Upload'
 
-    @classmethod
-    def get_aliases(cls):
-        return {
-            cls.UPLOAD: ['Upload', 'User Upload']
-        }
+    HISTORICAL = 'Historical'
 
     @classmethod
     def get_model(cls) -> Type[ObservationalSource]:
@@ -75,15 +63,10 @@ class ObservationalSourceEnum(AbstractEnum):
 
 class GeopackageSourceEnum(AbstractEnum):
     """
-    Enum for Geopackage Sources, with alias support for 'Upload' or 'User Upload' entries.
+    Enum for Geopackage Sources
     """
-    UPLOAD = 'User Upload'
 
-    @classmethod
-    def get_aliases(cls):
-        return {
-            cls.UPLOAD: ['Upload', 'User Upload']
-        }
+    HYDROFABRIC = 'Hydrofabric'
 
     @classmethod
     def get_model(cls) -> Type[GeopackageSource]:
@@ -116,6 +99,7 @@ class DomainEnum(AbstractEnum):
     """
 
     PUERTO_RICO = 'Puerto_Rico'
+    CONUS = 'CONUS'
 
     @classmethod
     def get_aliases(cls):
@@ -210,7 +194,7 @@ class DataTypeEnum(AbstractEnum):
     STRING = 'string'
 
 
-class SlurmStatusEnum(AbstractEnum):
+class SlurmCallbackStatusEnum(AbstractEnum):
     DONE = 'DONE'
     FAILED = 'FAILED'
     CANCELED = 'CANCELED'
@@ -236,6 +220,8 @@ class LogCategory(AbstractEnum):
     CALIBRATION = 'calibration'
     VALIDATION = 'validation'
     FORECAST = 'forecast'
+    COLD_START = 'cold start'
+    VERIFICATION = 'verification'
     GLOBAL = 'global'
 
 
@@ -243,7 +229,11 @@ class LogName(AbstractEnum):
     NGEN_STDOUT = 'ngen stdout'
     NGEN_CAL_STDOUT = 'ngen-cal stdout'
     FORECAST_STDOUT = 'forecast stdout'
+    COLD_START_STDOUT = 'cold start stdout'
+    VERIFICATION = 'verification'
+    VERIFICATION_STDOUT = 'verification stdout'
     NGEN = 'ngen'
+    MSWM = 'mswm'
 
 
 # Used for both ValidationMetrics and NWMRetrospectiveMetrics
@@ -263,7 +253,6 @@ class GetValidationJobsScope(AbstractEnum):
     IDS = 'ids'
     STATUS = 'status'
     DETAILS = 'details'
-    DONE = 'done'
 
 
 class NgenLogging(AbstractEnum):

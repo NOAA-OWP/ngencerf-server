@@ -1,4 +1,4 @@
-# Another supplemental table to fill in agency/station name where we didn't have it.  These gages should already exist
+# Another supplemental table to fill in agency/station name where we didn't have it.  These gages should already exist -- We also list the TX DOT gages to make them calibratable
 gage_id|nws_id|agency|station_name|rfc
 10172860| |USGS| |
 MTK| |CADWR| |
@@ -60,3 +60,43 @@ RCS| |CADWR| |
 15493000|UCHA2|USGS| |
 15056210|TYAA2|USGS| |
 02GH002| |ENVCA| |
+08041940
+08042539
+08064990
+08065080
+08065340
+08065420
+08065820
+08065925
+08066087
+08066138
+08066380
+08067280
+08067505
+08068025
+08070550
+08077888
+08078935
+08098295
+08108705
+08108710
+08109310
+08110520
+08111006
+08111051
+08111056
+08111080
+08111085
+08111090
+08111110
+08117375
+08117403
+08117857
+08162580
+08164410
+08169778
+08174545
+08189520
+08189590
+08189718
+

@@ -2,13 +2,12 @@ import json
 import logging
 import os
 import shutil
-from datetime import datetime, timezone, timedelta
+import time
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 
 from django.conf import settings
-from django.contrib.auth import get_user_model
-from django.db import transaction, router
-from django.db.models.deletion import Collector
+from django.db import transaction
 from drf_spectacular.utils import extend_schema, OpenApiResponse
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
@@ -25,19 +24,18 @@ from calibration.util.calibration_validators import FooterResponseSerializer, \
     CreateAndRunValidationResponseSerializer, CreateValidationRequestSerializer, \
     EmptySerializer, CreateForecastRequestSerializer, CreateAndRunForecastResponseSerializer, \
     ArchiveJobRequestSerializer, GetGitInfoResponseSerializer, CalibrationRunIdList, CalibrationRunListResponse, ImportSerializer, \
-    LockJobRequestSerializer
+    LockJobRequestSerializer, S3DirectoryValidator
+from calibration.util.cloud_util import join_url, copy_tree, get_filesystem, path_exists
 from calibration.util.git_util import get_git_info_internal
 from calibration.views import ngen_cal_input
 from calibration.views.calibration_import_export_views import load_calibration_run_data, import_calibration_run_data
-from calibration.views.calibration_run_views import resolve_job_data_dir
+from calibration.views.calibration_run_views import map_path_to_host
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import handle_exceptions, validate_response, get_calibration_run, create_calibration_run_internal, ResponseError, \
     validate_request, create_validation_run_internal, create_forecast_run_internal, get_user_email, get_elapsed_str, readonly_transaction, \
-    format_datetime, create_cold_start_run_internal, get_job_description
+    format_datetime, create_cold_start_run_internal, get_job_description, get_calibration_runs_bulk
 
 logger = logging.getLogger(__name__)
-
-User = get_user_model()
 
 
 @extend_schema(
@@ -77,7 +75,11 @@ def create_calibration_run(request: Request) -> Response:
     with transaction.atomic():
         run = create_calibration_run_internal(request.user)
 
-        response = {'message': f'Calibration Job {run.id} created', 'calibration_run_id': run.id, 'job_data_dir': resolve_job_data_dir(run)}
+        response = {
+            'message': f'Calibration Job {run.id} created',
+            'calibration_run_id': run.id,
+            'job_data_dir': map_path_to_host(run.job_data_dir)
+        }
 
         response_validator, error_response = validate_response(CreateCalibrationRunResponseSerializer, response)
         if error_response:
@@ -114,6 +116,9 @@ def create_and_run_validation(request: Request) -> Response:
     Validates the request, checks if a validation job already exists for the specified calibration run
     and iteration, and creates and submits a new validation job if not.
 
+    Additionally, disallows submission if either the VALID_CONTROL or VALID_BEST
+    validation job for this calibration run is still RUNNING or SUBMITTED.
+
     :param request: The HTTP request object containing calibration and iteration details.
     :return: JSON response with validation run details or error information.
     """
@@ -130,6 +135,35 @@ def create_and_run_validation(request: Request) -> Response:
     calibration_run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=[StatusEnum.DONE])
     if error_return:
         return error_return
+
+    # ─────────────────────────────────────────────
+    # Require BOTH VALID_CONTROL and VALID_BEST to be DONE.
+    # Block if EITHER is missing or not DONE.
+    # ─────────────────────────────────────────────
+    required_types = [
+        ValidationType.VALID_CONTROL.value,
+        ValidationType.VALID_BEST.value,
+    ]
+
+    # Build dict of existing runs
+    control_best_dict = {
+        vr.validation_type: vr
+        for vr in ValidationRun.objects.filter(
+            calibration_run=calibration_run,
+            validation_type__in=required_types
+        )
+    }
+
+    # Ensure both exist and both are DONE
+    for vt in required_types:
+        vr = control_best_dict.get(vt)
+        if not vr or vr.status != StatusEnum.DONE.db_instance:
+            label = "VALID_CONTROL" if vt == ValidationType.VALID_CONTROL.value else "VALID_BEST"
+            status_name = vr.status.name if vr else "MISSING"
+            return ResponseError(
+                f"Cannot submit a new validation job because {label} is {status_name} for "
+                f"Calibration Job {calibration_run.id}. Both VALID_CONTROL and VALID_BEST must be DONE."
+            )
 
     # Check if a ValidationRun already exists for this CalibrationRun and Iteration
     existing_validation_run_id = (
@@ -365,7 +399,13 @@ def get_git_info(request: Request) -> Response:
     if error_return:
         return error_return
 
-    response = {"git_info": get_git_info_internal()}
+    start_time = settings.DJANGO_START_TIME
+    uptime = datetime.now(tz=timezone.utc) - start_time  # timedelta
+    response = {
+        "server_start": start_time,
+        "server_uptime": uptime,
+        "git_info": get_git_info_internal()
+    }
 
     response_validator, error_response = validate_response(GetGitInfoResponseSerializer, response)
     if error_response:
@@ -533,21 +573,33 @@ def delete_jobs(request: Request) -> Response:
 
     job_results = []
 
+    # Bulk fetch all the calibration jobs
+    runs_by_id, errors_by_id = get_calibration_runs_bulk(
+        calibration_run_ids=calibration_run_ids,
+        user=request.user,
+        run_status=list(StatusEnum),
+        include_archived=False,
+    )
+
     # Process each calibration_run_id in the list
     for calibration_run_id in calibration_run_ids:
-        run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=list(StatusEnum))
-        if error_return:
+
+        # Handle validation / access errors
+        error = errors_by_id.get(calibration_run_id)
+        if error:
             job_results.append({
-                "message": error_return.data.get('message'),
+                "message": error.data.get('message'),
                 "calibration_run_id": calibration_run_id,
-                "success": False
+                "success": False,
             })
             continue
+
+        run = runs_by_id[calibration_run_id]
 
         # Can't delete if the job is locked
         if run.is_locked:
             job_results.append({
-                "message": f'Calibration Job {run.id} is locked for deletion',
+                "message": f'Calibration Job {calibration_run_id} is locked for archiving/deleting',
                 "calibration_run_id": calibration_run_id,
                 "success": False
             })
@@ -578,7 +630,8 @@ def delete_jobs(request: Request) -> Response:
     if error_response:
         return error_response
     logger.debug(
-        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
+        f'Returning to {get_user_email(request)} from {get_caller_name()}()'
+        f'{get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
 
     return Response(response_validator.data)
 
@@ -602,7 +655,9 @@ def delete_jobs(request: Request) -> Response:
 @handle_exceptions
 def archive_jobs(request: Request) -> Response:
     """
-    Archive or unarchive multiple calibration jobs. Essentially a soft delete by setting an archive flag.
+    Archive or unarchive multiple calibration jobs. A soft-delete mechanism:
+    archiving moves job data to S3 and removes the local directory;
+    unarchiving restores from S3 into a clean directory.
 
     :param request: The HTTP request object.
     :return: A Response object with the archive confirmation.
@@ -617,56 +672,178 @@ def archive_jobs(request: Request) -> Response:
     calibration_run_ids = validator.get('calibration_run_ids')
     archive = validator.get('archive')
 
+    if not settings.NGENCERF_ARCHIVE_S3_PATH:
+        return ResponseError("NGENCERF_ARCHIVE_S3_PATH is undefined")
+
+    # Make sure it's s3 and ends with a directory slash
+    try:
+        S3DirectoryValidator(data={"uri": settings.NGENCERF_ARCHIVE_S3_PATH}).is_valid(raise_exception=True)
+    except Exception:
+        return ResponseError("NGENCERF_ARCHIVE_S3_PATH must be a valid S3 directory (e.g. s3://ngencerf_archive/<system_name>/)")
+
+    if not path_exists(settings.NGENCERF_ARCHIVE_S3_PATH):
+        return ResponseError(
+            f"NGENCERF_ARCHIVE_S3_PATH does not exist on S3: {settings.NGENCERF_ARCHIVE_S3_PATH}"
+        )
+
     job_results = []
 
+    # Bulk fetch all the calibration jobs including archived jobs
+    runs_by_id, errors_by_id = get_calibration_runs_bulk(
+        calibration_run_ids=calibration_run_ids,
+        user=request.user,
+        run_status=list(StatusEnum),
+        include_archived=True,
+    )
     # Process each calibration_run_id in the list
     for calibration_run_id in calibration_run_ids:
-        run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=list(StatusEnum), include_archived=True)
-        if error_return:
+
+        # Validation / access errors
+        error = errors_by_id.get(calibration_run_id)
+        if error:
             job_results.append({
-                "message": error_return.data.get('message'),
+                "message": error.data.get('message'),
                 "calibration_run_id": calibration_run_id,
                 "success": False
             })
             continue
 
+        run = runs_by_id[calibration_run_id]
+
+        # Can't archive if the job is locked
+        if run.is_locked:
+            job_results.append({
+                "message": f'Calibration Job {calibration_run_id} is locked for archiving/deleting',
+                "calibration_run_id": calibration_run_id,
+                "success": False
+            })
+            continue
+
+        # Already archived/not-archived?
         if archive == run.is_archived:
             job_results.append({
-                "message": f'Calibration Job {run.id} is {"already" if archive else "not"} archived',
+                "message": f'Calibration Job {calibration_run_id} is {"already" if archive else "not"} archived',
                 "calibration_run_id": calibration_run_id,
                 "success": False
             })
             continue
 
-        # Check for any running jobs (including the calibration job itself)
-        if archive:
-            running_jobs_error = has_running_associated_jobs(run)
-            if running_jobs_error:
-                job_results.append({
-                    "message": running_jobs_error,
-                    "calibration_run_id": calibration_run_id,
-                    "success": False
-                })
-                continue
+        try:
+            # ===============================
+            # ARCHIVE (EFS → S3)
+            # ===============================
+            if archive:
+                # Prevent archiving while job or child jobs are running
+                running_jobs_error = has_running_associated_jobs(run)
+                if running_jobs_error:
+                    job_results.append({
+                        "message": running_jobs_error,
+                        "calibration_run_id": calibration_run_id,
+                        "success": False
+                    })
+                    continue
 
-        run.is_archived = archive
-        # If we're archiving, then unlock it
-        run.is_locked = False if archive else run.is_locked
-        run.save(update_fields=['is_archived', 'is_locked'])
+                src_path = run.job_data_dir  # e.g. /ngencerf/data/.../1_peter
+                dst_prefix = join_url(
+                    settings.NGENCERF_ARCHIVE_S3_PATH,
+                    os.path.basename(src_path),
+                )
 
-        job_results.append({
-            'message': f'Calibration Job {run.id} has been {"archived" if archive else "unarchived"}',
-            "calibration_run_id": calibration_run_id,
-            "success": True
-        })
+                start = time.perf_counter()
+                logger.info(f"Archiving Calibration Job {calibration_run_id}: copy {src_path} -> {dst_prefix}")
+
+                # ---- COPY LOCAL → CLOUD ----
+                copied = copy_tree(src_path, dst_prefix, verify=True)
+
+                elapsed = time.perf_counter() - start
+                logger.info(
+                    f"Archived {copied} files for Calibration Job {calibration_run_id} "
+                    f"to {dst_prefix} in {elapsed:.2f}s"
+                )
+
+                # ---- DELETE LOCAL DIRECTORY AFTER SUCCESS ----
+                if os.path.isdir(src_path):
+                    try:
+                        shutil.rmtree(src_path)
+                        logger.info(f"Deleted local directory after archive: {src_path}")
+                    except Exception as e:
+                        logger.error(f"Failed to delete local directory {src_path}: {e}")
+                        raise
+
+            # ===============================
+            # UNARCHIVE (S3 → EFS)
+            # ===============================
+            else:
+                src_cloud_prefix = join_url(
+                    settings.NGENCERF_ARCHIVE_S3_PATH,
+                    os.path.basename(run.job_data_dir)
+                )
+
+                dest_dir = run.job_data_dir
+
+                # Ensure the destination directory exists (empty)
+                if os.path.isdir(dest_dir):
+                    shutil.rmtree(dest_dir)
+                os.makedirs(dest_dir, exist_ok=True)
+
+                start = time.perf_counter()
+                logger.info(
+                    f"Unarchiving Calibration Job {calibration_run_id}: "
+                    f"copy {src_cloud_prefix} -> {dest_dir}"
+                )
+
+                # ---- COPY CLOUD → LOCAL ----
+                copied = copy_tree(src_cloud_prefix, dest_dir, verify=True)
+
+                elapsed = time.perf_counter() - start
+                logger.info(
+                    f"Unarchived {copied} files for Calibration Job {calibration_run_id} "
+                    f"into {dest_dir} in {elapsed:.2f} seconds"
+                )
+
+                # ---- DELETE CLOUD DIRECTORY AFTER SUCCESS ----
+                try:
+                    cloud_fs, _ = get_filesystem(src_cloud_prefix)
+                    cloud_fs.rm(src_cloud_prefix, recursive=True)
+                    logger.info(f"Deleted cloud directory after unarchive: {src_cloud_prefix}")
+                except Exception as e:
+                    logger.error(f"Failed to delete cloud directory {src_cloud_prefix}: {e}")
+                    raise
+
+            # ------------------------------------------------------------
+            # Update run flags + archive timestamp
+            # ------------------------------------------------------------
+            run.is_archived = archive
+            run.archive_status_updated_at = datetime.now(tz=timezone.utc)
+
+            run.save(update_fields=['is_archived', 'archive_status_updated_at'])
+
+            job_results.append({
+                'message': f'Calibration Job {calibration_run_id} has been '
+                           f'{"archived" if archive else "unarchived"}',
+                "calibration_run_id": calibration_run_id,
+                "success": True
+            })
+
+        except Exception as e:
+            logger.exception(f"Failed to {'archive' if archive else 'unarchive'} Calibration Job {calibration_run_id}: {e}")
+            job_results.append({
+                "message": f"Failed to {'archive' if archive else 'unarchive'} Calibration Job {calibration_run_id}: {e}",
+                "calibration_run_id": calibration_run_id,
+                "success": False
+            })
+            continue
 
     response = {"jobs": job_results}
 
     response_validator, error_response = validate_response(CalibrationRunListResponse, response)
     if error_response:
         return error_response
+
     logger.debug(
-        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
+        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - '
+        f'{json.dumps(response_validator.data)}'
+    )
 
     return Response(response_validator.data)
 
@@ -693,7 +870,7 @@ def lock_jobs(request: Request) -> Response:
     Lock or unlock multiple calibration jobs.  Locking a job prevents it from being deleted
 
     :param request: The HTTP request object.
-    :return: A Response object with the lock confirmation.
+    :return: A Response object with the lock/unlock status for each calibration job.
     """
     data = request.data if request.method == 'POST' else request.query_params.dict()
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
@@ -707,20 +884,32 @@ def lock_jobs(request: Request) -> Response:
 
     job_results = []
 
+    # Bulk fetch all the calibration jobs
+    runs_by_id, errors_by_id = get_calibration_runs_bulk(
+        calibration_run_ids=calibration_run_ids,
+        user=request.user,
+        run_status=list(StatusEnum),
+        include_archived=False,
+    )
+
     # Process each calibration_run_id in the list
     for calibration_run_id in calibration_run_ids:
-        run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=list(StatusEnum))
-        if error_return:
+        # Validation / access errors
+        error = errors_by_id.get(calibration_run_id)
+        if error:
             job_results.append({
-                "message": error_return.data.get('message'),
+                "message": error.data.get('message'),
                 "calibration_run_id": calibration_run_id,
                 "success": False
             })
             continue
 
+        run = runs_by_id[calibration_run_id]
+
+        # Already locked / unlocked?
         if lock == run.is_locked:
             job_results.append({
-                "message": f'Calibration Job {run.id} is {"already" if lock else "not"} locked',
+                "message": f'Calibration Job {calibration_run_id} is {"already" if lock else "not"} locked',
                 "calibration_run_id": calibration_run_id,
                 "success": False
             })
@@ -730,7 +919,7 @@ def lock_jobs(request: Request) -> Response:
         run.save(update_fields=['is_locked'])
 
         job_results.append({
-            'message': f'Calibration Job {run.id} has been {"locked" if lock else "unlocked"}',
+            'message': f'Calibration Job {calibration_run_id} has been {"locked" if lock else "unlocked"}',
             "calibration_run_id": calibration_run_id,
             "success": True
         })
@@ -741,7 +930,8 @@ def lock_jobs(request: Request) -> Response:
     if error_response:
         return error_response
     logger.debug(
-        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
+        f'Returning to {get_user_email(request)} from {get_caller_name()}()'
+        f'{get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
 
     return Response(response_validator.data)
 
@@ -752,24 +942,20 @@ def hard_delete(run: CalibrationRun) -> None:
 
     :param run: The CalibrationRun instance to be deleted.
     """
-    collector = Collector(using=router.db_for_write(run.__class__))
-
-    # Collect related objects that will be deleted due to cascade
-    collector.collect([run])
 
     job_data_dir = run.job_data_dir  # stash before delete
 
-    with transaction.atomic():
-        logger.debug(f"Deleting (hard delete) Calibration Job {run.id}, associated records and files")
-        # Iterate through the collected objects and list IDs and other fields
-        for model, instances in collector.data.items():
-            logger.debug(f"Calibration Job {run.id} - {model.__name__}: {len(instances)} instance(s) will be deleted")
-            for instance in instances:
-                logger.debug(f' - {instance}')
-        run.delete()
+    logger.debug(f"Deleting (hard delete) Calibration Job {run.id}, associated records and files")
+    run.delete()
+
     logger.debug(f'Deleting directory {job_data_dir} for Calibration Job {run.id}')
-    if os.path.exists(job_data_dir):
-        shutil.rmtree(job_data_dir)
+    if job_data_dir and os.path.isdir(job_data_dir):
+        try:
+            shutil.rmtree(job_data_dir)
+        except Exception:
+            logger.exception(
+                f"Failed to delete job directory {job_data_dir} for Calibration Job {run.id}"
+            )
 
 
 @extend_schema(

@@ -4,6 +4,7 @@ FROM rockylinux:8
 RUN set -eux && \
     dnf install -y yum-utils epel-release && \
     dnf install -y \
+        redis \
         findutils \
         file \
         jq \
@@ -103,17 +104,15 @@ RUN set -eux && \
 # Remove .git directory
 RUN rm -rf .git
 
-COPY cli /ngencerf/ngencerf-server/cli
-
 # Copy application code
 COPY . /ngencerf/ngencerf-server/
 
-# Fetch forecast_forcing_templates into an internal, non-mounted path to be copied at runtime by runCerf.sh
+# Fetch bmi_forcing_templates into an internal, non-mounted path to be copied at runtime by runCerf.sh
 RUN set -eux && \
-    PREBUILT_DIR="/ngencerf/prebuilt/forecast_forcing_templates" && \
+    PREBUILT_DIR="/ngencerf/prebuilt/bmi_forcing_templates" && \
     NGEN_FORCING_URL="https://github.com/${NGEN_FORCING_ORG}/ngen-forcing.git" && \
     \
-    echo "Preparing forecast_forcing_templates from ${NGEN_FORCING_URL}, branch: ${NGEN_FORCING_TAG}" && \
+    echo "Preparing bmi_forcing_templates from ${NGEN_FORCING_URL}, branch: ${NGEN_FORCING_TAG}" && \
     \
     # Ensure prebuilt directory exists and is empty
     rm -rf "$PREBUILT_DIR" && \
@@ -141,7 +140,6 @@ RUN cli/build_cli.sh
 
 # Copy additional configuration files
 COPY ./cerfserver-docker.env /ngencerf/ngencerf-server/cerfserver.env
-COPY ./cerfServer/__.env-docker-dev /ngencerf/ngencerf-server/cerfServer/.env
 COPY ./cerfServer/__local_settings.py /ngencerf/ngencerf-server/cerfServer/local_settings.py
 
 # Set the entry point and expose the application port

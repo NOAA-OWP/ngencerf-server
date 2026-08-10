@@ -16,25 +16,13 @@
     <content url="file://$MODULE_DIR$">
       <sourceFolder url="file://$MODULE_DIR$/cli" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/.venv-cerf" />
-      <excludePattern pattern=".$delete_me.venv" />
-      <excludePattern pattern=".venv-cerf" />
-      <excludePattern pattern="cerfServer.*.log" />
-      <excludePattern pattern="*.log" />
-      <excludePattern pattern="cerfServer.log" />
-      <excludePattern pattern="migrations" />
-      <excludePattern pattern="createInput" />
-      <excludePattern pattern=".venv-cli" />
-      <excludePattern pattern="*.egg-info" />
+      <excludeFolder url="file://$MODULE_DIR$/logs" />
+      <excludePattern pattern=".venv*" />
     </content>
     <orderEntry type="jdk" jdkName="Python 3.11 (cerfServer)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
   <component name="TemplatesService">
     <option name="TEMPLATE_CONFIGURATION" value="Django" />
-    <option name="TEMPLATE_FOLDERS">
-      <list>
-        <option value="$MODULE_DIR$/templates" />
-      </list>
-    </option>
   </component>
 </module>

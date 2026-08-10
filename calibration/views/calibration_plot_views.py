@@ -6,6 +6,7 @@ from collections import defaultdict
 from functools import lru_cache
 from typing import Any, cast
 
+import numpy as np
 import pandas as pd
 from django.core.cache import cache
 from drf_spectacular.utils import extend_schema, OpenApiResponse
@@ -29,8 +30,7 @@ from calibration.views.calibration_evaluation_views import get_iterations_for_ca
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import get_calibration_run, handle_exceptions, validate_response, validate_request, CerfException, \
     ResponseError, truncate_large_fields, get_validation_run, get_job_description, \
-    replace_nan_and_inf_with_none, png_to_base64_url, \
-    process_worker_dirs, get_user_email, get_elapsed_str
+     png_to_base64_url,     process_worker_dirs, get_user_email, get_elapsed_str
 from calibration.views.get_jobs_views import get_validation_jobs_internal
 
 logger = logging.getLogger(__name__)
@@ -432,7 +432,7 @@ def get_plots_for_comparison(request: Request) -> Response:
                             if row['run'] == ValidationType.VALID_BEST.value and row['period'] in ['calib', 'valid', 'full']:
                                 plot_data_row = {
                                     "calibration_run_id": calibration_run_id,
-                                    "formulation_name": run.user_formulation_name,
+                                    "job_name": run.job_name,
                                     "run_date": run.submit_date.strftime("%Y-%m-%d %H:%M")
                                 }
                                 plot_data_row.update(row)
@@ -765,7 +765,10 @@ def load_and_merge_hydrograph_files_with_pagination_and_count(
         total_count = len(merged_df)
 
         # Step 3: Extract a paginated subset of the merged DataFrame
-        paginated_data = merged_df.iloc[start:start + limit].to_dict(orient="records")
+        paginated_data = cast(
+            list[dict[str, Any]],
+            merged_df.iloc[start:start + limit].to_dict(orient="records")
+        )
 
         # Step 4: Convert all Timestamp objects in the key column to ISO 8601 strings
         for row in paginated_data:
@@ -1095,3 +1098,28 @@ def plot_exists(run: CalibrationRun | ValidationRun | ForecastRun, plot_definiti
     except CerfException as e:
         logger.warning(f"Could not determine plot file existence for plot '{plot_definition.get('name')}' - {e}")
         return None
+
+
+def replace_nan_and_inf_with_none(data: Any) -> Any:
+    """
+    NOTE: This is very inefficient.
+    Replace NaN and infinity values with None recursively in data.
+
+    :param data: Input data (list, dict, or scalar).
+    :return: Data with NaN and inf replaced by None.
+    """
+
+    # If the data is a list, recursively process each item in the list
+    if isinstance(data, list):
+        return [replace_nan_and_inf_with_none(item) for item in data]
+
+    # If the data is a dictionary, recursively process each key-value pair
+    elif isinstance(data, dict):
+        return {key: replace_nan_and_inf_with_none(value) for key, value in data.items()}
+
+    # If the data is a float and it's NaN or inf, replace it with None
+    elif isinstance(data, float) and (np.isnan(data) or np.isinf(data)):
+        return None
+
+    # If the data is any other type (int, str, etc.), return it unchanged
+    return data

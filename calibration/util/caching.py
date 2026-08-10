@@ -22,6 +22,7 @@ This ensures:
 - Clean and consistent cached state
 """
 import json
+import logging
 import os
 
 import yaml
@@ -32,6 +33,8 @@ from calibration.enums import PlotDefinitionsEnum, ForecastConfigEnum
 from calibration.enums_vanilla import JobType
 from calibration.models import Module, ModuleGroup, Gage, CalibrationRun, ValidationRun, CalibrationFormulation, OptimizationInput
 from calibration.views.cache_prefix import CACHE_PREFIX
+
+logger = logging.getLogger(__name__)
 
 _CACHED_MODULES_KEY = f"{CACHE_PREFIX}cached_modules_with_groups"
 

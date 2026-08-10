@@ -1,4 +1,5 @@
 import base64
+import copy
 import inspect
 import json
 import logging
@@ -8,9 +9,9 @@ import time
 from contextlib import contextmanager
 from datetime import timedelta, datetime
 from functools import wraps
-from typing import Type, Any, Callable, cast
+from typing import Type, Any, Callable
 
-import numpy as np
+import yaml
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import transaction, connection
@@ -25,22 +26,134 @@ from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import AccessToken
 
 from calibration.enums import StatusEnum, ValidationType, JobGenesis, NgenLogging
-from calibration.models import CalibrationRun, ValidationRun, Status, ForecastConfiguration, ForecastRun, CustomUser, ColdStartRun, \
+from calibration.models import CalibrationRun, ValidationRun, ForecastConfiguration, ForecastRun, ColdStartRun, \
     CalibrationFormulation, VerificationRun
 from calibration.models import Iteration
 from calibration.models.base_run import BaseRun
-from calibration.util.caching import get_cached_modules_by_id
+from calibration.util.caching import get_cached_modules_by_id, generate_forecast_config_yaml
 from calibration.util.calibration_validators import ErrorResponseSerializer, BaseSerializer
 from calibration.util.cloud_util import path_exists
 from calibration.util.ngen_locations import get_forecast_dir, get_output_calibration_run_dir, \
-    get_output_validation_run_dir, get_cold_start_dir, get_verification_run_dir, get_ngen_logging_file, \
-    get_ngen_logging_basename
+    get_output_validation_run_dir, get_cold_start_dir, get_ngen_logging_file, \
+    get_ngen_logging_basename, get_forecast_output_file, get_verification_run_dir, \
+    get_verification_yaml_config_file, VERF_CROSSWALK_NGEN_FILE
+from calibration.views.called_from import called_from
 
 logger = logging.getLogger(__name__)
 
 SLOTH = 'SLoTH'
 
 User = get_user_model()
+
+
+def validate_run_instance(
+        run: BaseRun,
+        run_id: int,
+        run_status: list[StatusEnum] | None,
+        is_archived_field: str,
+        include_archived: bool,
+        model_name: str,
+) -> Response | None:
+    run_status = run_status or [StatusEnum.READY, StatusEnum.SAVED]
+    allowed_statuses = [s.db_instance for s in run_status]
+
+    is_archived = getattr(run, is_archived_field, False)
+    if is_archived and not include_archived:
+        return ResponseError(
+            f'{model_name} {run_id} is archived and should be unarchived before additional operations can be performed.'
+        )
+
+    if run.status not in allowed_statuses:
+        allowed_names = [s.name for s in allowed_statuses]
+        return ResponseError(
+            f'{model_name} {run_id} is not in an allowed status: '
+            f'{join_with_or(allowed_names)}. '
+            f'Current status: {run.status.name}'
+        )
+
+    return None
+
+
+def get_calibration_runs_bulk(
+        calibration_run_ids: list[int],
+        user: User | None,
+        run_status: list[StatusEnum] | None = None,
+        include_archived: bool = False,
+) -> tuple[dict[int, CalibrationRun], dict[int, Response]]:
+    """
+    Bulk retrieve and validate multiple CalibrationRun instances by ID.
+
+    This function performs a single database query to fetch all requested
+    CalibrationRun objects, then applies the same validation logic used by
+    `get_run_instance` on a per-run basis, including:
+
+    - Optional filtering by owning user (owner_field='owner')
+    - Validation of allowed job statuses
+    - Enforcement of archived-job access rules (is_archived_field='is_archived')
+
+    The database query itself does NOT filter out archived jobs. Instead, archive
+    handling is enforced explicitly during validation so that callers can
+    distinguish between:
+      - non-existent runs
+      - unauthorized access
+      - disallowed status
+      - archived-but-disallowed runs
+
+    Validation is performed independently for each requested run ID. Results
+    preserve per-ID error semantics by returning two mappings:
+      - valid runs keyed by run ID
+      - error responses keyed by run ID
+
+    This function does not mutate or delete any data.
+
+    :param calibration_run_ids: List of CalibrationRun IDs to retrieve and validate.
+                                Order is preserved when iterating results.
+    :param user: The user requesting the runs. If provided, only runs owned by
+                 this user are considered valid.
+    :param run_status: Optional list of allowed StatusEnum values. Defaults to
+                       [READY, SAVED] if not provided.
+    :param include_archived: Whether archived jobs are allowed. If False, archived
+                             runs will return an error response.
+    :return: A tuple (runs_by_id, errors_by_id):
+             - runs_by_id: dict mapping run_id -> CalibrationRun for all valid runs
+             - errors_by_id: dict mapping run_id -> ResponseError for invalid runs
+    """
+    qs = CalibrationRun.objects.filter(id__in=calibration_run_ids)
+
+    if user:
+        qs = qs.filter(owner=user)
+
+    runs = {run.id: run for run in qs}
+
+    runs_by_id: dict[int, CalibrationRun] = {}
+    errors_by_id: dict[int, Response] = {}
+
+    for run_id in calibration_run_ids:
+        run = runs.get(run_id)
+        model_name = "Calibration Job"
+
+        if not run:
+            user_info = f' or is not owned by {user.email}' if user else ''
+            errors_by_id[run_id] = ResponseError(
+                f'{model_name} {run_id} does not exist{user_info}'
+            )
+            continue
+
+        error = validate_run_instance(
+            run=run,
+            run_id=run_id,
+            run_status=run_status,
+            is_archived_field='is_archived',
+            include_archived=include_archived,
+            model_name=model_name,
+        )
+
+        if error:
+            errors_by_id[run_id] = error
+        else:
+            runs_by_id[run_id] = run
+
+    return runs_by_id, errors_by_id
 
 
 def get_run_instance(
@@ -50,27 +163,54 @@ def get_run_instance(
         run_status: list[StatusEnum] | None = None,
         owner_field: str = 'owner',
         is_archived_field: str = 'is_archived',
-        include_archived: bool = False
+        include_archived: bool = False,
+        *,
+        select_related_fields: tuple[str, ...] = (),
 ) -> tuple[BaseRun | None, Response | None]:
     """
-    Retrieve an instance of a BaseRun-derived model by its ID,
-    optionally filtering by owner, status, and handling the 'is_archived' flag.
+    Retrieve and validate a single BaseRun-derived instance by ID.
+
+    This function performs a database lookup for the specified run ID and applies
+    common validation logic used across all job types (Calibration, Validation,
+    Forecast, Cold Start, Verification), including:
+
+    - Optional filtering by owning user
+    - Validation of allowed job statuses
+    - Enforcement of archived-job access rules
+    - Optional eager-loading of related objects via select_related
+
+    The database query itself does NOT filter out archived jobs. Instead, archive
+    handling is enforced explicitly via validation logic so that callers can
+    distinguish between:
+      - non-existent runs
+      - unauthorized access
+      - disallowed status
+      - archived-but-disallowed runs
+
+    This function does not mutate or delete any data.
 
     :param model: The BaseRun-derived model class to query.
     :param run_id: The ID of the run to retrieve.
     :param user: The user requesting the run; if None, no filtering by owner is done.
-    :param run_status: A list of StatusEnum members to filter by.
+    :param run_status: Optional list of StatusEnum members to filter by.  Defaults to
+                       [READY, SAVED] if not provided.
     :param owner_field: The field used to filter by owner (default 'owner').
-    :param is_archived_field: The field name for the 'is_archived' flag (default 'is_archived').
-    :param include_archived: Whether to include archived jobs.
-    :return: Tuple containing the run instance or None, and Response if error or None.
+    :param is_archived_field: ame of the boolean field indicating archived state.
+                              May traverse relationships. (default 'is_archived')
+    :param include_archived: Whether to include archived jobs.  If False, archived runs will return an error response.
+    :param select_related_fields: Optional tuple of related field names to eagerly
+                                  load via select_related.
+    :return: A tuple (run, error):
+             - run: The retrieved model instance, or None if not found
+             - error: A ResponseError if validation fails, otherwise None
     """
     run_status = run_status or [StatusEnum.READY, StatusEnum.SAVED]
 
-    allowed_statuses: list[Status] = [status_enum.db_instance for status_enum in run_status]
-
     # Query without filtering out archived jobs
     query: QuerySet = model.objects.filter(id=run_id)
+
+    if select_related_fields:
+        query = query.select_related(*select_related_fields)
 
     if user:
         query = query.filter(**{f"{owner_field}": user})
@@ -78,26 +218,24 @@ def get_run_instance(
     try:
         run = query.get()
     except model.DoesNotExist:
-        user_info = f' or is not owned by {cast(CustomUser, user).email}' if user else ''
+        user_info = f' or is not owned by {user.email}' if user else ''
         model_name = model.__name__.replace("Run", " Job")
         error = f'{model_name} {run_id} does not exist{user_info}'
         return None, ResponseError(error)
 
-    # Explicitly check if the job is archived and include_archived=False
-    is_archived = getattr(run, is_archived_field, False)
-    if is_archived and not include_archived:
-        model_name = model.__name__.replace("Run", " Job")
-        error = f'{model_name} {run_id} is archived and should be unarchived before additional operations can be performed.'
-        return None, ResponseError(error)
+    model_name = model.__name__.replace("Run", " Job")
 
-    # Check if the status of the run is in the allowed statuses
-    if run.status not in allowed_statuses:
-        allowed_status_names = [allowed_status.name for allowed_status in allowed_statuses]
-        model_name = model.__name__.replace("Run", " Job")
-        error = (f'{model_name} {run_id} is not in an allowed status: '
-                 f'{join_with_or(allowed_status_names)}. '
-                 f'Current status: {run.status.name}')
-        return run, ResponseError(error)
+    error = validate_run_instance(
+        run=run,
+        run_id=run_id,
+        run_status=run_status,
+        is_archived_field=is_archived_field,
+        include_archived=include_archived,
+        model_name=model_name,
+    )
+
+    if error:
+        return run, error
 
     return run, None
 
@@ -117,7 +255,16 @@ def get_calibration_run(
     :param include_archived: Include archived jobs if True.
     :return: Tuple of CalibrationRun or None, and Response if error or None.
     """
-    return get_run_instance(CalibrationRun, calibration_run_id, user, run_status, 'owner', 'is_archived', include_archived)
+    return get_run_instance(
+        CalibrationRun,
+        calibration_run_id,
+        user,
+        run_status,
+        owner_field='owner',
+        is_archived_field='is_archived',
+        include_archived=include_archived,
+        select_related_fields=('status', 'performance_metrics', 'owner'),
+    )
 
 
 def get_validation_run(
@@ -133,7 +280,20 @@ def get_validation_run(
     :param run_status: Allowed statuses for the ValidationRun.
     :return: Tuple of ValidationRun or None, and Response if error or None.
     """
-    return get_run_instance(ValidationRun, validation_run_id, user, run_status, 'calibration_run__owner', 'calibration_run__is_archived')
+    return get_run_instance(
+        ValidationRun,
+        validation_run_id,
+        user,
+        run_status,
+        owner_field='calibration_run__owner',
+        is_archived_field='calibration_run__is_archived',
+        select_related_fields=(
+            'status',
+            'performance_metrics',
+            'calibration_run',
+            'calibration_run__owner',
+        ),
+    )
 
 
 def get_cold_start_run(
@@ -149,7 +309,21 @@ def get_cold_start_run(
     :param run_status: Allowed statuses for the ColdStartRun.
     :return: Tuple of ColdStartRun or None, and Response if error or None.
     """
-    return get_run_instance(ColdStartRun, cold_start_run_id, user, run_status, 'calibration_run__owner', 'calibration_run__is_archived')
+    return get_run_instance(
+        ColdStartRun,
+        cold_start_run_id,
+        user,
+        run_status,
+        owner_field='calibration_run__owner',
+        is_archived_field='calibration_run__is_archived',
+        select_related_fields=(
+            'status',
+            'performance_metrics',
+            'calibration_run',
+            'calibration_run__owner',
+        ),
+
+    )
 
 
 def get_forecast_run(
@@ -165,23 +339,57 @@ def get_forecast_run(
     :param run_status: Allowed statuses for the ForecastRun.
     :return: Tuple of ForecastRun or None, and Response if error or None.
     """
-    return get_run_instance(ForecastRun, forecast_run_id, user, run_status, 'calibration_run__owner', 'calibration_run__is_archived')
+    return get_run_instance(
+        ForecastRun,
+        forecast_run_id,
+        user,
+        run_status,
+        owner_field='calibration_run__owner',
+        is_archived_field='calibration_run__is_archived',
+        select_related_fields=(
+            'status',
+            'performance_metrics',
+            'calibration_run',
+            'calibration_run__owner',
+            'configuration',
+            'cold_start_run',
+            'cold_start_run__status',
+            'cold_start_run__performance_metrics',
+        ),
+    )
 
 
 def get_verification_run(
-        verification_job_id: int,
+        verification_run_id: int,
         user: User | None,
         run_status: list[StatusEnum] | None = None
 ) -> tuple[VerificationRun | None, Response | None]:
     """
     Retrieve a VerificationRun by ID, optionally filtering by owner and status.
 
-    :param verification_job_id: The ID of the VerificationRun.
+    :param verification_run_id: The ID of the VerificationRun.
     :param user: User requesting the VerificationRun; if None, no owner filtering.
     :param run_status: Allowed statuses for the VerificationRun.
     :return: Tuple of VerificationRun or None, and Response if error or None.
     """
-    return get_run_instance(VerificationRun, verification_job_id, user, run_status, 'owner', 'is_archived')
+    return get_run_instance(
+        VerificationRun,
+        verification_run_id,
+        user,
+        run_status,
+        owner_field='forecast_run__calibration_run__owner',
+        is_archived_field='is_archived',
+        select_related_fields=(
+            'status',
+            'performance_metrics',
+            'forecast_run',
+            'forecast_run__status',
+            'forecast_run__performance_metrics',
+            'forecast_run__configuration',
+            'forecast_run__calibration_run',
+            'forecast_run__calibration_run__owner',
+        )
+    )
 
 
 def join_with_or(items: list[str]) -> str:
@@ -261,38 +469,19 @@ def create_calibration_run_internal(user: User, genesis: JobGenesis | None = Non
     username = run.owner.username.split('@')[0]
     run.job_data_dir = os.path.join(settings.NGEN_CAL_RUN_DIR, f"{run.id}_{username}")
 
-    # The directory will be created when we build the job in ready_to_run().  But clean up any existing directory if it already exists (should not happen in production)
+    # Clean up any existing directory if it already exists (should not happen in production)
     if os.path.exists(run.job_data_dir):
         # Append timestamp to existing directory name to avoid overwriting
         new_name = f"{run.job_data_dir}_{datetime.now().isoformat()}"
         os.rename(run.job_data_dir, new_name)
 
-    pid = os.getpid()
-
-    # ------------------------------------------------------------------
-    # IMPORTANT:
-    # Retrieve current umask *without modifying it* using the trap-safe
-    # double-os.umask technique:
-    #
-    #   current_umask = os.umask(os.umask(current_umask))
-    #
-    # First os.umask() returns the actual umask while setting it to
-    # `current_umask`, then we restore the original immediately.
-    # Net effect: no umask change → umask_debug trap does NOT fire.
-    # ------------------------------------------------------------------
-    current_umask = os.umask(os.umask(0))
-
-    # Create directory using whatever umask the worker actually has (022)
+    # Create directory (uses worker umask=022 enforced by Gunicorn)
     os.makedirs(run.job_data_dir, exist_ok=True)
 
     # Determine actual permissions
     mode = os.stat(run.job_data_dir).st_mode & 0o777
 
-    # This log statement is here for when we were trouble-shooting a umask issue.  It can be simplified (don't need pid and umask to be displayed)
-    logger.info(
-        f"Directory created: {run.job_data_dir} | perms={oct(mode)} | "
-        f"PID={pid} | umask={oct(current_umask)}"
-    )
+    logger.info(f"Directory created: {run.job_data_dir} | perms={oct(mode)}")
 
     # This is always true
     run.automatic_validation = True
@@ -321,14 +510,16 @@ def create_validation_run_internal(
             raise CerfException(f"Values must be supplied for both iteration_id")
 
         try:
-            iteration_object = Iteration.objects.filter(calibration_run=calibration_run, id=iteration_id).get()
+            iteration_object = Iteration.objects.get(calibration_run_id=calibration_run.id, id=iteration_id)
         except Iteration.DoesNotExist:
             raise CerfException(f"Cannot find Iteration Id {iteration_id} for Calibration Job {calibration_run.id}")
 
-    validation_run = ValidationRun.objects.create(status=StatusEnum.SAVED.db_instance,
-                                                  calibration_run=calibration_run,
-                                                  validation_type=validation_type.value,
-                                                  iteration=iteration_object)
+    validation_run = ValidationRun.objects.create(
+        status=StatusEnum.SAVED.db_instance,
+        calibration_run_id=calibration_run.id,
+        validation_type=validation_type.value,
+        iteration=iteration_object
+    )
     logger.info(f"Creating Validation Job {validation_run.id} for Calibration Job {calibration_run.id} with validation_type {validation_type}")
 
     return validation_run
@@ -350,11 +541,13 @@ def create_cold_start_run_internal(
     :return: The newly created ColdStartRun instance.
     """
 
-    cold_start_run = ColdStartRun.objects.create(status=StatusEnum.SAVED.db_instance,
-                                                 calibration_run=calibration_run,
-                                                 configuration=configuration,
-                                                 cold_start_date=cold_start_date,
-                                                 cycle_date=cycle_date)
+    cold_start_run = ColdStartRun.objects.create(
+        status=StatusEnum.SAVED.db_instance,
+        calibration_run_id=calibration_run.id,
+        configuration_id=configuration.id,
+        cold_start_date=cold_start_date,
+        cycle_date=cycle_date
+    )
     os.makedirs(get_cold_start_dir(cold_start_run))
     logger.info(f"Creating {get_job_description(cold_start_run)}")
 
@@ -377,32 +570,36 @@ def create_forecast_run_internal(
     :return: The newly created ForecastRun instance.
     """
 
-    forecast_run = ForecastRun.objects.create(status=StatusEnum.SAVED.db_instance,
-                                              calibration_run=calibration_run,
-                                              cold_start_run=cold_start_run,
-                                              configuration=configuration,
-                                              cycle_date=cycle_date)
+    forecast_run = ForecastRun.objects.create(
+        status=StatusEnum.SAVED.db_instance,
+        calibration_run_id=calibration_run.id,
+        cold_start_run=cold_start_run,
+        configuration_id=configuration.id,
+        cycle_date=cycle_date
+    )
     os.makedirs(get_forecast_dir(forecast_run))
     logger.info(f"Creating {get_job_description(forecast_run)}")
 
     return forecast_run
 
 
-def create_verification_job_internal(user: User, forecast_run: ForecastRun) -> VerificationRun | Response:
+def create_verification_run_internal(forecast_run: ForecastRun) -> VerificationRun | Response:
     """
     Create a new VerificationRun for the given user.
 
-    :param user: Owner of the verification job.
+    - Calls create_verification_input(verification_run) to generate the config
+
     :param forecast_run Forecast Job to associate with this verification run
     :return: New VerificationRun instance.
     """
     verification_run = VerificationRun.objects.create(
-        owner=user,
-        forecast_run=forecast_run,
-        status=StatusEnum.SAVED.db_instance)
+        status=StatusEnum.SAVED.db_instance,
+        forecast_run=forecast_run)
 
     os.makedirs(get_verification_run_dir(verification_run))
     logger.info(f"Creating {get_job_description(verification_run)}")
+
+    create_verification_input(verification_run)
 
     return verification_run
 
@@ -541,7 +738,7 @@ def get_valid_path(eds_path, get_path_func):
     """
     job_specific_file = get_path_func()
 
-    # job_specific_file is there, then always use it
+    # if job_specific_file is there, then always use it
     # If it's not there, then use the EDS file
     if job_specific_file and path_exists(job_specific_file):
         return job_specific_file
@@ -713,30 +910,6 @@ def get_job_description(run: BaseRun) -> str:
         return f"Verification Job {run.id} for Forecast Job {run.forecast_run.id} for Calibration Job {run.forecast_run.calibration_run.id}, user: {run.forecast_run.calibration_run.owner.username}"
 
     raise ValueError(f"Unknown job type: {type(run).__name__}")
-
-
-def replace_nan_and_inf_with_none(data: Any) -> Any:
-    """
-    Replace NaN and infinity values with None recursively in data.
-
-    :param data: Input data (list, dict, or scalar).
-    :return: Data with NaN and inf replaced by None.
-    """
-
-    # If the data is a list, recursively process each item in the list
-    if isinstance(data, list):
-        return [replace_nan_and_inf_with_none(item) for item in data]
-
-    # If the data is a dictionary, recursively process each key-value pair
-    elif isinstance(data, dict):
-        return {key: replace_nan_and_inf_with_none(value) for key, value in data.items()}
-
-    # If the data is a float and it's NaN or inf, replace it with None
-    elif isinstance(data, float) and (np.isnan(data) or np.isinf(data)):
-        return None
-
-    # If the data is any other type (int, str, etc.), return it unchanged
-    return data
 
 
 # Regular expression pattern to match directories like "ngen_xxxxxxx_worker"
@@ -1044,3 +1217,115 @@ def readonly_transaction():
         with connection.cursor() as cursor:
             cursor.execute("SET TRANSACTION READ ONLY")
         yield
+
+
+# putting this here for now to avoid circular import
+# DO NOT MODIFY THIS TEMPLATE IN-PLACE.
+# Use `copy.deepcopy(CONFIG_TEMPLATE)` to safely create per-thread instances.
+CONFIG_TEMPLATE = {
+
+    "general": {
+        "steps": {
+            "fetch_fcst_data": True,
+            "fetch_obs_data": True,
+            "pair_data": True,
+            "compute_metrics": True,
+            "plot_metrics": True,
+        },
+        "location_set_name": "",
+        "location_list": [],
+        "location_type": "usgs_gage",
+        "variable_name": "streamflow",
+        "nwm_configuration": "",
+        "dataset_name": [],
+        "nwm_version": [],
+        "forecast_start_date": [],
+        "forecast_end_date": []
+    },
+
+    "nwm_forecast": {
+        "data_source": ""
+    },
+
+    "flow_observation": {
+        "usgs": {
+            "chunk_by": "month",
+            "overwrite_output": True,
+            "memory_per_worker_gb": 3
+        }
+    },
+
+    "pair_data": {
+        "overwrite": True,
+        "group_size": 200
+    },
+
+    "metrics": {
+        "overwrite": True,
+        "library": "nwm.eval",
+        "metric_subset": "all",
+        "flow_threshold_categorical": 0.9,
+        "flow_threshold_event": 0.9,
+        "lead_times": ['all_aggregated'],
+        "file_format": "parquet"
+    },
+
+    "plots": {
+        "time_series": {
+            "plot": True
+        },
+        "metric_table": {
+            "plot": True
+        },
+        "barchart": {
+            "plot": True
+        }
+    }
+
+}
+
+
+def create_verification_input(run: VerificationRun) -> None:
+    """
+    :param run: The VerificationRun instance to validate and prepare.
+    :return: A tuple (ErrorReport, config_file_path):
+             - error_object: ErrorReport object with errors and warnings.
+             - config_file_path: Path to the generated config file if build is successful, else None.
+    """
+    logger.info(called_from())
+
+    # error_object = ErrorReport()
+    config = copy.deepcopy(CONFIG_TEMPLATE)
+
+    # Add hard-coded file paths to YAML
+    config['file_paths'] = {
+        'base_dir': get_verification_run_dir(run),
+        'fcst_config_file': generate_forecast_config_yaml(),
+        'output_dir': get_verification_run_dir(run),
+    }
+
+    general = config['general']
+    file_paths: dict[str, Any] = config['file_paths']
+
+    # Override values in YAML with info from our forecast/calibration runs
+    general['location_set_name'] = 'usgs_' + run.forecast_run.calibration_run.gage.gage_id
+    general['location_list'] = [run.forecast_run.calibration_run.gage.gage_id]
+    general['location_type'] = 'usgs_gage'
+    general['nwm_configuration'] = run.forecast_run.configuration.internal_name
+    general['dataset_name'] = [run.forecast_run.calibration_run.job_name]
+    general['nwm_version'] = ['ngen']
+    general['forecast_start_date'] = [format_datetime(run.forecast_run.cycle_date)]
+    general['forecast_end_date'] = [format_datetime(run.forecast_run.cycle_date)]
+    config['nwm_forecast']['data_source'] = 'ngenCERF'
+    file_paths['crosswalk_file'] = {'ngen': VERF_CROSSWALK_NGEN_FILE}
+    file_paths['fcst_data_file'] = {}
+    file_paths['fcst_data_file'][run.forecast_run.calibration_run.job_name] = get_forecast_output_file(run.forecast_run)
+
+    # -----------------------------
+    # FILE WRITE PHASE
+    # -----------------------------
+    config_location = get_verification_yaml_config_file(run)
+    # if not error_object.has_errors() and not error_object.has_warnings():
+    with open(config_location, 'w') as config_file:
+        yaml.dump(config, config_file, default_flow_style=False)
+        logger.info(f"Writing new YAML file to {config_location}")

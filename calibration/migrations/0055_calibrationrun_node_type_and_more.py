@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('calibration', '0053_rename_elapsed_time_performancemetrics_run_time'),
+        ('calibration', '0054_calibrationrun_archive_status_updated_at'),
     ]
 
     operations = [

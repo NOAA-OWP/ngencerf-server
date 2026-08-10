@@ -12,14 +12,9 @@ class Gage(BaseModel):
     headwater_calibration = models.BooleanField(null=False, default=False)
     agency = models.CharField(max_length=50, null=False)
     station_name = models.CharField(max_length=50, null=False)
-    site_type = models.CharField(max_length=50, null=False)
     latitude = models.FloatField(null=True)
     longitude = models.FloatField(null=True)
-    lat_long_accuracy = models.TextField(null=False)
-    lat_long_datum = models.TextField(null=False)
     altitude = models.FloatField(null=True)
-    altitude_accuracy = models.TextField(null=True)
-    altitude_datum = models.TextField(null=True)
     huc = models.CharField(max_length=50, null=False)
     drainage_area = models.FloatField(null=True)
     domain = models.ForeignKey('Domain', null=False, on_delete=models.CASCADE)
@@ -31,7 +26,7 @@ class Gage(BaseModel):
         ]
 
     def __str__(self):
-        return f"gage: {self.gage_id} - {self.agency} station name: {self.station_name} domain: {self.domain})"
+        return f"gage: {self.gage_id} - {self.agency}, station name: {self.station_name}, domain: {self.domain})"
 
 
 

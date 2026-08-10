@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 import pandas as pd
 from datetimerange import DateTimeRange
+from django.conf import settings
 from django.db import transaction
 from django.db.models import QuerySet, Prefetch
 from drf_spectacular.utils import OpenApiParameter, extend_schema, OpenApiResponse
@@ -29,6 +30,7 @@ from calibration.views import ngen_cal_input
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import get_calibration_run, ResponseError, handle_exceptions, validate_response, CerfException, validate_request, \
     get_valid_path, format_datetime, get_user_email, get_elapsed_str, readonly_transaction
+from calibration.views.data_services import should_use_bmi_forcing
 
 logger = logging.getLogger(__name__)
 
@@ -136,17 +138,17 @@ def load_tuning_tab(request: Request) -> Response:
     return Response(response_validator.data)
 
 
-def has_user_selected_tuning_parameters(formulation_ids: list[int]) -> bool:
+def has_user_selected_tuning_parameters(formulations: QuerySet[CalibrationFormulation]) -> bool:
     """
-    Check whether any user-selected tuning parameters exist for the given module IDs.
-    Avoids resolving Module objects via the DB.
+    Check whether any parameters tied to the provided calibration formulations
+    are marked user_selected_for_tuning.
 
-    :param formulation_ids: List of module IDs from CalibrationFormulation.
-    :return: True if at least one user-selected parameter exists, else False.
+    :param formulations: QuerySet of CalibrationFormulation objects for a single run.
+    :return: True if at least one parameter in these formulations is marked
+             user_selected_for_tuning, otherwise False.
     """
-
     return CalibrationParameter.objects.filter(
-        calibration_formulation__module_id__in=formulation_ids,
+        calibration_formulation__in=formulations,
         user_selected_for_tuning=True
     ).exists()
 
@@ -209,7 +211,6 @@ def get_parameters_for_export(run: CalibrationRun) -> list[dict]:
             "calibration_formulation__module_id"
         )
     )
-    print('params', params)
 
     result = []
     for p in params:
@@ -222,7 +223,6 @@ def get_parameters_for_export(run: CalibrationRun) -> list[dict]:
             "maximum": p["maximum"],
             "module": module_name,
         })
-    print('result', result)
     return result
 
 
@@ -233,15 +233,14 @@ def compute_time_range(run: CalibrationRun) -> dict[str, datetime]:
 
     Behavior:
       - If the run already has a persisted time range (both start and end), that exact range is returned.
-      - If observational or forcing data is missing, returns None.
+      - If required data is missing, returns an empty dict.
       - If both sources are available, computes the intersection and returns a dictionary with:
           * 'start_time': datetime (UTC, timezone-aware),
           * 'end_time': datetime (UTC, timezone-aware).
       - If there is no valid overlap between observational and forcing ranges, returns None.
 
     :param run: CalibrationRun instance.
-    :return: A dictionary containing 'start_time' and 'end_time' if available,
-             otherwise None.
+    :return: A dictionary containing 'start_time' and 'end_time', or {} if unavailable.
     """
     if run.time_range_start and run.time_range_end:
         logger.info("Time range is already set")
@@ -256,22 +255,40 @@ def compute_time_range(run: CalibrationRun) -> dict[str, datetime]:
         lambda: get_forcing_dir_for_job(run)
     )
 
+    use_bmi = should_use_bmi_forcing(run)
+
     # Explicitly log the resolved paths
     logger.info(
         f"get_time_range: observation_path={observation_path}, "
-        f"forcing_path={forcing_path}"
+        f"forcing_path={forcing_path},"
+        f"use_bmi_forcing={use_bmi}"
     )
 
-    if not observation_path or not forcing_path:
+    # Observation data is always required
+    if not observation_path:
+        return {}
+
+    # TODO More cleanup when we are exclusively using bmi forcing
+    # For CSV forcing, forcing_path is also required
+    if not use_bmi and not forcing_path:
         return {}
 
     # If both paths are available, calculate intersection and update run
-    daterange_intersection_start = time.time()
-    daterange = get_date_range_intersection(observation_path, forcing_path)
-    logger.info(f"Date range intersection completed in {time.time() - daterange_intersection_start:.2f}s")
+    daterange_intersection_start = time.perf_counter()
+
+    daterange = get_date_range_intersection(
+        observation_path,
+        None if use_bmi else forcing_path
+    )
+
+    logger.info(f"Date range intersection completed in "
+                f"{time.perf_counter() - daterange_intersection_start:.2f}s")
 
     if daterange:
-        return {'start_time': daterange.start_datetime, 'end_time': daterange.end_datetime}
+        return {
+            'start_time': daterange.start_datetime,
+            'end_time': daterange.end_datetime
+        }
 
     return {}
 
@@ -522,17 +539,21 @@ def upload_user_parameters(request: Request) -> Response:
         return ResponseError('No data rows found. Provide at least one parameter row.')
 
     # Validate numeric columns and report exact offending lines/values
-    invalid_details = {}
+    invalid_details: dict[str, list[dict[str, object]]] = {}
     for col in ['min', 'max', 'init']:
         # Re-coerce to catch NaN in case dtype enforcement was bypassed by space sep quirks
         coerced = pd.to_numeric(df[col], errors='coerce')
-        bad_mask = coerced.isna()
+        bad_mask = pd.isna(coerced)
         if bad_mask.any():
             bad_rows = df[bad_mask]
             # +2 => header is line 1; df index 0 is line 2
             invalid_details[col] = [
-                {'line': int(idx) + 2, 'param': str(row.get('param')), 'value': row.get(col)}
-                for idx, row in bad_rows.iterrows()
+                {
+                    'line': offset + 2,
+                    'param': str(row['param']),
+                    'value': row.get(col)
+                }
+                for offset, (_, row) in enumerate(bad_rows.iterrows())
             ]
 
     if invalid_details:
@@ -546,8 +567,13 @@ def upload_user_parameters(request: Request) -> Response:
     if bad_minmax_mask.any():
         rows = df[bad_minmax_mask]
         range_errors['min_gt_max'] = [
-            {'line': int(idx) + 2, 'param': str(row['param']), 'min': row['min'], 'max': row['max']}
-            for idx, row in rows.iterrows()
+            {
+                'line': offset + 2,
+                'param': str(row['param']),
+                'min': row['min'],
+                'max': row['max']
+            }
+            for offset, (_, row) in enumerate(rows.iterrows())
         ]
 
     bad_init_low = df['init'] < df['min']
@@ -555,8 +581,13 @@ def upload_user_parameters(request: Request) -> Response:
         rows = df[bad_init_low]
         range_errors.setdefault('init_lt_min', [])
         range_errors['init_lt_min'].extend(
-            {'line': int(idx) + 2, 'param': str(row['param']), 'init': row['init'], 'min': row['min']}
-            for idx, row in rows.iterrows()
+            {
+                'line': offset + 2,
+                'param': str(row['param']),
+                'init': row['init'],
+                'min': row['min']
+            }
+            for offset, (_, row) in enumerate(rows.iterrows())
         )
 
     bad_init_high = df['init'] > df['max']
@@ -564,8 +595,13 @@ def upload_user_parameters(request: Request) -> Response:
         rows = df[bad_init_high]
         range_errors.setdefault('init_gt_max', [])
         range_errors['init_gt_max'].extend(
-            {'line': int(idx) + 2, 'param': str(row['param']), 'init': row['init'], 'max': row['max']}
-            for idx, row in rows.iterrows()
+            {
+                'line': offset + 2,
+                'param': str(row['param']),
+                'init': row['init'],
+                'max': row['max']
+            }
+            for offset, (_, row) in enumerate(rows.iterrows())
         )
 
     if range_errors:
@@ -658,7 +694,7 @@ def validate_time_range_against_data(
     return None
 
 
-def validate_and_save_times(run: CalibrationRun, calibration_times: dict[str, datetime], validation_times: dict[str, datetime]) -> list[str]:
+def validate_and_save_times(run: CalibrationRun, calibration_times: dict[str, datetime], validation_times: dict[str, datetime]) -> str | None:
     """
     Validates calibration and validation time ranges, ensuring they fall within the allowable data range.
     If valid, updates the `CalibrationRun` instance with the provided times.
@@ -716,9 +752,9 @@ def validate_and_save_times(run: CalibrationRun, calibration_times: dict[str, da
         validation_simulation_range = None
         validation_evaluation_range = None
 
-    # If any of the ranges are invalid, return messages immediately
+    # If any of the ranges are invalid, return JSON list immediately
     if messages:
-        return messages
+        return json.dumps(messages)
 
     # Define full evaluation range from minimum and maximum evaluation start/end times
     full_evaluation_start_date: datetime | None = None
@@ -726,8 +762,10 @@ def validate_and_save_times(run: CalibrationRun, calibration_times: dict[str, da
 
     # Define the expanded evaluation range from the minimum and maximum evaluation start/end times
     if validation_evaluation_range and calibration_evaluation_range:
-        full_evaluation_start_date, full_evaluation_end_date = get_full_evaluation_date_range_from_ranges(calibration_evaluation_range,
-                                                                                                          validation_evaluation_range)
+        full_evaluation_start_date, full_evaluation_end_date = get_full_evaluation_date_range_from_ranges(
+            calibration_evaluation_range,
+            validation_evaluation_range
+        )
 
     # Ensure calibration simulation range contains the calibration evaluation range
     if calibration_evaluation_range and calibration_simulation_range:
@@ -781,7 +819,7 @@ def validate_and_save_times(run: CalibrationRun, calibration_times: dict[str, da
             run.validation_eval_start_period = validation_times.get('validation_start_time')
             run.validation_eval_end_period = validation_times.get('validation_end_time')
 
-    return messages
+    return None
 
 
 def get_full_evaluation_date_range_from_ranges(
@@ -1102,7 +1140,6 @@ def get_forcing_date_range(forcing_dir_path: str) -> DateTimeRange | None:
     :param forcing_dir_path: Directory path or cloud URL containing forcing data files.
     :return: DateTimeRange covering all CSV files, or None if no files found.
     """
-    print('forcing_dir_path', forcing_dir_path)
     csv_files = cloud_util.list_files(forcing_dir_path, pattern="*.csv")
     if not csv_files:
         return None
@@ -1129,7 +1166,7 @@ def get_observation_date_range(observational_filepath: str) -> DateTimeRange:
     return get_csv_daterange(observational_filepath)
 
 
-def get_date_range_intersection(observational_file_path: str, forcing_dir_path: str) -> DateTimeRange | None:
+def get_date_range_intersection(observational_file_path: str, forcing_dir_path: str = None) -> DateTimeRange | None:
     """
     Calculates the intersection of date ranges between observational and forcing data.
     Supports both local paths and cloud URLs.
@@ -1143,7 +1180,7 @@ def get_date_range_intersection(observational_file_path: str, forcing_dir_path: 
     logger.debug(f"obs_range: {obs_range}")
 
     # Calculate the date range for the forcing data
-    forcing_range = get_forcing_date_range(forcing_dir_path)
+    forcing_range = get_forcing_date_range(forcing_dir_path) if forcing_dir_path else settings.FORCING_BMI_DATE_RANGE
     logger.debug(f"forcing_range: {forcing_range}")
 
     # Compute the intersection of the two ranges

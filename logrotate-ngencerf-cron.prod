@@ -23,10 +23,11 @@
 #
 # Behavior of the installed cron job:
 #   - runs twice daily at 10:00 and 22:00 UTC
-#   - forces rotation every time (-f), so no state file (-s) is used
-#   - rotates the bind-mounted logs written by the Django/Gunicorn container
-#   - triggers Gunicorn to reopen log files via USR1 (configured in logrotate)
+#   - does NOT force rotation (-f is intentionally omitted)
+#   - rotation occurs only when logrotate’s conditions are met (e.g. daily, minsize)
+#   - uses copytruncate to remain compatible with Django logging.FileHandler
+#   - avoids USR1 signaling and cross-namespace process coordination
 #
 # The cron command only runs if the config file exists.
 
-0 10,22 * * * root [ -f /ngencerf-app/ngencerf-server/logrotate-ngencerf.prod.conf ] && /usr/sbin/logrotate -f /ngencerf-app/ngencerf-server/logrotate-ngencerf.prod.conf
+0 10,22 * * * root [ -f /ngencerf-app/ngencerf-server/logrotate-ngencerf.prod.conf ] && /usr/sbin/logrotate /ngencerf-app/ngencerf-server/logrotate-ngencerf.prod.conf

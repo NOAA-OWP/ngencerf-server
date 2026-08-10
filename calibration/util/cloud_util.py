@@ -56,12 +56,13 @@ import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Iterator, Tuple
 from urllib.parse import urlparse
-from pathlib import Path
 
-import fsspec
+import boto3
 import botocore.exceptions
+import fsspec
 
 from calibration.views.called_from import called_from
 
@@ -81,7 +82,12 @@ _REMOTE_SCHEMES = {"s3", "gs", "gcs", "az", "abfs", "abfss"}
 # You can pass auth via env (AWS_*, GOOGLE_APPLICATION_CREDENTIALS, AZURE_*),
 # or via storage_options in get_filesystem(). Keep it simple here.
 
-class S3CredentialsExpired(Exception):
+class CredentialsExpired(Exception):
+    """Generic credential-expired error across all cloud providers."""
+    pass
+
+
+class S3CredentialsExpired(CredentialsExpired):
     """Raised when AWS S3 credentials are expired."""
     pass
 
@@ -222,152 +228,470 @@ def join_url(base: str, *parts: str) -> str:
 def copy_tree(src_url: str,
               dst_url: str,
               workers: int = 16,
-              buffer_size: int = 8 * 1024 * 1024) -> int:
+              buffer_size: int = 8 * 1024 * 1024,
+              verify: bool = False) -> int:
     """
-    Recursively copy all files under src_url into dst_url.
-    Raises S3CredentialsExpired if AWS credentials are expired.
+    Generic and reliable tree copy between:
+        • EFS → S3/GCS/Azure
+        • S3/GCS/Azure → EFS
+        • Cloud → Cloud (server-side when supported)
+        • Local → Local
+
+    Preserves directory structure. Can optionally verify via SHA256.
+    When copying S3→local with verify=True, uses the source manifest instead
+    of re-hashing cloud objects.
+
+    Manifest rules:
+      • LOCAL → CLOUD with verify=True: manifest.json is CREATED on cloud.
+      • CLOUD → LOCAL with verify=True: manifest.json is USED but NOT RESTORED.
+      • Symlinks are preserved: stored as metadata in manifest and recreated on restore.
 
 
-    - If source and destination are the same provider and support
-      server-side copy, use that (fast, no local I/O).
-    - Otherwise stream through this process with multiple threads.
+    ------------------------------------------------------------------
+    URL HANDLING
+    ------------------------------------------------------------------
+    fsspec requires well-formed URLs. Local paths such as:
+        /ngencerf/data/run/123
+        ../../relative/path
+        ~/stuff
+    are *not* proper URLs. Depending on the backend, fsspec may:
+        • reject them,
+        • treat them as relative paths,
+        • generate inconsistent behavior across providers.
 
-    Note: copy_tree does not use the caching layer (localize_to_path).
-    If you want persistent reuse across runs, call localize_to_path
-    on each source file first.
+    normalize_url():
+        • expands ~
+        • absolutizes the path
+        • converts it into a proper file URL:
+              /path/to/x  →  file:///path/to/x
 
-    :param src_url: Source prefix URL (e.g. s3://bucket/prefix or file:///dir).
-                    A bare path is also allowed; it will be normalized to file://.
-    :param dst_url: Destination prefix URL (e.g. file:///localdir or s3://otherbucket/target).
-                    A bare path is also allowed; it will be normalized to file://.
-    :param workers: Number of parallel threads to use.
-    :param buffer_size: Buffer size for streamed copies (default 8 MiB).
-    :return: Number of files successfully copied.
+    This guarantees:
+        • fsspec sees a real URL (s3://, gs://, az://, file://)
+        • local and cloud code paths behave consistently
+        • path comparisons (prefix stripping, relpath, etc.) work predictably
+        • no surprises with Windows-style paths
+
+    When normalize_url() is needed:
+        ✓ any time the caller provides a bare local filesystem path
+        ✓ any time the caller provides a relative path
+        ✓ any time fsspec must process the path through filesystem(s)
+
+    When normalize_url() is NOT strictly required:
+        • when the user already provides valid URLs:
+              s3://bucket/key
+              gs://bucket/key
+              file:///abs/path
+
+    BUT it’s still safe and recommended to run normalize_url() on everything,
+    because it standardizes all inputs and prevents subtle bugs.
+
+    ------------------------------------------------------------------
+    Copy Strategy
+    ------------------------------------------------------------------
+      * Local source  → enumerated with os.walk()
+      * Cloud source  → enumerated with fs.find()
+      * Cloud→Cloud   → attempt provider server-side copy
+      * Otherwise     → streamed copy via threads
+
+    Note: copy_tree does NOT use the caching layer (localize_to_path).
+    Use localize_to_path() yourself if you need persistent reuse of remote
+    files (e.g., large GeoPackages reused across workflows).
+
+    :param src_url: Source prefix. Accepts:
+                        • A full cloud URL (s3://bucket/prefix, gs://…, az://…)
+                        • A full local URL (file:///path/to/dir)
+                        • A bare local path (/ngencerf/data/run/123 or relative paths)
+
+                    Bare local paths are automatically normalized into fully-qualified
+                    file:// URLs via normalize_url(). The caller does NOT need to
+                    pre-normalize them.
+
+    :param dst_url: Destination prefix. Same rules as src_url:
+                        • Cloud URLs stay as-is
+                        • file:/// URLs stay as-is
+                        • Bare local paths are automatically converted to file:/// form
+
+                    Normalization ensures fsspec always receives a valid URL and can
+                    resolve the correct backend.
+
+    :param workers: Number of parallel threads for streamed copies. Higher values
+                    increase throughput when copying many small-to-medium files.
+    :param buffer_size:
+        Size of the memory buffer used during streamed copies.
+        Only applies when copying via this process (EFS↔S3, EFS↔Local, etc.).
+        Ignored for server-side cloud copies.
+
+    :param verify:
+        When True:
+          • LOCAL → CLOUD:
+                - SHA256 both sides (src + dst)
+                - Manifest is written at the cloud destination (_manifest.json)
+          • CLOUD → LOCAL:
+                - Manifest must already exist at source
+                - Each file’s SHA256 is checked against manifest entries
+                - _manifest.json is copied but skipped during verification
+
+    :return:
+        Number of files successfully copied. If source prefix is empty,
+        returns 0. Errors propagated to caller unless captured as
+        S3CredentialsExpired for AWS credential issues.
     """
     logger.info(called_from())
 
-    fs_src, _ = get_filesystem(src_url)
-    fs_dst, _ = get_filesystem(dst_url)
+    # Normalize both URLs (converts bare paths → file:///)
+    src_url = normalize_url(src_url)
+    dst_url = normalize_url(dst_url)
 
-    src_base, src_prefix = _norm_prefix(src_url)
+    # Parse schemes
+    src_fs, _ = get_filesystem(src_url)
+    dst_fs, _ = get_filesystem(dst_url)
+
+    src_scheme = urlparse(src_url).scheme or "file"
+    dst_scheme = urlparse(dst_url).scheme or "file"
+
+    # Split source/dest into (base, prefix)
+    src_base, src_prefix = _norm_prefix(src_url)  # e.g. ("file:///","/ngen/.../1_peter")
     dst_base, dst_prefix = _norm_prefix(dst_url)
 
-    # Find all source files
-    # fs.find may return scheme-less paths for some backends (e.g., s3fs returns "bucket/key").
-    # Build src_root for listing.
-    src_root = f"{src_base}/{src_prefix}".rstrip("/")
-    try:
-        files = [p for p in fs_src.find(src_root) if not p.endswith("/")]
-    except botocore.exceptions.ClientError as e:
-        if e.response.get("Error", {}).get("Code") == "ExpiredToken":
-            raise S3CredentialsExpired("Your AWS S3 credentials are expired") from e
-        raise
-    except PermissionError as e:
-        if "expired" in str(e).lower():
-            raise S3CredentialsExpired("Your AWS S3 credentials are expired") from e
-        raise
+    # Used ONLY during local→cloud verification.
+    # manifest_entries collects file hash entries for writing new manifest.json.
+    manifest_entries = [] if verify and dst_scheme != "file" else None
 
-    if not files:
+    # Symlink metadata (stored only during local→cloud to recreate symlinks on restore)
+    manifest_symlinks = [] if verify and dst_scheme != "file" else None
+
+    # ------------------------------------------------------------
+    # Helper to compute SHA256 when verify=True
+    # ------------------------------------------------------------
+    def compute_sha256(fs, path) -> str:
+        h = hashlib.sha256()
+        with fs.open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
+    # ------------------------------------------------------------
+    # If verify and source is cloud → load manifest.json
+    # ------------------------------------------------------------
+    source_manifest_dict = None  # fast lookup dict: rel_path → sha256
+    source_manifest_raw = None  # full manifest JSON (includes symlinks)
+    if verify and src_scheme != "file":
+        manifest_url = join_url(src_base, src_prefix, "_manifest.json")
+
+        # Explicit existence check — DO NOT use fs.find() for this
+        if src_fs.exists(manifest_url):
+            try:
+                with src_fs.open(manifest_url, "r") as mf:
+                    source_manifest_raw = json.load(mf)  # keep full structure (files + symlinks)
+
+                # Convert file list to dict for fast hash verification
+                source_manifest_dict = {
+                    entry["relative"]: entry["sha256"]
+                    for entry in source_manifest_raw.get("files", [])
+                }
+
+                logger.info(f"Loaded manifest for cloud→local verify: {manifest_url}")
+
+            except Exception as e:
+                logger.error(f"Failed to load manifest.json at {manifest_url}: {e}")
+                source_manifest_dict = None
+        else:
+            logger.warning("Verification enabled, but no manifest.json found on source cloud directory.")
+            source_manifest_dict = None
+
+    # ------------------------------------------------------------
+    # STEP 1 — Generate the file list correctly
+    # ------------------------------------------------------------
+    def list_local_files(base_path: str) -> list[tuple[str, str]]:
+        """
+        Return list of (absolute_file_path, relative_path_from_base)
+        for a local directory source.
+        """
+        root_path = urlparse(base_path).path  # file:///... → /path
+        out = []
+        for dirpath, _, filenames in os.walk(root_path):
+            for name in filenames:
+                abs_path = os.path.join(dirpath, name)
+                rel = os.path.relpath(abs_path, root_path).replace("\\", "/")
+                out.append((abs_path, rel))
+        return out
+
+    def list_cloud_files(prefix_url: str) -> list[tuple[str, str]]:
+        """
+        Return list of (full_url, relative_path_from_prefix)
+        for a cloud-provider source.
+
+        IMPORTANT:
+          fs.find() returns backend-dependent paths:
+            • 'bucket/key'
+            • 'key'
+            • or fully-qualified URLs (s3://bucket/key)
+
+        The implementation normalizes all cases into full URLs by rebuilding
+        the provider URL manually (using join_url), rather than using
+        normalize_url(), because normalize_url() would incorrectly treat
+        provider keys as local paths.
+        """
+        try:
+            all_objs = src_fs.find(prefix_url)
+        except botocore.exceptions.ClientError as e:
+            code = e.response.get("Error", {}).get("Code")
+            if code in ("ExpiredToken", "InvalidAccessKeyId"):
+                raise S3CredentialsExpired("Your AWS credentials have expired") from e
+            raise
+
+        # Normalize prefix for path comparison
+        parsed = urlparse(prefix_url)
+        prefix_bucket = parsed.netloc  # "ngwpc-dev"
+        prefix_path = parsed.path.lstrip("/")  # "peter/.../1_peter"
+        out = []
+
+        for obj in all_objs:
+            if obj.endswith("/"):
+                continue
+
+            # obj may be:
+            #   "bucket/key"            (S3-style)
+            #   "key"                   (GCS/other)
+            #   "s3://bucket/key"       (full URL)
+            # We must rebuild the full provider URL WITHOUT using normalize_url()
+
+            if "://" in obj:
+                full = obj
+                full_path = urlparse(obj).path.lstrip("/")
+            else:
+                # Extract the key portion
+                if obj.startswith(prefix_bucket + "/"):
+                    key = obj.split("/", 1)[1]
+                else:
+                    key = obj
+
+                # Rebuild full provider URL
+                full = join_url(src_base, key)
+                full_path = key
+
+            # Compute rel-path strictly from the provider path
+            if full_path.startswith(prefix_path):
+                rel = full_path[len(prefix_path):].lstrip("/")
+            else:
+                rel = os.path.basename(full_path)
+
+            out.append((full, rel))
+
+        return out
+
+    src_files = list_local_files(src_url) if src_scheme == "file" else list_cloud_files(src_url)
+
+    if not src_files:
         logger.warning(f"No files found at {src_url}")
         return 0
 
-    logger.info(f"Copying {len(files)} files from {src_url} to {dst_url} using {workers} workers")
+    # ------------------------------------------------------------
+    # SKIP restoring manifest.json when CLOUD → LOCAL with verify=True
+    # ------------------------------------------------------------
+    if verify and src_scheme != "file":
+        before = len(src_files)
+        src_files = [(a, r) for (a, r) in src_files if r != "_manifest.json"]
+        after = len(src_files)
+        if before != after:
+            logger.info("Skipped restoring _manifest.json (manifest is used but not copied).")
 
-    # Decide if we can use provider-native server-side copy
-    use_server_side = _same_provider(fs_src, fs_dst) and _server_side_cp_supported(fs_src)
+    logger.info(f"Copying {len(src_files)} files from {src_url} to {dst_url} using {workers} workers")
 
-    def _dst_path(src_path: str) -> str:
-        """
-        Compute destination path by removing the src_root prefix and prepending the destination base/prefix.
-        Falls back to just the basename if src_path doesn't start with src_root.
-        """
-        if src_path.startswith(src_root):
-            relative = src_path[len(src_root):].lstrip("/")
-        else:
-            relative = os.path.basename(src_path)
-        return join_url(dst_base, dst_prefix, relative)
+    # Check server-side cp possibility
+    use_server_side = (
+            src_scheme == dst_scheme
+            and _same_provider(src_fs, dst_fs)
+            and _server_side_cp_supported(src_fs)
+    )
 
-    def _copy_one(src_path: str) -> tuple[str, float, int]:
-        """
-        Copy one file:
-        - Try server-side copy if possible.
-        - Otherwise stream through this process with buffer_size.
+    # Build destination path from relative path
+    def make_dst(rel: str) -> str:
+        return join_url(dst_base, dst_prefix, rel)
 
-        Returns: (out_path, elapsed_sec, src_size_bytes)
-        """
-        t_start_sec = time.perf_counter()
-        out_path = _dst_path(src_path)
+    # ------------------------------------------------------------
+    # STEP 2 — Copy + (optional) verify one file
+    # ------------------------------------------------------------
+    def _copy_one(abs_src: str, rel_path: str) -> tuple[str, float, int]:
+        t0 = time.perf_counter()
+        dst_full = make_dst(rel_path)
 
-        parent = os.path.dirname(urlparse(out_path).path).lstrip("/")
+        # ------------------------------------------------------------
+        # Handle symlinks: preserve metadata instead of copying
+        # ------------------------------------------------------------
+        if src_scheme == "file" and os.path.islink(abs_src):
+            target = os.readlink(abs_src)
+
+            # Record symlink for local→cloud write
+            if manifest_symlinks is not None:
+                manifest_symlinks.append({
+                    "relative": rel_path,
+                    "target": target,
+                })
+
+            logger.info(f"Recorded symlink {rel_path} -> {target}")
+            return dst_full, 0.0, -1
+
+        # Make parent directory on destination
+        dst_parent = os.path.dirname(urlparse(dst_full).path)
         try:
-            fs_dst.mkdirs(join_url(dst_base, parent), exist_ok=True)
+            dst_fs.mkdirs(join_url(dst_base, dst_parent), exist_ok=True)
         except Exception:
             pass
 
-        # Attempt to get size for throughput reporting (best-effort)
-        src_size_bytes = -1
+        # Try to get size (best-effort)
+        size_bytes = -1
         try:
-            info = fs_src.info(src_path)
-            src_size_bytes = int(info.get("size", -1))
+            info = src_fs.info(abs_src)
+            size_bytes = int(info.get("size", -1))
+        except botocore.exceptions.ClientError as e:
+            code = e.response.get("Error", {}).get("Code")
+            if code in ("ExpiredToken", "InvalidAccessKeyId"):
+                raise S3CredentialsExpired("Your AWS credentials have expired") from e
+            raise
         except Exception:
             pass
 
-        if use_server_side:
-            # Server-side copy within the same provider (fast, no data over your machine)
-            _cp_file_server_side(fs_src, src_path, out_path)
+        # Copy file (server-side or streamed)
+        try:
+            if use_server_side:
+                _cp_file_server_side(src_fs, abs_src, dst_full)
+            else:
+                with src_fs.open(abs_src, "rb") as r, dst_fs.open(dst_full, "wb") as w:
+                    shutil.copyfileobj(r, w, length=buffer_size)
+        except botocore.exceptions.ClientError as e:
+            code = e.response.get("Error", {}).get("Code")
+            if code in ("ExpiredToken", "InvalidAccessKeyId"):
+                raise S3CredentialsExpired("Your AWS credentials have expired") from e
+            raise
+
+        dt = time.perf_counter() - t0
+
+        # Base message (without throughput yet)
+        base_msg = f"Copied {abs_src} -> {dst_full} in {dt:.3f}s"
+
+        # Compute throughput if possible
+        if size_bytes > 0:
+            mib = size_bytes / (1024 * 1024)
+            rate = mib / dt if dt > 0 else 0
+            throughput = f" ({mib:.2f} MiB @ {rate:.2f} MiB/s)"
         else:
-            # Stream through memory with a large buffer; threads handle parallelism
-            with fs_src.open(src_path, "rb") as r, fs_dst.open(out_path, "wb") as w:
-                shutil.copyfileobj(r, w, length=buffer_size)
+            throughput = ""
 
-        elapsed_sec = time.perf_counter() - t_start_sec
+        # ------------------------------------------------------------
+        # Verification - ensure copy is accurate
+        # ------------------------------------------------------------
+        if verify:
+            # Skip verification for manifest on restore
+            if rel_path == "_manifest.json":
+                logger.info(f"{base_msg}{throughput} — skipped manifest verification")
+                return dst_full, dt, size_bytes
 
-        # Per-file timing/throughput log
-        if src_size_bytes and src_size_bytes > 0:
-            mebibytes = src_size_bytes / (1024 * 1024)
-            mib_per_sec = mebibytes / elapsed_sec if elapsed_sec > 0 else 0.0
-            logger.info(
-                f"Finished copying {src_path} -> {out_path} in {elapsed_sec:.3f}s "
-                f"({mebibytes:.2f} MiB @ {mib_per_sec:.2f} MiB/s)"
-            )
+            # CLOUD → LOCAL verification (use manifest for hash lookup)
+            if source_manifest_dict and src_scheme != "file":
+                expected = source_manifest_dict.get(rel_path)  # O(1) lookup
+                if expected is None:
+                    raise RuntimeError(f"No manifest entry for {rel_path}")
+
+                # Hash ONLY destination (local)
+                dst_hash = compute_sha256(dst_fs, dst_full)
+
+                if expected != dst_hash:
+                    raise RuntimeError(f"Verification FAILED for {rel_path}: {expected} != {dst_hash}")
+
+            else:
+                # LOCAL → CLOUD verification (hash both)
+                src_hash = compute_sha256(src_fs, abs_src)
+                dst_hash = compute_sha256(dst_fs, dst_full)
+
+                if src_hash != dst_hash:
+                    raise RuntimeError(f"Verification FAILED for {rel_path}: {src_hash} != {dst_hash}")
+
+                # Store manifest entry ONLY for local→cloud case
+                if dst_scheme != "file" and manifest_entries is not None:
+                    manifest_entries.append({
+                        "relative": rel_path,
+                        "sha256": dst_hash,
+                        "size": size_bytes if size_bytes > 0 else None
+                    })
+
+        # ----------------------------
+        # UNIFIED LOG LINE
+        # ----------------------------
+        if verify:
+            logger.info(f"{base_msg}{throughput} — verified OK")
+
         else:
-            logger.info(f"Finished copying {src_path} -> {out_path} in {elapsed_sec:.3f}s")
+            # Unified no-verify line
+            logger.info(f"{base_msg}{throughput}")
 
-        return out_path, elapsed_sec, max(src_size_bytes, 0)
+        return dst_full, dt, size_bytes
 
-    # Threaded fan-out over files
-    wall_start_sec = time.perf_counter()
+    # ------------------------------------------------------------
+    # STEP 4 — Fan-out threads to copy
+    # ------------------------------------------------------------
+    wall_start = time.perf_counter()
+    total_bytes = 0
     completed = 0
-    sum_bytes = 0
-    sum_cpu_time_sec = 0.0  # sum of per-file times (not equal to wall time with parallelism)
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        futures = [ex.submit(_copy_one, p) for p in files]
+        futures = [ex.submit(_copy_one, abs_src, rel) for abs_src, rel in src_files]
         for fut in as_completed(futures):
-            ret_path, ret_elapsed_sec, ret_size_bytes = fut.result()  # raises if error
+            _, _, sz = fut.result()
             completed += 1
-            sum_bytes += ret_size_bytes
-            sum_cpu_time_sec += ret_elapsed_sec
+            if sz > 0:
+                total_bytes += sz
 
-    wall_elapsed_sec = time.perf_counter() - wall_start_sec
+    wall = time.perf_counter() - wall_start
 
-    logger.info(f"Successfully copied {completed}/{len(files)} files from {src_url} to {dst_url}")
-
-    # Summary timing/throughput (added)
-    if sum_bytes > 0:
-        total_mib = sum_bytes / (1024 * 1024)
-        wall_mib_per_sec = total_mib / wall_elapsed_sec if wall_elapsed_sec > 0 else 0.0
-        avg_per_file_sec = wall_elapsed_sec / completed if completed else 0.0
+    if total_bytes > 0:
+        mib = total_bytes / (1024 * 1024)
+        rate = mib / wall if wall > 0 else 0
         logger.info(
-            f"Copy summary: {total_mib:.2f} MiB in {wall_elapsed_sec:.3f}s "
-            f"({wall_mib_per_sec:.2f} MiB/s, avg per file {avg_per_file_sec:.3f}s, workers={workers}, "
+            f"Copy summary: {completed} files, {mib:.2f} MiB in {wall:.3f}s "
+            f"({rate:.2f} MiB/s, workers={workers}, "
             f"{'server-side' if use_server_side else 'streamed'})"
         )
     else:
-        logger.info(
-            f"Copy summary: duration {wall_elapsed_sec:.3f}s (workers={workers}, "
-            f"{'server-side' if use_server_side else 'streamed'})"
-        )
+        logger.info(f"Copy summary: {completed} files in {wall:.3f}s (workers={workers})")
+
+    # ------------------------------------------------------------
+    # Write manifest.json ONLY when verify=True AND destination is cloud
+    # ------------------------------------------------------------
+    if verify and dst_scheme != "file" and manifest_entries:
+        try:
+            manifest_path = join_url(dst_base, dst_prefix, "_manifest.json")
+            with dst_fs.open(manifest_path, "w") as mf:
+                mf.write(json.dumps({
+                    "files": manifest_entries,
+                    "symlinks": manifest_symlinks or [],
+                }, indent=2))
+            logger.info(f"Wrote manifest: {manifest_path}")
+        except Exception as e:
+            logger.error(f"Failed to write manifest.json: {e}")
+
+    # ------------------------------------------------------------
+    # Recreate symlinks after CLOUD → LOCAL restore
+    # (uses source_manifest_raw since it contains symlink metadata)
+    # ------------------------------------------------------------
+    if (
+            verify
+            and src_scheme != "file"
+            and source_manifest_raw
+            and "symlinks" in source_manifest_raw
+    ):
+        dest_root = urlparse(dst_url).path
+        for entry in source_manifest_raw["symlinks"]:
+            rel = entry["relative"]
+            target = entry["target"]
+            link_path = os.path.join(dest_root, rel)
+
+            os.makedirs(os.path.dirname(link_path), exist_ok=True)
+            try:
+                os.symlink(target, link_path)  # creates symlink even if target missing
+                logger.info(f"Restored symlink {rel} -> {target}")
+            except Exception as e:
+                logger.error(f"Failed to recreate symlink {rel}: {e}")
 
     return completed
 
@@ -736,3 +1060,48 @@ def localize_to_path(
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
+
+
+def check_aws_credentials(*, timeout_seconds: int = 3) -> None:
+    """
+    Fast sanity check that AWS credentials are present and valid.
+
+    Raises S3CredentialsExpired if credentials are missing, expired,
+    or otherwise invalid. Intended for startup / readiness checks.
+    """
+    try:
+        sts = boto3.client(
+            "sts",
+            config=boto3.session.Config(
+                connect_timeout=timeout_seconds,
+                read_timeout=timeout_seconds,
+                retries={"max_attempts": 1},
+            ),
+        )
+
+        identity = sts.get_caller_identity()
+
+        logger.info(
+            "AWS credentials OK: account=%s arn=%s",
+            identity.get("Account"),
+            identity.get("Arn"),
+        )
+
+    except (botocore.exceptions.NoCredentialsError, botocore.exceptions.PartialCredentialsError) as e:
+        # Boto3 could not construct a usable credential set locally
+        # (missing, incomplete, unreadable, or unresolved credentials).
+        # No request was made to AWS.
+        raise S3CredentialsExpired("AWS credentials are missing or incomplete") from None
+
+    except botocore.exceptions.ClientError as e:
+        # Credentials were constructed successfully and a request reached AWS STS,
+        # but STS rejected the request due to invalid, expired, or otherwise
+        # unacceptable credentials.
+        code = e.response.get("Error", {}).get("Code", "Unknown")
+
+        if code in {"ExpiredToken", "InvalidClientTokenId"}:
+            raise S3CredentialsExpired("AWS credentials are expired or invalid") from None
+
+        # Any other STS error at startup still indicates unusable credentials
+        # (e.g. wrong account, broken assume-role chain, signature issues).
+        raise S3CredentialsExpired(f"AWS credential check failed: {code}") from None
