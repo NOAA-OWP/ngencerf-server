@@ -1,329 +1,89 @@
+import errno
 import json
 import logging
 import os
 import shutil
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from functools import lru_cache
 
 from django.conf import settings
-from django.db import transaction
 from drf_spectacular.utils import extend_schema, OpenApiResponse
-from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.request import Request
 from rest_framework.response import Response
 
-from calibration.enums import StatusEnum, ValidationType, JobGenesis, ForecastConfigEnum
+from calibration.enums import StatusEnum, JobGenesis
 from calibration.models import CalibrationRun, ValidationRun, ForecastRun
 from calibration.run_util.run_common import submit_job
 from calibration.util.calibration_validators import FooterResponseSerializer, \
-    ErrorResponseSerializer, CreateCalibrationRunResponseSerializer, \
-    CalibrationRunSerializer, ImportResponseSerializer, \
-    CreateAndRunValidationResponseSerializer, CreateValidationRequestSerializer, \
-    EmptySerializer, CreateForecastRequestSerializer, CreateAndRunForecastResponseSerializer, \
-    ArchiveJobRequestSerializer, GetGitInfoResponseSerializer, CalibrationRunIdList, CalibrationRunListResponse, ImportSerializer, \
-    LockJobRequestSerializer, S3DirectoryValidator
-from calibration.util.cloud_util import join_url, copy_tree, get_filesystem, path_exists
+    ErrorResponseSerializer, ImportResponseSerializer, \
+    EmptySerializer, ArchiveJobRequestSerializer, GetGitInfoResponseSerializer, CalibrationRunIdList, CalibrationRunListResponse, ImportSerializer, \
+    LockJobRequestSerializer
+from calibration.util.cloud_util import join_url, copy_tree, s3_prefix_exists, S3CredentialsExpired, normalize_s3_prefix, S3ProfileError, \
+    delete_all_s3_objects_under_prefix
 from calibration.util.git_util import get_git_info_internal
 from calibration.views import ngen_cal_input
-from calibration.views.calibration_import_export_views import load_calibration_run_data, import_calibration_run_data
-from calibration.views.calibration_run_views import map_path_to_host
+from calibration.views.calibration_import_export_views import import_calibration_run_data
 from calibration.views.called_from import get_caller_name
-from calibration.views.common import handle_exceptions, validate_response, get_calibration_run, create_calibration_run_internal, ResponseError, \
-    validate_request, create_validation_run_internal, create_forecast_run_internal, get_user_email, get_elapsed_str, readonly_transaction, \
-    format_datetime, create_cold_start_run_internal, get_job_description, get_calibration_runs_bulk
+from calibration.views.common import handle_exceptions, validate_response, get_calibration_run, ResponseError, \
+    validate_request, get_user_email, get_elapsed_str, format_datetime, get_calibration_runs_bulk
 
 logger = logging.getLogger(__name__)
 
 
-@extend_schema(
-    request=EmptySerializer,
-    responses={
-        201: CreateCalibrationRunResponseSerializer,
-        400: OpenApiResponse(
-            response=ErrorResponseSerializer,
-            description="Validation error or parsing error"
-        ),
-        500: OpenApiResponse(
-            response=ErrorResponseSerializer,
-            description="Internal server error"
-        )
-    },
-    description="Create a new calibration"
-)
-@api_view(['POST'])
-@handle_exceptions
-def create_calibration_run(request: Request) -> Response:
-    """
-    Creates a new calibration run for the requesting user.
-
-    Handles the creation process by accepting calibration details in the request, validating them,
-    and creating a new calibration job if the request is valid.
-
-    :param request: The HTTP request object, containing user and calibration run details.
-    :return: A Response object with the serialized calibration run data.
-    """
-    data = request.data
-    logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} ')
-
-    validator, error_return = validate_request(EmptySerializer, data)
-    if error_return:
-        return error_return
-
-    with transaction.atomic():
-        run = create_calibration_run_internal(request.user)
-
-        response = {
-            'message': f'Calibration Job {run.id} created',
-            'calibration_run_id': run.id,
-            'job_data_dir': map_path_to_host(run.job_data_dir)
-        }
-
-        response_validator, error_response = validate_response(CreateCalibrationRunResponseSerializer, response)
-        if error_response:
-            return error_response
-
-        logger.debug(
-            f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - '
-            f'{json.dumps(response_validator.data)}'
-        )
-        return Response(response_validator.data, status=status.HTTP_201_CREATED)
-
-
-@extend_schema(
-    request=CreateValidationRequestSerializer,
-    responses={
-        201: CreateAndRunValidationResponseSerializer,
-        400: OpenApiResponse(
-            response=ErrorResponseSerializer,
-            description="Validation error or parsing error"
-        ),
-        500: OpenApiResponse(
-            response=ErrorResponseSerializer,
-            description="Internal server error"
-        )
-    },
-    description="Create and run a new validation for a specific iteration"
-)
-@api_view(['POST'])
-@handle_exceptions
-def create_and_run_validation(request: Request) -> Response:
-    """
-    Creates and runs a new validation run for a specified calibration run and iteration.
-
-    Validates the request, checks if a validation job already exists for the specified calibration run
-    and iteration, and creates and submits a new validation job if not.
-
-    Additionally, disallows submission if either the VALID_CONTROL or VALID_BEST
-    validation job for this calibration run is still RUNNING or SUBMITTED.
-
-    :param request: The HTTP request object containing calibration and iteration details.
-    :return: JSON response with validation run details or error information.
-    """
-    data = request.data
-    logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} ')
-
-    validator, error_return = validate_request(CreateValidationRequestSerializer, data)
-    if error_return:
-        return error_return
-
-    calibration_run_id = validator.get('calibration_run_id')
-    iteration_id = validator.get('iteration_id')
-
-    calibration_run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=[StatusEnum.DONE])
-    if error_return:
-        return error_return
-
-    # ─────────────────────────────────────────────
-    # Require BOTH VALID_CONTROL and VALID_BEST to be DONE.
-    # Block if EITHER is missing or not DONE.
-    # ─────────────────────────────────────────────
-    required_types = [
-        ValidationType.VALID_CONTROL.value,
-        ValidationType.VALID_BEST.value,
-    ]
-
-    # Build dict of existing runs
-    control_best_dict = {
-        vr.validation_type: vr
-        for vr in ValidationRun.objects.filter(
-            calibration_run=calibration_run,
-            validation_type__in=required_types
-        )
-    }
-
-    # Ensure both exist and both are DONE
-    for vt in required_types:
-        vr = control_best_dict.get(vt)
-        if not vr or vr.status != StatusEnum.DONE.db_instance:
-            label = "VALID_CONTROL" if vt == ValidationType.VALID_CONTROL.value else "VALID_BEST"
-            status_name = vr.status.name if vr else "MISSING"
-            return ResponseError(
-                f"Cannot submit a new validation job because {label} is {status_name} for "
-                f"Calibration Job {calibration_run.id}. Both VALID_CONTROL and VALID_BEST must be DONE."
-            )
-
-    # Check if a ValidationRun already exists for this CalibrationRun and Iteration
-    existing_validation_run_id = (
-        ValidationRun.objects.filter(
-            calibration_run=calibration_run,
-            iteration_id=iteration_id,
-            status__in=[StatusEnum.DONE.db_instance, StatusEnum.RUNNING.db_instance, StatusEnum.SUBMITTED.db_instance]
-        )
-        .values_list('id', flat=True)
-        .first()
-    )
-    if existing_validation_run_id:
-        return ResponseError(f'Validation Job {existing_validation_run_id} already exists for '
-                             f'Calibration Job {calibration_run.id}, iteration id {iteration_id}')
-
-    validation_run = create_validation_run_internal(
-        calibration_run,
-        iteration_id,
-        validation_type=ValidationType.VALID_ITERATION
-    )
-    submit_job(validation_run)
-
-    response = {
-        'message': f'Validation Job {validation_run.id} created and submitted for Calibration Job {calibration_run.id}',
-        'calibration_run_id': calibration_run.id,
-        'validation_run_id': validation_run.id,
-        'status': validation_run.status.name,
-        'submit_date': validation_run.submit_date
-    }
-
-    response_validator, error_response = validate_response(CreateAndRunValidationResponseSerializer, response)
-    if error_response:
-        return error_response
-
-    logger.debug(
-        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
-    return Response(response_validator.data, status=status.HTTP_201_CREATED)
-
-
-@extend_schema(
-    request=CreateForecastRequestSerializer,
-    responses={
-        201: CreateAndRunForecastResponseSerializer,
-        400: OpenApiResponse(
-            response=ErrorResponseSerializer,
-            description="Validation error or parsing error"
-        ),
-        500: OpenApiResponse(
-            response=ErrorResponseSerializer,
-            description="Internal server error"
-        )
-    },
-    description="Create and run a new forecast with optional cold start"
-)
-@api_view(['POST'])
-@handle_exceptions
-def create_and_run_forecast(request: Request) -> Response:
-    """
-    Creates and runs a new forecast run with an optional cold start for a specified calibration run and cycle_name name.
-
-    :param request: The HTTP request object containing calibration and iteration details.
-    :return: JSON response with validation run details or error information.
-    """
-    data = request.data
-    logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} ')
-
-    validator, error_return = validate_request(CreateForecastRequestSerializer, data)
-    if error_return:
-        return error_return
-
-    calibration_run_id = validator.get('calibration_run_id')
-    configuration_name = validator.get('configuration_name')
-    cycle_date = validator.get('cycle_date')
-    cold_start_date = validator.get('cold_start_date')
-    logging_config = validator.get('logging_config')
-
-    run_cold_start = cold_start_date is not None
-
-    calibration_run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=[StatusEnum.DONE])
-    if error_return:
-        return error_return
-
-    forecast_errors = []
-
-    configuration = ForecastConfigEnum.get_instance(configuration_name)
-    if configuration.domain != calibration_run.gage.domain:
-        forecast_errors.append(f"{configuration_name} is not a valid configuration for domain {calibration_run.gage.domain.name}")
-
-    # Define allowed cycle date range
-    min_cycle_date = datetime(2022, 1, 1, tzinfo=timezone.utc)
-    max_cycle_date = datetime.now(tz=timezone.utc)
-
-    # Reject cycles earlier than the minimum allowed date
-    if cycle_date < min_cycle_date:
-        forecast_errors.append(f"Cycle cannot start before {format_datetime(min_cycle_date)}")
-
-    # Adjust the maximum allowed cycle date based on forecast availability lag
-    future_forecast_availability = configuration.availability_lag or 0
-
-    # Subtract lag hours from max_cycle_date to account for delayed availability
-    max_cycle_date = max_cycle_date - timedelta(hours=future_forecast_availability)
-
-    # Warn if cycle date is later than adjusted maximum availability
-    if cycle_date > max_cycle_date:
-        # TODO Check what to do with this.  Is it a fatal error or just a warning?
-        forecast_errors.append(f"Forecast availability is not guaranteed less than {future_forecast_availability} hours ahead of time.")
-
-    if (cycle_date.hour - configuration.cycle_start) % configuration.cycle_freq != 0:
-        # Hour offset from cycle start must align with evenly by cycle frequency
-        forecast_errors.append(
-            f"Cycle hour {cycle_date.hour}:00 is not available. Forecasts are available every {configuration.cycle_freq} hours from {configuration.cycle_start}:00 to {configuration.cycle_end}:00.")
-
-    # If a cold start date is provided, validate its position relative to cycle date
-    if run_cold_start:
-        if cold_start_date >= cycle_date:
-            forecast_errors.append("Cold start date must be earlier than cycle date")
-        if cold_start_date < min_cycle_date:
-            forecast_errors.append(f"Cold start cannot be before {format_datetime(min_cycle_date)}")
-
-    if forecast_errors:
-        return ResponseError("Error submitting forecast", errors=forecast_errors)
-
-    cold_start_run = create_cold_start_run_internal(
-        calibration_run,
+def validate_forecast_cycle_date(
+        check_date: datetime,
         configuration,
-        cold_start_date=cold_start_date,
-        cycle_date=cycle_date
-    ) if cold_start_date else None
+        min_cycle_date: datetime,
+        max_cycle_date: datetime,
+        errors: list[str],
+        label: str = "Cycle",
+) -> None:
+    """
+    Validate a forecast-style cycle datetime against the configured forecast schedule.
 
-    forecast_run = create_forecast_run_internal(
-        calibration_run,
-        cold_start_run,
-        configuration,
-        cycle_date
-    )
+    This helper validates:
+    1. The datetime is not earlier than the minimum supported forecast date.
+    2. The datetime is not later than the latest date that should be available,
+       after accounting for the configuration's availability lag.
+    3. The hour aligns with the configured cycle frequency relative to cycle_start.
 
-    if run_cold_start:
-        # Forecast Job will run automatically after the cold start
-        submit_job(cold_start_run, logging_config=logging_config)
-    else:
-        submit_job(forecast_run, logging_config=logging_config)
+    :param check_date: The datetime being validated.
+    :param configuration: Forecast configuration enum instance.
+    :param min_cycle_date: Earliest allowed forecast datetime.
+    :param max_cycle_date: Latest allowed forecast datetime after applying availability lag.
+    :param errors: List to append validation error messages to.
+    :param label: Human-readable label for the datetime being validated
+        (for example "Cycle" or "Maximum projected cycle").
+    """
+    # Reject dates earlier than the earliest supported forecast cycle date.
+    if check_date < min_cycle_date:
+        errors.append(
+            f"{label} cannot start before {format_datetime(min_cycle_date)} "
+            f"(received {format_datetime(check_date)})."
+        )
 
-    msg = get_job_description(cold_start_run if run_cold_start else forecast_run) + ' created and submitted'
-    if run_cold_start:
-        msg += f', followed by Forecast Job {forecast_run.id}'
-    response = {
-        'message': msg,
-        'calibration_run_id': calibration_run.id,
-        'forecast_run_id': forecast_run.id,
-        'cold_start_run_id': cold_start_run.id if run_cold_start else None,
-        'submit_date': cold_start_run.submit_date if run_cold_start else forecast_run.submit_date
-    }
+    # Reject dates that are too recent to guarantee forecast availability.
+    # max_cycle_date is computed by the caller as:
+    #     now - configuration.availability_lag
+    if check_date > max_cycle_date:
+        future_forecast_availability = configuration.availability_lag or 0
+        errors.append(
+            f"{label} {format_datetime(check_date)} is not guaranteed to be available "
+            f"because forecast availability may lag by up to "
+            f"{future_forecast_availability} hours."
+        )
 
-    response_validator, error_response = validate_response(CreateAndRunForecastResponseSerializer, response)
-    if error_response:
-        return error_response
-
-    logger.debug(
-        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
-    return Response(response_validator.data, status=status.HTTP_201_CREATED)
+    # Validate that the hour aligns with the configured cycle frequency.
+    # Hour offset from cycle_start must divide evenly by cycle_freq.
+    if (check_date.hour - configuration.cycle_start) % configuration.cycle_freq != 0:
+        errors.append(
+            f"{label} {format_datetime(check_date)} is not available. "
+            f"Forecasts are available every {configuration.cycle_freq} hours "
+            f"from {configuration.cycle_start}:00 to {configuration.cycle_end}:00."
+        )
 
 
 @extend_schema(
@@ -416,91 +176,8 @@ def get_git_info(request: Request) -> Response:
     return Response(response_validator.data)
 
 
-@extend_schema(
-    request=CalibrationRunSerializer,
-    responses={
-        200: ImportResponseSerializer,
-        400: OpenApiResponse(
-            response=ErrorResponseSerializer,
-            description="Validation error or parsing error"
-        ),
-        500: OpenApiResponse(
-            response=ErrorResponseSerializer,
-            description="Internal server error"
-        )
-    },
-    description="Clone a calibration job"
-)
-@api_view(['POST', 'GET'])
-@handle_exceptions
-def clone_job(request: Request) -> Response:
-    """
-    Clone an existing calibration job, creating a new calibration run with identical parameters.
-
-    Read-heavy parts (load_calibration_run_data) are executed in a read-only block,
-    followed by the write-heavy import step in a separate transaction.
-
-    :param request: The HTTP request object.
-    :return: A Response object with the cloned calibration run data.
-    """
-    data = request.data if request.method == 'POST' else request.query_params.dict()
-    logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
-
-    validator, error_return = validate_request(CalibrationRunSerializer, data)
-    if error_return:
-        return error_return
-
-    calibration_run_id = validator.get('calibration_run_id')
-
-    # -------------------------------------------------------------
-    # Read-only block: get the source run and prepare export data
-    # -------------------------------------------------------------
-    with readonly_transaction():
-        run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=list(StatusEnum))
-        if error_return:
-            return error_return
-
-        calibration_run_data, _ = load_calibration_run_data(run, export=True)
-
-    # -------------------------------------------------------------
-    # Write block: import a new run from the exported data
-    # -------------------------------------------------------------
-    new_run, _, fatal_error = import_calibration_run_data(request, calibration_run_data, JobGenesis.CLONE)
-    if fatal_error:
-        return fatal_error
-
-    # Set the new status to Saved and then we check it
-    new_run.status = StatusEnum.SAVED.db_instance
-    warnings = None
-    errors = None
-    if new_run.status in [StatusEnum.SAVED.db_instance, StatusEnum.RUNNING.db_instance]:
-        error_object, _ = ngen_cal_input.ready_to_run(new_run)
-        if error_object.has_warnings():
-            warnings = error_object.warnings
-        if error_object.has_errors():
-            errors = error_object.errors
-
-    # noinspection PyUnresolvedReferences
-    response = {'message': f'Calibration Job {run.id} has been cloned to Calibration Job {new_run.id}',
-                'calibration_run_id': new_run.id,
-                'status': new_run.status.name}
-    # I agree that the message handling got out of hand
-    if warnings:
-        response['warnings'] = warnings
-    if errors:
-        response['errors'] = errors
-
-    response_validator, error_response = validate_response(ImportResponseSerializer, response)
-    if error_response:
-        return error_response
-    logger.debug(
-        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
-
-    return Response(response_validator.data)
-
-
 @lru_cache
-def get_running_statuses():
+def get_running_statuses() -> list:
     return [
         StatusEnum.RUNNING.db_instance,
         StatusEnum.SUBMITTED.db_instance,
@@ -655,12 +332,28 @@ def delete_jobs(request: Request) -> Response:
 @handle_exceptions
 def archive_jobs(request: Request) -> Response:
     """
-    Archive or unarchive multiple calibration jobs. A soft-delete mechanism:
-    archiving moves job data to S3 and removes the local directory;
-    unarchiving restores from S3 into a clean directory.
+    Archive or unarchive multiple calibration jobs.
+
+    Archiving copies the local job directory to S3 and then removes the active
+    local path. After the copy succeeds, the local directory is first renamed to
+    a quarantine path on the same filesystem. This allows the archive to succeed
+    once the active path is gone, even if immediate recursive deletion of the
+    quarantined directory is delayed by NFS/EFS open-file behavior.
+
+    Unarchiving restores the job directory from S3 back to local storage and
+    then deletes the archived S3 objects only after the restore succeeds.
+
+    A job is marked archived only after the requested operation reaches a safe
+    completion point:
+    - Archive: S3 copy completed and active local path moved out of the way.
+    - Unarchive: Local restore verified and archived S3 objects removed.
+
+    Note:
+    Quarantined directories are not deleted in the request path after archive.
+    They are left for a scheduled background cleanup process.
 
     :param request: The HTTP request object.
-    :return: A Response object with the archive confirmation.
+    :return: A Response object with per-job archive or unarchive results.
     """
     data = request.data if request.method == 'POST' else request.query_params.dict()
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
@@ -675,27 +368,40 @@ def archive_jobs(request: Request) -> Response:
     if not settings.NGENCERF_ARCHIVE_S3_PATH:
         return ResponseError("NGENCERF_ARCHIVE_S3_PATH is undefined")
 
-    # Make sure it's s3 and ends with a directory slash
+    # Make sure the configured archive root is a valid S3 prefix.
     try:
-        S3DirectoryValidator(data={"uri": settings.NGENCERF_ARCHIVE_S3_PATH}).is_valid(raise_exception=True)
-    except Exception:
-        return ResponseError("NGENCERF_ARCHIVE_S3_PATH must be a valid S3 directory (e.g. s3://ngencerf_archive/<system_name>/)")
+        s3_prefix = normalize_s3_prefix(settings.NGENCERF_ARCHIVE_S3_PATH)
+    except ValueError as e:
+        return ResponseError(f"NGENCERF_ARCHIVE_S3_PATH is invalid: {e}")
 
-    if not path_exists(settings.NGENCERF_ARCHIVE_S3_PATH):
+    try:
+        exists = s3_prefix_exists(
+            s3_prefix,
+            profile_name=settings.NGENCERF_RW_PROFILE,
+        )
+    except S3CredentialsExpired as e:
+        return ResponseError(str(e))
+    except S3ProfileError as e:
+        return ResponseError(str(e))
+    except PermissionError as e:
+        return ResponseError(str(e))
+
+    if not exists:
         return ResponseError(
-            f"NGENCERF_ARCHIVE_S3_PATH does not exist on S3: {settings.NGENCERF_ARCHIVE_S3_PATH}"
+            f"NGENCERF_ARCHIVE_S3_PATH does not exist on S3: {s3_prefix}"
         )
 
     job_results = []
 
-    # Bulk fetch all the calibration jobs including archived jobs
+    # Bulk fetch all requested runs, including archived ones.
     runs_by_id, errors_by_id = get_calibration_runs_bulk(
         calibration_run_ids=calibration_run_ids,
         user=request.user,
         run_status=list(StatusEnum),
         include_archived=True,
     )
-    # Process each calibration_run_id in the list
+
+    # Process each calibration_run_id in the request.
     for calibration_run_id in calibration_run_ids:
 
         # Validation / access errors
@@ -710,7 +416,7 @@ def archive_jobs(request: Request) -> Response:
 
         run = runs_by_id[calibration_run_id]
 
-        # Can't archive if the job is locked
+        # Can't archive or unarchive if the job is locked.
         if run.is_locked:
             job_results.append({
                 "message": f'Calibration Job {calibration_run_id} is locked for archiving/deleting',
@@ -719,7 +425,7 @@ def archive_jobs(request: Request) -> Response:
             })
             continue
 
-        # Already archived/not-archived?
+        # Reject requests that do not change the current archive state.
         if archive == run.is_archived:
             job_results.append({
                 "message": f'Calibration Job {calibration_run_id} is {"already" if archive else "not"} archived',
@@ -733,7 +439,7 @@ def archive_jobs(request: Request) -> Response:
             # ARCHIVE (EFS → S3)
             # ===============================
             if archive:
-                # Prevent archiving while job or child jobs are running
+                # Prevent archiving while the run or any child jobs are active.
                 running_jobs_error = has_running_associated_jobs(run)
                 if running_jobs_error:
                     job_results.append({
@@ -745,15 +451,23 @@ def archive_jobs(request: Request) -> Response:
 
                 src_path = run.job_data_dir  # e.g. /ngencerf/data/.../1_peter
                 dst_prefix = join_url(
-                    settings.NGENCERF_ARCHIVE_S3_PATH,
+                    s3_prefix,
                     os.path.basename(src_path),
                 )
 
                 start = time.perf_counter()
                 logger.info(f"Archiving Calibration Job {calibration_run_id}: copy {src_path} -> {dst_prefix}")
 
-                # ---- COPY LOCAL → CLOUD ----
-                copied = copy_tree(src_path, dst_prefix, verify=True)
+                # Archive copy:
+                # - upload files to S3
+                # - write manifest from source-side hashes only
+                # - do not hash-read uploaded S3 objects back
+                copied = copy_tree(
+                    src_path,
+                    dst_prefix,
+                    verify=True,
+                    profile_name=settings.NGENCERF_RW_PROFILE,
+                )
 
                 elapsed = time.perf_counter() - start
                 logger.info(
@@ -761,29 +475,51 @@ def archive_jobs(request: Request) -> Response:
                     f"to {dst_prefix} in {elapsed:.2f}s"
                 )
 
-                # ---- DELETE LOCAL DIRECTORY AFTER SUCCESS ----
+                # ---- MOVE LOCAL DIRECTORY OUT OF THE ACTIVE PATH ----
+                # Move the original active path out of the way before attempting deletion.
+                # On NFS/EFS, open file handles (often exposed as '.nfs*' files) can prevent
+                # immediate recursive deletion. By renaming first, the active job path is
+                # removed deterministically, allowing the archive to succeed even if some
+                # files cannot yet be deleted.
+                quarantined_path = None
                 if os.path.isdir(src_path):
                     try:
-                        shutil.rmtree(src_path)
-                        logger.info(f"Deleted local directory after archive: {src_path}")
+                        quarantined_path = move_tree_out_of_active_path(src_path)
+                        logger.info(
+                            f"Moved local directory out of active path after archive: "
+                            f"{src_path} -> {quarantined_path}"
+                        )
                     except Exception as e:
-                        logger.error(f"Failed to delete local directory {src_path}: {e}")
+                        logger.error(
+                            f"Failed to move local directory out of active path {src_path}: {e}"
+                        )
                         raise
+
+                # Do not synchronously delete quarantined archive directories here.
+                # They are safe once moved out of the active path and will be
+                # cleaned up later by the background cleanup job.
+                if quarantined_path:
+                    logger.info(
+                        f"Deferred deletion of quarantined local directory to background cleanup: "
+                        f"{quarantined_path}"
+                    )
 
             # ===============================
             # UNARCHIVE (S3 → EFS)
             # ===============================
             else:
                 src_cloud_prefix = join_url(
-                    settings.NGENCERF_ARCHIVE_S3_PATH,
+                    s3_prefix,
                     os.path.basename(run.job_data_dir)
                 )
 
                 dest_dir = run.job_data_dir
 
-                # Ensure the destination directory exists (empty)
+                # Remove any existing destination directory before restore.
                 if os.path.isdir(dest_dir):
-                    shutil.rmtree(dest_dir)
+                    delete_tree_with_retries(dest_dir, attempts=3, delay_seconds=0.5)
+
+                # Recreate the destination directory before copying into it.
                 os.makedirs(dest_dir, exist_ok=True)
 
                 start = time.perf_counter()
@@ -793,7 +529,12 @@ def archive_jobs(request: Request) -> Response:
                 )
 
                 # ---- COPY CLOUD → LOCAL ----
-                copied = copy_tree(src_cloud_prefix, dest_dir, verify=True)
+                copied = copy_tree(
+                    src_cloud_prefix,
+                    dest_dir,
+                    verify=True,
+                    profile_name=settings.NGENCERF_RW_PROFILE,
+                )
 
                 elapsed = time.perf_counter() - start
                 logger.info(
@@ -803,9 +544,13 @@ def archive_jobs(request: Request) -> Response:
 
                 # ---- DELETE CLOUD DIRECTORY AFTER SUCCESS ----
                 try:
-                    cloud_fs, _ = get_filesystem(src_cloud_prefix)
-                    cloud_fs.rm(src_cloud_prefix, recursive=True)
-                    logger.info(f"Deleted cloud directory after unarchive: {src_cloud_prefix}")
+                    deleted = delete_all_s3_objects_under_prefix(
+                        s3_dir_uri=src_cloud_prefix,
+                        profile_name=settings.NGENCERF_RW_PROFILE,
+                    )
+                    logger.info(
+                        f"Deleted {deleted} cloud object(s) after unarchive under: {src_cloud_prefix}"
+                    )
                 except Exception as e:
                     logger.error(f"Failed to delete cloud directory {src_cloud_prefix}: {e}")
                     raise
@@ -815,7 +560,6 @@ def archive_jobs(request: Request) -> Response:
             # ------------------------------------------------------------
             run.is_archived = archive
             run.archive_status_updated_at = datetime.now(tz=timezone.utc)
-
             run.save(update_fields=['is_archived', 'archive_status_updated_at'])
 
             job_results.append({
@@ -938,12 +682,14 @@ def lock_jobs(request: Request) -> Response:
 
 def hard_delete(run: CalibrationRun) -> None:
     """
-    Perform a hard delete on a calibration run and its related records. Deletes associated files if they exist.
+    Perform a hard delete on a calibration run and its related records.
+
+    This deletes the database record first, then attempts to remove the local
+    job directory if it still exists.
 
     :param run: The CalibrationRun instance to be deleted.
     """
-
-    job_data_dir = run.job_data_dir  # stash before delete
+    job_data_dir = run.job_data_dir  # Stash before delete
 
     logger.debug(f"Deleting (hard delete) Calibration Job {run.id}, associated records and files")
     run.delete()
@@ -951,7 +697,7 @@ def hard_delete(run: CalibrationRun) -> None:
     logger.debug(f'Deleting directory {job_data_dir} for Calibration Job {run.id}')
     if job_data_dir and os.path.isdir(job_data_dir):
         try:
-            shutil.rmtree(job_data_dir)
+            delete_tree_with_retries(job_data_dir, attempts=3, delay_seconds=0.5)
         except Exception:
             logger.exception(
                 f"Failed to delete job directory {job_data_dir} for Calibration Job {run.id}"
@@ -1006,29 +752,156 @@ def import_job(request: Request) -> Response:
     run, messages, errors = import_calibration_run_data(request, data, JobGenesis.IMPORT, run=calibration_run, is_cli=is_cli)
     if errors:
         return errors
+    assert run is not None
 
     imported_and_submitted = 'updated' if calibration_run_id else 'imported'
 
     error_object, config_file = ngen_cal_input.ready_to_run(run)
 
-    if run_after_import and not error_object.warnings and not error_object.errors:
+    if run_after_import and (
+            error_object is not None and
+            not error_object.warnings and
+            not error_object.errors
+    ):
         error_response = submit_job(run)
         if error_response:
             return error_response
         imported_and_submitted = f"{imported_and_submitted} and submitted"
 
-    response = {'message': f'Calibration Job {run.id} {imported_and_submitted}', 'calibration_run_id': run.id, 'status': run.status.name}
+    response = {
+        'message': f'Calibration Job {run.id} {imported_and_submitted}',
+        'calibration_run_id': run.id,
+        'status': run.status.name
+    }
+
     if messages:
         response['messages'] = messages
-    if error_object.warnings:
-        response['warnings'] = error_object.warnings
-    if error_object.errors:
-        response['errors'] = error_object.errors
+
+    if error_object is not None:
+        if error_object.warnings:
+            response['warnings'] = error_object.warnings
+        if error_object.errors:
+            response['errors'] = error_object.errors
 
     response_validator, error_response = validate_response(ImportResponseSerializer, response)
     if error_response:
         return error_response
 
     logger.debug(
-        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
+        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}'
+    )
     return Response(response_validator.data)
+
+
+def delete_tree_with_retries(path: str, attempts: int = 3, delay_seconds: float = 1.0) -> None:
+    """
+    Delete a directory tree with bounded retries for common NFS/EFS cleanup races.
+
+    This helper is intended for cases where shutil.rmtree() may fail because a
+    file in the tree is still open by another process. On NFS/EFS, that can
+    surface as retryable errors such as ENOTEMPTY or EBUSY, often involving
+    temporary '.nfs*' placeholder files.
+
+    A missing path is treated as success. This avoids races where the directory
+    disappears between an existence check and the delete attempt.
+
+    On failure, this helper logs only the single path reported by the exception
+    instead of recursively scanning the remaining tree, which keeps the failure
+    path cheap to evaluate even for very large directories.
+
+    :param path: The directory tree to delete.
+    :param attempts: Maximum number of delete attempts.
+    :param delay_seconds: Delay between retry attempts in seconds.
+    :raises OSError: Re-raises the final deletion error if the tree cannot be removed.
+    """
+    last_exception: OSError | None = None
+
+    # Treat an already-missing path as success.
+    if not os.path.exists(path):
+        return
+
+    for attempt in range(1, attempts + 1):
+        try:
+            shutil.rmtree(path)
+            return
+        except OSError as exc:
+            # The directory may have disappeared after the existence check or
+            # between retry attempts. That is equivalent to successful deletion.
+            if exc.errno == errno.ENOENT or not os.path.exists(path):
+                return
+
+            last_exception = exc
+
+            # Retry only for the NFS/EFS-style cases that may clear once another
+            # process releases an open file handle.
+            is_retryable = exc.errno in {
+                errno.ENOTEMPTY,
+                errno.EBUSY,
+            }
+
+            failed_path = getattr(exc, 'filename', None)
+            full_failed_path = (
+                os.path.join(path, failed_path)
+                if failed_path and not os.path.isabs(failed_path)
+                else failed_path or path
+            )
+
+            is_nfs_placeholder = os.path.basename(full_failed_path).startswith('.nfs')
+
+            logger.warning(
+                f"Delete attempt {attempt}/{attempts} failed for {path}: "
+                f"[Errno {exc.errno}] {exc}. "
+                f"Failed path: {full_failed_path}. "
+                f"NFS placeholder: {is_nfs_placeholder}"
+            )
+
+            # For non-retryable errors, or after the final attempt, let the caller
+            # handle the failure and report the blocking path from this exception.
+            if not is_retryable or attempt == attempts:
+                raise
+
+            time.sleep(delay_seconds)
+
+    if last_exception:
+        raise last_exception
+
+
+def get_archived_pending_delete_path(path: str) -> str:
+    """
+    Build a sibling quarantine path used after a successful archive copy.
+
+    The returned path stays on the same filesystem so that os.replace() can
+    perform an atomic rename. A timestamp is included to reduce the risk of
+    collisions if cleanup from an earlier archive attempt is still present.
+
+    :param path: The original active job directory path.
+    :return: A sibling quarantine path for the archived directory.
+    """
+    parent_dir = os.path.dirname(path)
+    base_name = os.path.basename(path)
+    timestamp = datetime.now(tz=timezone.utc).strftime('%Y%m%dT%H%M%S_%f')
+    return os.path.join(parent_dir, f'{base_name}.__archived_pending_delete__.{timestamp}')
+
+
+def move_tree_out_of_active_path(path: str) -> str:
+    """
+    Rename a directory to a quarantine path on the same filesystem.
+
+    This is used after a successful archive copy so that the original active
+    path is no longer present even if immediate recursive deletion of the
+    directory may still fail due to NFS/EFS open-file behavior.
+
+    :param path: The original active job directory path.
+    :return: The new quarantine path.
+    :raises FileNotFoundError: If the source path does not exist.
+    :raises OSError: If the rename fails.
+    """
+    if not os.path.exists(path):
+        raise FileNotFoundError(f'Path does not exist: {path}')
+
+    quarantine_path = get_archived_pending_delete_path(path)
+
+    # os.replace() performs an atomic rename on the same filesystem.
+    os.replace(path, quarantine_path)
+
+    return quarantine_path

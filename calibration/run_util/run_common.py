@@ -5,13 +5,14 @@ import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, Future
 from datetime import datetime, timezone
-from typing import Callable
+from typing import Callable, cast
 from urllib.parse import urlparse
 
 import fsspec
 import pandas as pd
 from datetimerange import DateTimeRange
 from django.conf import settings
+from django.contrib.auth import get_user_model
 from django.db import transaction
 from mswm.manager import build_fcst, build_calib
 from rest_framework.response import Response
@@ -20,25 +21,28 @@ from calibration.enums import StatusEnum, ValidationType, SlurmCallbackStatusEnu
 from calibration.enums_vanilla import JobType
 from calibration.models import CalibrationRun, ValidationRun, Iteration, ForecastRun, ColdStartRun, VerificationRun
 from calibration.models.base_run import BaseRun
+from calibration.models.hindcast_run import HindcastRun
 from calibration.util.git_util import get_git_info_internal
 from calibration.util.ngen_locations import get_calibration_input_file, get_validation_best_stdout_file, get_validation_control_stdout_file, \
     get_calibration_stdout_file, get_validation_best_input_file, get_validation_control_input_file, get_validation_iteration_stdout_file, \
     get_forecast_stdout_file, get_forecast_dir, get_validation_iteration_git_info_file, get_validation_special_git_info_file, \
-    get_calibration_git_info_file, \
-    get_forecast_git_info_file, get_forcing_dir_for_job, get_verification_yaml_config_file, get_verification_git_info_file, \
-    get_verification_stdout_file, \
-    get_observational_file_for_job, get_forecast_realization_file, get_cold_start_realization_file, get_cold_start_stdout_file, get_cold_start_dir, \
-    get_cold_start_git_info_file
+    get_calibration_git_info_file, get_forecast_git_info_file,  get_verification_git_info_file, get_forecast_realization_file, \
+    get_cold_start_realization_file, \
+    get_cold_start_stdout_file, get_cold_start_dir, \
+    get_cold_start_git_info_file, get_hindcast_stdout_file, get_hindcast_git_info_file, get_hindcast_dir, get_cold_start_state, \
+    get_verification_stdout_file
 from calibration.views import ngen_cal_input
 from calibration.views.common import ResponseError, CerfException, create_validation_run_internal, get_job_description, write_ngen_logging_file
-from calibration.views.data_services import should_use_bmi_forcing
 from calibration.views.end_of_job_processing import read_validation_output, read_calibration_output, read_forecast_output, \
-    read_cold_start_output, read_verification_output
+    read_cold_start_output, read_verification_output, read_hindcast_output
 from calibration.views.forecast_input import create_forecast_input
 from calibration.views.ngen_cal_input import ready_to_run
+from calibration.views.verification_input import create_verification_input
 from cerfServer.settings import NgenEnvironmentEnum
 
 logger = logging.getLogger(__name__)
+
+User = get_user_model()
 
 # Job registry to store subprocess objects keyed by a unique string (e.g., "calibration_123")
 job_registry: dict[str, subprocess.Popen] = {}
@@ -73,7 +77,7 @@ def set_job_status(run: BaseRun, status: StatusEnum | None, failure_messages: di
       - In PW environment: keep the real Slurm job ID.
       - If `failure_messages` are provided, store them as JSON.
 
-    :param run: The CalibrationRun, ValidationRun, or ForecastRun object.
+    :param run: The CalibrationRun, ValidationRun, ForecastRun or HindcastRun object.
     :param status: The new status to set. If None, status is left unchanged.
     :param failure_messages: Optional failure details to record.
     """
@@ -97,23 +101,27 @@ def set_job_status(run: BaseRun, status: StatusEnum | None, failure_messages: di
         run.save(update_fields=update_fields)
 
 
-def get_run_owner(run: BaseRun):
+def get_run_owner(run: BaseRun) -> User:
     """
-    Retrieve the owner of a BaseRun object.
+    Return the owner associated with a run.
 
-    Determines the owner of the job from its `CalibrationRun`, `ValidationRun`,
-    or `ForecastRun` relationship.
+    - CalibrationRun: owner is stored directly on the model.
+    - ValidationRun, ForecastRun, HindcastRun: owner is resolved via calibration_run.
+    - VerificationRun: owner is resolved via parent_run → calibration_run.
 
-    :param run: The BaseRun object (CalibrationRun, ValidationRun, etc.).
-    :return: The owner of the associated CalibrationRun or the run itself.
-    :raises AttributeError: If the owner cannot be determined.
+    :param run: A BaseRun instance.
+    :return: The owner of the associated CalibrationRun.
+    :raises AttributeError: If the run type is unsupported or ownership cannot be resolved.
     """
-    if hasattr(run, 'owner'):  # CalibrationRun case
+    if isinstance(run, CalibrationRun):
         return run.owner
-    elif hasattr(run, 'calibration_run'):  # ValidationRun, ForecastRun
+
+    if isinstance(run, (ValidationRun, ColdStartRun, ForecastRun, HindcastRun)):
         return run.calibration_run.owner
-    elif hasattr(run, 'forecast_run') and hasattr(run.forecast_run, 'calibration_run'):
-        return run.forecast_run.calibration_run.owner
+
+    if isinstance(run, VerificationRun):
+        return run.parent_run.calibration_run.owner
+
     raise AttributeError(f"Cannot determine owner for run of type {type(run).__name__}")
 
 
@@ -243,7 +251,10 @@ def run_calibration_job(calibration_run: CalibrationRun) -> None:
 
     execute_job(
         calibration_run,
-        {'input_file': input_file},
+        {
+            'input_file': input_file,
+            'nprocs': str(calibration_run.mpi_nprocs)
+        },
         stdout_file,
         simulate=settings.SIMULATE_FLAGS.get(JobType.CALIBRATION, False)
     )
@@ -346,6 +357,43 @@ def run_forecast_job(forecast_run: ForecastRun) -> None:
     )
 
 
+def run_hindcast_job(hindcast_run: HindcastRun) -> None:
+    """
+    Start a hindcast job by determining input and output file paths.
+
+    This function is intended to be passed as an argument to `submit_job`
+    and not called directly.
+
+    :param hindcast_run: The HindcastRun object representing the job.
+    """
+    validation_yaml = get_validation_best_input_file(hindcast_run.calibration_run)
+    if not os.path.exists(validation_yaml):
+        raise CerfException(
+            f"Input file '{validation_yaml}' does not exist for {get_job_description(hindcast_run)}"
+        )
+
+    stdout_file = get_hindcast_stdout_file(hindcast_run)
+
+    cold_start_state = get_cold_start_state(hindcast_run.cold_start_run)
+    if not os.path.exists(cold_start_state):
+        # Issue an explicit error for legacy Cold Start runs that might not have a saved state
+        raise RuntimeError(f'Saved state not found for cold start run {get_job_description(hindcast_run)}')
+
+    execute_job(
+        hindcast_run,
+        {
+            'validation_yaml': validation_yaml,
+            'config_file': create_forecast_input(hindcast_run),
+            'run_name': os.path.basename(get_hindcast_dir(hindcast_run)),
+            'interval_cycle': str(hindcast_run.interval_cycle),
+            'num_iterations': str(hindcast_run.num_iterations),
+            'use_state': cold_start_state
+        },
+        stdout_file,
+        simulate=settings.SIMULATE_FLAGS.get(JobType.HINDCAST, False)
+    )
+
+
 def run_verification_job(verification_run: VerificationRun) -> None:
     """
     Start a verification job by determining input and output file paths.
@@ -360,7 +408,7 @@ def run_verification_job(verification_run: VerificationRun) -> None:
     execute_job(
         verification_run,
         {
-            'verification_config': get_verification_yaml_config_file(verification_run),
+            'verification_config': create_verification_input(verification_run),
         },
         stdout_file,
         simulate=settings.SIMULATE_FLAGS.get(JobType.VERIFICATION, False)
@@ -433,6 +481,10 @@ def submit_job(run: BaseRun, logging_config=None) -> Response | None:
             create_git_info(get_forecast_git_info_file(run))
 
             run_forecast_job(run)
+        elif isinstance(run, HindcastRun):
+            create_git_info(get_hindcast_git_info_file(run))
+
+            run_hindcast_job(run)
         elif isinstance(run, VerificationRun):
             create_git_info(get_verification_git_info_file(run))
 
@@ -487,17 +539,18 @@ def prepare_calibration_job(calibration_run: CalibrationRun) -> tuple[bool, Resp
             validation_errors=error_object.warnings,
             errors=error_object.errors
         )
+    assert config_file is not None
 
     job_description = get_job_description(calibration_run)
     try:
         logger.info(f'Final preparation to run Calibration Job {calibration_run.id}')
-        validation_errors = final_preprocessing_for_calibration(calibration_run)
-
-        if validation_errors:
-            return True, ResponseError(
-                f'Calibration Job {calibration_run.id} failed validation after preprocessing',
-                errors=validation_errors
-            )
+        # validation_errors = final_preprocessing_for_calibration(calibration_run)
+        #
+        # if validation_errors:
+        #     return True, ResponseError(
+        #         f'Calibration Job {calibration_run.id} failed validation after preprocessing',
+        #         errors=validation_errors
+        #     )
 
         logger.info(f'Running build_calib for {job_description} with config {config_file}')
         build_calib(config_file)
@@ -511,9 +564,9 @@ def prepare_calibration_job(calibration_run: CalibrationRun) -> tuple[bool, Resp
     return False, None
 
 
-def prepare_fcst_or_cold_start_job(run: ColdStartRun | ForecastRun) -> tuple[bool, Response | None]:
+def prepare_fcst_or_cold_start_job(run: ColdStartRun | ForecastRun | HindcastRun) -> tuple[bool, Response | None]:
     """
-    Prepare a ColdStartRun or ForecastRun job by generating configuration files.
+    Prepare a ColdStartRun, ForecastRun or Hindcast job by generating configuration files.
 
     This function:
     - Calls create_forecast_input(run) to generate the config
@@ -527,20 +580,24 @@ def prepare_fcst_or_cold_start_job(run: ColdStartRun | ForecastRun) -> tuple[boo
     job_description = get_job_description(run)
 
     try:
-        error, config_file = create_forecast_input(run)
+        config_file = create_forecast_input(run)
         valid_best = get_validation_best_input_file(run.calibration_run)
 
         if isinstance(run, ColdStartRun):
             run_name = os.path.basename(get_cold_start_dir(run))
             use_cold_start = True
+            save_state = True
+            saved_state = None
         else:  # ForecastRun
-            run_name = os.path.basename(get_forecast_dir(run))
+            run_name = os.path.basename(get_forecast_dir(cast(ForecastRun, run)))
             use_cold_start = False
+            save_state = False
+            saved_state = get_cold_start_state(run.cold_start_run) if run.cold_start_run else None
 
         logger.info(f'Running build_fcst for {job_description} '
-                    f'with config: {config_file}, valid_best: {valid_best}, run_name: {run_name}')
+                    f'with config: {config_file}, valid_best: {valid_best}, run_name: {run_name}, save_state: {save_state}, load_state_from: {saved_state}')
 
-        build_fcst(config_file, valid_best, run_name, use_cold_start=use_cold_start)
+        build_fcst(config_file, valid_best, run_name, use_cold_start=use_cold_start, save_state=save_state, load_state_from=saved_state)
     except Exception as e:
         # Mark the run as failed
         run.__class__.objects.filter(id=run.id).update(status=StatusEnum.FAILED.db_instance)
@@ -743,14 +800,22 @@ def finalize_cold_start_after_callback(run: ColdStartRun, failed_so_far: bool) -
     read_cold_start_output(run, failed_so_far)
     if failed_so_far:
         return
+
     set_job_status(run, StatusEnum.DONE)  # Update the job's status to DONE in the database.
 
-    # Is there an associated forecast run?
-    # For now, we assume that there is at most *one* ForecastRun that points to a specific ColdStartRun
+    # A new cold start may have at most one dependent run associated with it:
+    # either one ForecastRun, one HindcastRun, or neither.
     forecast_run = ForecastRun.objects.filter(cold_start_run=run).first()
+    hindcast_run = HindcastRun.objects.filter(cold_start_run=run).first()
 
-    if forecast_run:
-        submit_job(forecast_run)
+    if forecast_run and hindcast_run:
+        raise ValueError(
+            f"ColdStartRun {run.pk} has both a ForecastRun and HindcastRun dependent on it."
+        )
+
+    dependent_run = forecast_run or hindcast_run
+    if dependent_run:
+        submit_job(dependent_run)
 
 
 def finalize_forecast_after_callback(run: ForecastRun, failed_so_far: bool) -> None:
@@ -765,6 +830,23 @@ def finalize_forecast_after_callback(run: ForecastRun, failed_so_far: bool) -> N
     - False if the job has completed successfully so far.
     """
     read_forecast_output(run, failed_so_far)
+    if failed_so_far:
+        return
+    set_job_status(run, StatusEnum.DONE)  # Update the job's status to DONE in the database.
+
+
+def finalize_hindcast_after_callback(run: HindcastRun, failed_so_far: bool) -> None:
+    """
+    Finalizes a hindcast job after it has completed.
+
+    :param run: The HindcastRun object representing the hindcast job.
+    - Processes the output of the hindcast job.
+    - Marks the hindcast job as DONE in the database, indicating successful completion.
+    :param failed_so_far: Indicates whether the job has failed up to this point.
+    - True if the job encountered a failure.
+    - False if the job has completed successfully so far.
+    """
+    read_hindcast_output(run, failed_so_far)
     if failed_so_far:
         return
     set_job_status(run, StatusEnum.DONE)  # Update the job's status to DONE in the database.
@@ -787,46 +869,36 @@ def finalize_verification_after_callback(run: VerificationRun, failed_so_far: bo
     set_job_status(run, StatusEnum.DONE)  # Update the job's status to DONE in the database.
 
 
-def final_preprocessing_for_calibration(run: CalibrationRun) -> list[str]:
-    """
-    Executes the long-running preparation steps for the given CalibrationRun.
-    Assumes that all prerequisites (paths, date ranges) have been validated.
-
-    :param run: The CalibrationRun to process.
-    :return: List of validation error messages.
-    """
-    errors: list[str] = []
-
-    date_range = DateTimeRange(
-        min(run.calibration_start_period, run.validation_start_period),
-        max(run.calibration_end_period, run.validation_end_period),
-    )
-
-    use_bmi = should_use_bmi_forcing(run)
-
-    # ─────────────────────────────────────────────────────────────
-    # Forcing data
-    # ─────────────────────────────────────────────────────────────
-    # Subset only CSV data, not BMI
-    if not use_bmi:
-        subset_directory_by_time_range(
-            run,
-            run.forcing_eds_dir_path,
-            get_forcing_dir_for_job(run),
-            date_range
-        )
-
-    # ─────────────────────────────────────────────────────────────
-    # Observational data
-    # ─────────────────────────────────────────────────────────────
-    subset_by_time_range(
-        run,
-        run.observational_eds_file_path,
-        get_observational_file_for_job(run),
-        date_range
-    )
-
-    return errors
+# def final_preprocessing_for_calibration(run: CalibrationRun) -> list[str]:
+#     """
+#     Executes the long-running preparation steps for the given CalibrationRun.
+#     Assumes that all prerequisites (paths, date ranges) have been validated.
+#
+#     :param run: The CalibrationRun to process.
+#     :return: List of validation error messages.
+#     """
+#     errors: list[str] = []
+#
+#     date_range = DateTimeRange(
+#         min(run.calibration_start_period, run.validation_start_period),
+#         max(run.calibration_end_period, run.validation_end_period),
+#     )
+#
+#     # use_bmi = should_use_bmi_forcing(run)
+#
+#     # ─────────────────────────────────────────────────────────────
+#     # Forcing data
+#     # ─────────────────────────────────────────────────────────────
+#     # Subset only CSV data, not BMI
+#     # if not use_bmi:
+#     #     subset_directory_by_time_range(
+#     #         run,
+#     #         run.forcing_eds_dir_path,
+#     #         get_forcing_dir_for_job(run),
+#     #         date_range
+#     #     )
+#
+#     return errors
 
 
 def _get_fs_and_scheme(path_or_url: str):
@@ -965,8 +1037,12 @@ def subset_by_time_range(
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
 
     # Convert DateTimeRange boundaries to UTC Timestamps
-    start_dt = pd.to_datetime(date_time_range.start_datetime, utc=True)
-    end_dt = pd.to_datetime(date_time_range.end_datetime, utc=True)
+    start = date_time_range.start_datetime
+    end = date_time_range.end_datetime
+    assert start is not None and end is not None
+
+    start_dt = pd.to_datetime(start, utc=True)
+    end_dt = pd.to_datetime(end, utc=True)
 
     fs_in, _scheme = _get_fs_and_scheme(input_file)
 

@@ -163,6 +163,7 @@ def save_optimization_tab(request) -> Response:
     run, error_return = get_calibration_run(calibration_run_id, request.user)
     if error_return:
         return error_return
+    assert run is not None
 
     if have_LSTM(run) and (optimization_name or objective_function_name or
                            streamflow_threshold is not None or peak_flow_threshold is not None or
@@ -175,9 +176,15 @@ def save_optimization_tab(request) -> Response:
     if optimization_inputs and not optimization_name:
         return ResponseError('Optimization inputs cannot be specified without an optimization name')
 
-    optimization, prepared_inputs, error_message = validate_optimizations(run, optimization_name, optimization_inputs)
-    if error_message:
-        return ResponseError(error_message)
+    prepared_inputs: list[CalibrationOptimizationInput] | None = None
+
+    if optimization_name:
+        optimization, prepared_inputs, error_message = validate_optimizations(run, optimization_name, optimization_inputs)
+        if error_message:
+            return ResponseError(error_message)
+    else:
+        # No optimization specified → clear optimization and inputs
+        run.optimization = None
 
     error_message = validate_objective_function(run, objective_function_name, streamflow_threshold, peak_flow_threshold)
     if error_message:
@@ -192,13 +199,13 @@ def save_optimization_tab(request) -> Response:
     run.streamflow_threshold = streamflow_threshold
     run.peak_flow_threshold = peak_flow_threshold
 
-    keep_ids = {obj.optimization_input_id for obj in prepared_inputs} if prepared_inputs else set()
+    # keep_ids = {obj.optimization_input_id for obj in prepared_inputs} if prepared_inputs else set()
     with transaction.atomic():
         if stop_criteria is not None:
             # I'm assuming for now that there is just one CalibrationStopCriteria for this run, but that might change in the future
             CalibrationStopCriteria.objects.update_or_create(calibration_run=run, defaults={"value": stop_criteria})
 
-        write_optimization_inputs(run, prepared_inputs, keep_ids)
+        write_optimization_inputs(run, prepared_inputs)
 
         run.save()
 
@@ -214,8 +221,11 @@ def save_optimization_tab(request) -> Response:
     return Response(response_validator.data)
 
 
-def validate_optimizations(run: CalibrationRun, optimization_name: str, optimization_inputs: list[dict[str, Any]]) -> tuple[
-    Optimization | None, list[CalibrationOptimizationInput] | None, str | None]:
+def validate_optimizations(
+        run: CalibrationRun,
+        optimization_name: str,
+        optimization_inputs: list[dict[str, Any]]
+) -> tuple[Optimization | None, list[CalibrationOptimizationInput] | None, str | None]:
     """
     Validate and prepare optimization inputs for a calibration run.
 
@@ -245,8 +255,10 @@ def validate_optimizations(run: CalibrationRun, optimization_name: str, optimiza
             name = o['name']
             value = o['value']
             optimization_input_data = valid_inputs_dict.get(name)
-            if not optimization_input_data:
+            if optimization_input_data is None:
                 return None, None, f"'{name}' is not a valid parameter input for '{optimization_name}'"
+
+            optimization_input_data: dict[str, Any]
 
             # Safely retrieve min and max values
             min_value = optimization_input_data['min']
@@ -278,8 +290,10 @@ def validate_optimizations(run: CalibrationRun, optimization_name: str, optimiza
     return optimization, prepared_inputs, None
 
 
-def validate_objective_function(run: CalibrationRun, objective_function_name: str, streamflow_threshold: float,
-                                peak_flow_threshold: float) -> str | None:
+def validate_objective_function(run: CalibrationRun,
+                                objective_function_name: str | None,
+                                streamflow_threshold: float | None,
+                                peak_flow_threshold: float | None) -> str | None:
     """
     Validates and assigns the objective function to a calibration run.
 
@@ -314,15 +328,14 @@ def validate_objective_function(run: CalibrationRun, objective_function_name: st
     return None
 
 
-def write_optimization_inputs(run: CalibrationRun, prepared_inputs: list[CalibrationOptimizationInput] | None,
-                              keep_ids: set[int] | None = None) -> None:
+def write_optimization_inputs(run: CalibrationRun, prepared_inputs: list[CalibrationOptimizationInput] | None) -> None:
     """
     Write or update optimization input records for a calibration run.
 
     This function synchronizes the database state of `CalibrationOptimizationInput`
     entries for the given run with the provided validated inputs:
-      - Deletes any existing inputs not present in `keep_ids`.
-      - Inserts or updates the provided inputs
+      - Deletes any existing inputs not present in `prepared_inputs`.
+      - Inserts or updates the provided inputs.
       - If `prepared_inputs` is empty or None, removes all existing inputs for the run.
 
     This function does not manage transactions; callers modifying multiple related
@@ -331,15 +344,14 @@ def write_optimization_inputs(run: CalibrationRun, prepared_inputs: list[Calibra
     :param run: The CalibrationRun instance whose optimization inputs are being updated.
     :param prepared_inputs: A list of prepared `CalibrationOptimizationInput` objects,
                             typically produced by `validate_optimizations()`.
-    :param keep_ids: Optional set of optimization_input IDs to retain. If not provided,
-                     inferred from `prepared_inputs`.
     :return: None
     """
     # If there are no inputs, this means the run should have none — delete and exit.
     if not prepared_inputs:
         CalibrationOptimizationInput.objects.filter(calibration_run=run).delete()
         return
-    keep_ids = keep_ids or {obj.optimization_input_id for obj in prepared_inputs}
+
+    keep_ids = {obj.optimization_input_id for obj in prepared_inputs}
 
     (CalibrationOptimizationInput.objects
      .filter(calibration_run=run)

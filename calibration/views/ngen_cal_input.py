@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any
 
 import toml
+from datetimerange import DateTimeRange
 from django.db import transaction
 from django.db.models import F
 from toml import TomlEncoder
@@ -14,21 +15,20 @@ from toml import TomlEncoder
 from calibration.enums import StatusEnum, DataTypeEnum
 from calibration.enums_vanilla import NgenEnvironmentEnum
 from calibration.models import CalibrationOptimizationInput, CalibrationStopCriteria, CalibrationSlothParam, \
-    CalibrationParameter, CalibrationFormulation, CalibrationRun
-from calibration.util.caching import get_cached_optimization_inputs, have_LSTM, get_cached_modules_by_id
-from calibration.util.file_util import get_single_file
-from calibration.util.geopkg import normalize_gpkg
+    CalibrationParameter, CalibrationFormulation, CalibrationRun, CalibrationModulePropertyValue
+from calibration.util.caching import get_cached_optimization_inputs, have_LSTM, get_cached_modules_by_id, get_cached_module_properties
+from calibration.util.geopkg import get_geometry_from_gpkg
 from calibration.util.ngen_locations import CFE_LIB, TOPMD_LIB, SFT_LIB, SLOTH_LIB, SMP_LIB, LASAM_LIB, NOAH_LIB, NGEN_EXE, \
-    PARQUET_DIR, get_forcing_dir_for_job, get_observational_dir_for_job, \
-    get_geopackage_dir_for_job, \
-    PET_LIB, SNOW17_LIB, SAC_LIB, NWM_RETROSPECTIVE_DIR, get_bmi_config_dir_for_module, get_bmi_config_key, UEB_LIB, NGEN_MODULE_PARAMETERS, \
-    PARALLEL_NGEN_EXE, PARTITION_GENERATOR_EXE, BMI_FORCING_TEMPLATES
+    get_observational_file_for_job, PET_LIB, SNOW17_LIB, SAC_LIB, NWM_RETROSPECTIVE_DIR, UEB_LIB, NGEN_MODULE_PARAMETERS, \
+    PARALLEL_NGEN_EXE, PARTITION_GENERATOR_EXE, BMI_FORCING_TEMPLATES, get_geopackage_file_path, FORCING_STATIC_DIR
 from calibration.views.calibration_formulation_views import validate_formulation
 from calibration.views.calibration_secondary_data_views import should_generate_swe, should_generate_soil_moisture
-from calibration.views.calibration_tuning_views import get_full_evaluation_date_range, validate_time_range_against_data
+from calibration.views.calibration_tuning_views import get_full_evaluation_date_range, validate_time_range_against_data, \
+    validate_parameter_rules
 from calibration.views.called_from import called_from
-from calibration.views.common import TOKEN_NGEN_SCOPE, generate_custom_token, SLOTH, format_datetime, join_with_or, ErrorReport, readonly_transaction
-from calibration.views.data_services import should_use_bmi_forcing
+from calibration.views.common import TOKEN_NGEN_SCOPE, generate_custom_token, SLOTH, format_datetime, join_with_or, ErrorReport, readonly_transaction, \
+    map_path_to_container
+from calibration.views.data_services import get_observational_data_from_data_services
 from calibration.views.mpi_rules import get_mpi_nodes
 from cerfServer.settings import NGEN_ENVIRONMENT, NGEN_BMI_FORCING_WORK_DIR
 
@@ -40,15 +40,21 @@ CONFIG_TEMPLATE = {
 
     "General": {
         "basin": "",
+        "domain": "",
         "models": "",
         "formulation": "",
-        "is_aet_rootzone": False,
         "run_type": "calibration",
         "main_dir": "",
         # Snow Water equivalent output - Only True for snow models
         "output_swe": False,
         # Soil Moisture output - Only True for soil moisture modules
         "output_sm": False,
+        # Always true
+        "output_precip": True,
+    },
+
+    "ModuleProperties": {
+        # Properties such as aet_rootzone will be automatically generated
     },
 
     "Calibration": {
@@ -105,6 +111,7 @@ CONFIG_TEMPLATE = {
         "root_dir": NGEN_BMI_FORCING_WORK_DIR,
         "forcing_configuration": "",
         "forcing_dir": "",
+        "forcing_static_dir": FORCING_STATIC_DIR,
         "forcing_template_dir": BMI_FORCING_TEMPLATES,
 
     },
@@ -119,9 +126,8 @@ CONFIG_TEMPLATE = {
         "ueb_parameter_dir": os.path.join(NGEN_MODULE_PARAMETERS, 'ueb'),
         "lasam_parameter_dir": os.path.join(NGEN_MODULE_PARAMETERS, 'lasam'),
         "lstm_parameter_dir": os.path.join(NGEN_MODULE_PARAMETERS, 'lstm'),
-
-        # Parquet file - base on domain
-        "attributes_file": "",
+        "sac_sma_parameter_dir": os.path.join(NGEN_MODULE_PARAMETERS, 'sac-sma'),
+        "snow_17_parameter_dir": os.path.join(NGEN_MODULE_PARAMETERS, 'snow-17'),
 
         "sloth_parameter_file": "",
 
@@ -141,7 +147,7 @@ CONFIG_TEMPLATE = {
 }
 
 
-def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport | None, str | None]:
+def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport, str | None]:
     """
     Validate the given CalibrationRun and prepare it for execution.
 
@@ -178,8 +184,6 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
     # READ-ONLY PHASE
     # -----------------------------
     with readonly_transaction():
-        use_bmi = should_use_bmi_forcing(run)
-
         allowed_status_names = [StatusEnum.SAVED.value, StatusEnum.READY.value]
         if build:
             allowed_status_names.append(StatusEnum.SUBMITTED.value)
@@ -195,6 +199,7 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
         config: dict[str, dict[str, str | int | float | bool]] = copy.deepcopy(CONFIG_TEMPLATE)
 
         general = config['General']
+        module_properties = config['ModuleProperties']
         calibration = config['Calibration']
         datafile = config['DataFile']
         forcing = config['Forcing']
@@ -218,51 +223,41 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
         # Validate and configure the gage ID and station name
         if not is_missing(run.gage, 'gage_id', error_object):
             general['basin'] = run.gage.gage_id
+            general['domain'] = run.gage.domain.name
             calibration['station_name'] = run.gage.station_name
 
             if not is_missing(run.geopackage_source, 'Geopackage source', error_object):
-                geopackage_dir = get_geopackage_dir_for_job(run)
-
-                if run.geopackage_eds_file_path and build:
-                    # For data from Data Services, normalize the CRS and copy to job-specific location
-                    try:
-                        normalize_gpkg(run.geopackage_eds_file_path, geopackage_dir, output_is_dir=True)
-                    except FileNotFoundError:
-                        run.geopackage_eds_file_path = None
-
-                geopackage_file = get_single_file(geopackage_dir)
-                if geopackage_file:
-                    datafile['hydrofab_file'] = geopackage_file
+                datafile['hydrofab_file'] = get_geopackage_file_path(run)
 
             # Determine the source of the forcing data
-            if not is_missing(run.forcing_source_requested, 'Forcing source', error_object):
-                if use_bmi:
-                    logger.info("Using BMI forcing (USE_BMI_FORCING enabled, CONUS + AORC)")
-                    forcing_dir = None
-                    forcing_provider = 'bmi'
-                    forcing_configuration = "aorc"
-                else:
-                    logger.info("Using CSV forcing (BMI disabled or conditions not met)")
-                    forcing_dir = get_forcing_dir_for_job(run)
-                    forcing_provider = 'csv'
-                    forcing_configuration = ""
+            if not is_missing(run.forcing_source, 'Forcing source', error_object):
+                forcing_provider = 'bmi'
+                forcing_configuration = run.forcing_source.name.lower()
 
-                if not use_bmi:
-                    # CSV forcing path rules apply
-                    if not is_missing(run.forcing_eds_dir_path, "Forcing directory", error_object):
-                        pass
-
-                forcing['forcing_dir'] = forcing_dir
+                # if not use_bmi:
+                #     # CSV forcing path rules apply
+                #     if not is_missing(run.forcing_eds_dir_path, "Forcing directory", error_object):
+                #         pass
+                #
                 forcing['forcing_provider'] = forcing_provider
-                forcing['forcing_configuration'] = forcing_configuration
+                forcing['forcing_configuration'] = forcing_configuration.lower()
 
             if not is_missing(run.observational_source, 'Observational source', error_object):
-                observational_dir = get_observational_dir_for_job(run)
+                if build:
+                    # Get the observational data
+                    date_time_range = DateTimeRange(
+                        min(run.calibration_start_period, run.validation_start_period),
+                        max(run.calibration_end_period, run.validation_end_period),
+                    )
+                    obs_csv = get_observational_data_from_data_services(run, date_time_range)
+                    obs_path = get_observational_file_for_job(run)
+                    obs_dir = os.path.dirname(obs_path)
+                    os.makedirs(obs_dir, exist_ok=True)
 
-                if not is_missing(run.observational_eds_file_path, "Observational file", error_object):
-                    pass
+                    with open(obs_path, "w", encoding="utf-8", newline="") as f:
+                        f.write(obs_csv)
 
-                datafile['obs_dir'] = observational_dir
+                    datafile['obs_dir'] = obs_dir
 
             nwm_retro = os.path.join(NWM_RETROSPECTIVE_DIR, f'{run.gage.gage_id}.csv')
             if os.path.exists(nwm_retro):
@@ -272,17 +267,17 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
             if error_message:
                 error_object.add_warning(error_message)
 
-            # Need to set parquet file based on domain
-            datafile['attributes_file'] = os.path.join(PARQUET_DIR, f'{run.gage.domain.name.lower()}_model_attributes.parquet')
-
             general['formulation'] = run.job_name
 
         formulations = CalibrationFormulation.objects.filter(calibration_run=run).only("module_id")
 
-        if not is_missing(formulations, 'Modules', error_object) and not is_missing(run.job_name, 'Formulation name', error_object):
+        # Compute once and reuse everywhere below.
+        module_names_for_job: set[str] = {
+            modules_by_id[f.module_id].name
+            for f in formulations
+        }
 
-            # Extract only the modules actually used in THIS calibration job
-            module_names_for_job = {modules_by_id[f.module_id].name for f in formulations}
+        if not is_missing(formulations, 'Modules', error_object) and not is_missing(run.job_name, 'Formulation name', error_object):
 
             # Build the proper { name → Module } filter for just this job
             modules_by_name_for_job = {name: modules_by_name[name] for name in module_names_for_job}
@@ -291,7 +286,7 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
             general['models'] = ', '.join(module_names_for_job)
 
             # Validate using only modules actually present in this job
-            formulation_errors, _, _ = validate_formulation(module_names_for_job)
+            formulation_errors, _, _ = validate_formulation(module_names_for_job, get_geopackage_file_path(run))
             for f in formulation_errors:
                 error_object.add_error(f)
 
@@ -301,11 +296,112 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
             if run.use_sloth:
                 general['models'] += f', {SLOTH}'
 
-            # Dynamically add BMI config paths based on only the modules actually used
-            for name in module_names_for_job:
-                datafile[get_bmi_config_key(name)] = get_bmi_config_dir_for_module(run, name)
+            # -------------------------------------------------------
+            # ModuleProperties
+            #   module.<module_name>.<property_name> = <typed value>
+            #
+            # Requirement:
+            #   - Always emit ALL module properties for the job's modules.
+            #   - If a value is saved in CalibrationModulePropertyValue, use it.
+            #   - Otherwise, use ModuleProperty.default_value (string) converted to the typed value.
+            # -------------------------------------------------------
 
-            general['is_aet_rootzone'] = run.is_aet_rootzone
+            def _parse_default_value(raw: str, data_type: str) -> tuple[bool | int | float | str, str | None]:
+                """
+                Parse ModuleProperty.default_value (stored as a string) into a typed Python value.
+                Returns (value, error_message_or_none).
+                """
+                try:
+                    if data_type == DataTypeEnum.BOOLEAN.value:
+                        v = (raw or "").strip().lower()
+                        if v in ("true", "1", "yes", "y", "on"):
+                            return True, None
+                        if v in ("false", "0", "no", "n", "off"):
+                            return False, None
+                        return False, f"Invalid boolean default '{raw}'"
+
+                    if data_type == DataTypeEnum.INTEGER.value:
+                        return int((raw or "").strip()), None
+
+                    if data_type == DataTypeEnum.DOUBLE.value:
+                        return float((raw or "").strip()), None
+
+                    # STRING (or unknown fallback)
+                    return "" if raw is None else str(raw), None
+
+                except (ValueError, TypeError) as e:
+                    return ("" if data_type == DataTypeEnum.STRING.value else 0), f"Invalid default '{raw}' for {data_type}: {e}"
+
+            # 1) Pull ALL ModuleProperty defs for modules in this job from cache.
+
+            all_prop_defs = get_cached_module_properties()
+            prop_defs_for_job = [p for p in all_prop_defs if p.module_id in {modules_by_name[name].id for name in module_names_for_job}]
+
+            # 2) Pull current saved values for this run (single query) and map by (formulation_id, property_id).
+            module_property_values = list(
+                CalibrationModulePropertyValue.objects
+                .filter(calibration_formulation__calibration_run=run)
+                .select_related("calibration_formulation", "module_property")
+                .only(
+                    "id",
+                    "calibration_formulation_id",
+                    "calibration_formulation__module_id",
+                    "module_property_id",
+                    "module_property__name",
+                    "module_property__data_type",
+                    "value_bool",
+                    "value_int",
+                    "value_double",
+                    "value_str",
+                )
+            )
+
+            saved_value_by_module_id_and_prop_id: dict[tuple[int, int], CalibrationModulePropertyValue] = {}
+            for mpv in module_property_values:
+                saved_value_by_module_id_and_prop_id[(mpv.calibration_formulation.module_id, mpv.module_property_id)] = mpv
+
+            # 3) Emit every property key for each job module:
+            #    saved value wins; otherwise default_value.
+            for prop_def in prop_defs_for_job:
+                module_id = prop_def.module_id
+                module_obj = modules_by_id.get(module_id)
+                if not module_obj:
+                    continue
+
+                module_name = module_obj.name
+                prop_name = prop_def.name
+                key = f"{module_name.lower()}_{prop_name}"
+
+                # Look up the saved value row (if any) for this module+property
+                mpv = saved_value_by_module_id_and_prop_id.get((module_id, prop_def.id))
+
+                value: str | int | float | bool
+
+                if mpv is not None:
+                    # Pick the single stored value (constraint enforces exactly one)
+                    if mpv.value_bool is not None:
+                        value = mpv.value_bool
+                    elif mpv.value_int is not None:
+                        value = mpv.value_int
+                    elif mpv.value_double is not None:
+                        value = mpv.value_double
+                    elif mpv.value_str is not None:
+                        value = mpv.value_str
+                    else:
+                        error_object.add_warning(
+                            f"Missing saved value for module property {key} (row id={mpv.id}); using default"
+                        )
+                        value, err = _parse_default_value(prop_def.default_value, prop_def.data_type)
+                        if err:
+                            error_object.add_warning(f"{key}: {err}")
+                else:
+                    # No saved value -> use default_value
+                    value, err = _parse_default_value(prop_def.default_value, prop_def.data_type)
+                    if err:
+                        error_object.add_warning(f"{key}: {err}")
+
+                module_properties[key] = value
+            # End of module properties section
 
         job_data_dir = run.job_data_dir
         general['main_dir'] = job_data_dir
@@ -458,28 +554,44 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport 
             .values('name', 'initial_value', 'minimum', 'maximum', 'calibration_formulation__module_id')
         )
 
-        if not params and not have_LSTM_flag:
-            error_object.add_warning("At least one parameter must be specified")
-        else:
-            param_error = False
+        # Pre-attach model names so the validator can reason about Topoflow vs non-Topoflow.
+        for p in params:
+            p["model"] = modules_by_id[p["calibration_formulation__module_id"]].name
+
+        selected_module_names = {p["model"] for p in params}  # after you set model
+
+        validate_parameter_rules(
+            module_names_for_job=module_names_for_job,
+            selected_module_names=selected_module_names,
+            have_LSTM_flag=have_LSTM_flag,
+            has_any_params=bool(params),
+            error_object=error_object,
+        )
+
+        param_error = False
+        if not have_LSTM_flag:
+            # Validate parameter values and write parameter files
             for p in params:
-                # Make sure everything is specified
                 if not p['name'] or p['initial_value'] is None or p['minimum'] is None or p['maximum'] is None:
-                    module_name = modules_by_id[p['calibration_formulation__module_id']].name
                     param_error = True
                     error_object.add_warning(
                         f"value ({p['initial_value']}), min ({p['minimum']}) and max ({p['maximum']}) "
-                        f"must be specified for parameter '{p['name']}' (module {module_name})"
+                        f"must be specified for parameter '{p['name']}' (module {p['model']})"
                     )
 
-            if not param_error and build:
-                calibration['calib_parameter_file'] = os.path.join(job_data_dir, 'calib_parameter_dir')
-                # Swap module_id → name before writing files
-                for p in params:
-                    p['model'] = modules_by_id[p['calibration_formulation__module_id']].name
-                write_parameter_files(params, calibration['calib_parameter_file'])
+        # Write parameter files when build is true and there were no param errors.
+        # This intentionally allows writing with an empty params list (e.g., LSTM jobs),
+        if not param_error and build:
+            calibration['calib_parameter_file'] = os.path.join(job_data_dir, 'calib_parameter_dir')
+            write_parameter_files(params, calibration['calib_parameter_file'])
 
         if build and NGEN_ENVIRONMENT == NgenEnvironmentEnum.PARALLEL_WORKS:
+            if run.num_catchments is None:
+                # Handle old jobs which might not have saved num_catchments
+                geopackage_path = get_geopackage_file_path(run)
+                catchments = list(get_geometry_from_gpkg(geopackage_path)['catchments'].keys())
+                run.num_catchments = len(catchments)
+
             config['Parallel'] = parallel
             run.mpi_nprocs = get_mpi_nodes(run.num_catchments)
             parallel['nprocs'] = run.mpi_nprocs
@@ -600,7 +712,7 @@ def is_missing(value: Any, label: str, report: ErrorReport, have_LSTM_flag: bool
 # Global table of node type rules.
 # Each pair represents [max_catchments, node_type]
 NODE_TYPE_RULES = [
-    [500, 'c5n-18xlarge'],
+    [500, 'c5n-9xlarge'],
     [-1, 'r8a-12xlarge']
 ]
 

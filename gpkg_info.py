@@ -1,9 +1,27 @@
 import argparse
-import os
 import json
+import logging
+import os
+import sys
 
-from calibration.util.geopkg import display_layer_metadata, list_layers, find_catchments, find_gage_id, get_geometry_from_gpkg, \
-    gpkg_to_png_selected_layers, safe_read_gpkg, normalize_gpkg
+from calibration.util.geopkg import display_layer_metadata, list_layers, find_gage_id, get_geometry_from_gpkg, \
+    gpkg_to_png_selected_layers, safe_read_gpkg, find_catchments
+
+logger = logging.getLogger(__name__)
+
+
+def setup_cli_logging() -> None:
+    # For CLI runs: make ordering sane and ensure config takes effect even if
+    # something imported earlier attached handlers.
+    logging.basicConfig(
+        level=logging.INFO,
+        stream=sys.stdout,
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        force=True,  # Python 3.8+
+    )
+    # Reduce pyogrio noise
+    logging.getLogger("pyogrio._io").setLevel(logging.WARNING)
 
 
 def main():
@@ -25,68 +43,59 @@ def main():
     render_parser = subparsers.add_parser("render", help="Generate PNG from selected layers in a GeoPackage")
     render_parser.add_argument("gpkg_path", type=str, help="Path to the GeoPackage file")
     render_parser.add_argument("png_path", type=str, help="Path to save the generated PNG file")
-    render_parser.add_argument("--layers", nargs="+", default=["nexus", "flowpaths", "flowlines"],
-                               help="Layers to include in the PNG (default: nexus, flowpaths, flowlines)")
-
-    # Subcommand: normalize
-    normalize_parser = subparsers.add_parser("normalize", help="Copy gpkg file while normalizing the CRS")
-    normalize_parser.add_argument("gpkg_path", type=str, help="Path to the GeoPackage file")
-    normalize_parser.add_argument("output_path", type=str, help="Path to save the new gpkg")
 
     args = parser.parse_args()
 
     if not os.path.exists(args.gpkg_path):
-        print(f"File {args.gpkg_path} does not exist.")
+        logger.info(f"File {args.gpkg_path} does not exist.")
         return
 
     try:
         if args.command == "info":
             if args.layer:
-                print(f"Displaying metadata for layer '{args.layer}'...")
+                logger.info(f"Displaying metadata for layer '{args.layer}'...")
                 display_layer_metadata(args.gpkg_path, args.layer)
             else:
-                print("\nSearching for gage_id in the 'hydrolocations' layer:")
+                logger.info('')
+                # logger.info("Searching for gage_id in the GeoPackag:")
                 find_gage_id(args.gpkg_path)
 
                 try:
                     divides_gdf = safe_read_gpkg(args.gpkg_path, layer="divides")
                     # crs_proj = divides_gdf.crs.to_string() if divides_gdf.crs else "Unknown"
-                    # print(f"\nCRS (PROJ) for 'divides' layer: {crs_proj}")
+                    # logger.info(f"\nCRS (PROJ) for 'divides' layer: {crs_proj}")
                     crs_epsg = divides_gdf.crs.to_epsg() if divides_gdf.crs else "Unknown"
-                    print(f"\nCRS (EPSG) for 'divides' layer: {crs_epsg}")
+                    logger.info('')
+                    logger.info(f"CRS (EPSG) for 'divides' layer: {crs_epsg}")
                 except Exception as e:
-                    print(f"Could not retrieve CRS from 'divides' layer: {e}")
+                    logger.info(f"Could not retrieve CRS from 'divides' layer: {e}")
 
-                print("\nListing all layers in the GeoPackage:")
+                logger.info('')
+                logger.info("Listing all layers in the GeoPackage:")
                 layers = list_layers(args.gpkg_path)
                 for layer in layers:
-                    print(f"- {layer}")
+                    logger.info(f"- {layer}")
 
                 find_catchments(args.gpkg_path)
 
-        elif args.command == "geometry":
+        elif args.command == "extract":
             result = get_geometry_from_gpkg(
                 gpkg_path=args.gpkg_path,
                 catchment_layer=args.catchment_layer,
                 gage_layer=args.gage_layer,
             )
-            print(json.dumps(result, indent=4, default=str))
+            logger.info(json.dumps(result, indent=4, default=str))
 
         elif args.command == "render":
-            img = gpkg_to_png_selected_layers(
-                gpkg_path=args.gpkg_path,
-                layers_to_include=tuple(args.layers)
-            )
+            img = gpkg_to_png_selected_layers(gpkg_path=args.gpkg_path)
             with open(args.png_path, "wb") as f:
                 f.write(img.getvalue())
-            print(f"PNG image saved to: {args.png_path}")
-
-        elif args.command == "normalize":
-            normalize_gpkg(args.gpkg_path, args.output_path)
+            logger.info(f"PNG image saved to: {args.png_path}")
 
     except Exception as e:
-        print(f"Error: {e}")
+        logger.info(f"Error: {e}")
 
 
 if __name__ == "__main__":
+    setup_cli_logging()
     main()

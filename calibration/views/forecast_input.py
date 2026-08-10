@@ -3,9 +3,10 @@ import logging
 
 from calibration.enums import StatusEnum
 from calibration.models import ForecastRun, ColdStartRun
-from calibration.util.ngen_locations import get_forecast_dir, BMI_FORCING_TEMPLATES, get_cold_start_dir
+from calibration.models.hindcast_run import HindcastRun
+from calibration.util.ngen_locations import get_forecast_dir, BMI_FORCING_TEMPLATES, get_cold_start_dir, get_hindcast_dir
 from calibration.views.called_from import called_from
-from calibration.views.common import format_datetime, join_with_or, ErrorReport, readonly_transaction
+from calibration.views.common import format_datetime, join_with_or, readonly_transaction
 from calibration.views.ngen_cal_input import build_config
 from cerfServer.settings import NGEN_BMI_FORCING_WORK_DIR
 
@@ -23,23 +24,29 @@ CONFIG_TEMPLATE = {
         "forcing_template_dir": BMI_FORCING_TEMPLATES,
         "cold_start_datetime": None
     }
-
 }
 
 
-def create_forecast_input(run: ForecastRun | ColdStartRun) -> tuple[ErrorReport | None, str | None]:
+def create_forecast_input(run: ForecastRun | HindcastRun | ColdStartRun) -> str:
     """
-
-
-    :param run: The ForecatRun or ColdStartRun instance to validate and prepare.
-    :return: A tuple (ErrorReport, config_file_path):
-             - error_object: ErrorReport object with errors and warnings.
-             - config_file_path: Path to the generated config file if build is successful, else None.
+    :param run: The ForecastRun, HindcastRun, or ColdStartRun instance to validate and prepare.
+    :return: Path to the generated config file.
+    :raises ValueError: If run is not in an allowed status.
     """
     logger.info(called_from())
 
-    error_object = ErrorReport()
-    config_file: str | None = None
+    if isinstance(run, ForecastRun):
+        job_name = 'Forecast'
+        config_name = 'forecast-input.config'
+        config_location = get_forecast_dir(run)
+    elif isinstance(run, HindcastRun):
+        job_name = 'Hindcast'
+        config_name = 'hindcast-input.config'
+        config_location = get_hindcast_dir(run)
+    else:
+        job_name = 'Cold Start'
+        config_name = 'cold-start-input.config'
+        config_location = get_cold_start_dir(run)
 
     # -----------------------------
     # READ-ONLY PHASE
@@ -47,17 +54,16 @@ def create_forecast_input(run: ForecastRun | ColdStartRun) -> tuple[ErrorReport 
     with readonly_transaction():
         allowed_status_names = [StatusEnum.SUBMITTED.value]
         if run.status.name not in allowed_status_names:
-            job_name = 'Forecast' if isinstance(run, ForecastRun) else 'Cold Start'
-            error_object.add_warning(
+            raise ValueError(
                 f'{job_name} Job {run.id} is not in an allowed status: '
                 f'{join_with_or(allowed_status_names)}. '
                 f'Current status: {run.status.name}'
             )
-            return error_object, None
 
-    # Deepcopy config template
-    config: dict[str, dict[str, str | int | float | bool]] = copy.deepcopy(CONFIG_TEMPLATE)
-
+    # -----------------------------
+    # BUILD CONFIG
+    # -----------------------------
+    config = copy.deepcopy(CONFIG_TEMPLATE)
     forcing = config['Forcing']
 
     forcing['forcing_configuration'] = run.configuration.internal_name
@@ -66,12 +72,4 @@ def create_forecast_input(run: ForecastRun | ColdStartRun) -> tuple[ErrorReport 
     if isinstance(run, ColdStartRun):
         forcing['cold_start_datetime'] = format_datetime(run.cold_start_date)
 
-    # -----------------------------
-    # FILE WRITE PHASE
-    # -----------------------------
-    config_location = get_forecast_dir(run) if isinstance(run, ForecastRun) else get_cold_start_dir(run)
-    if not error_object.has_errors() and not error_object.has_warnings():
-        config_name = 'forecast-input.config' if isinstance(run, ForecastRun) else 'cold-start-input.config'
-        config_file = build_config(config, config_location, config_name)
-
-    return error_object, config_file
+    return build_config(config, config_location, config_name)

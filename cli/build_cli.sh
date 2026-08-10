@@ -57,10 +57,26 @@ pip install .
 
 echo "Virtual environment: $VIRTUAL_ENV"
 
+echo "==> Generating CLI git info..."
+
+cat > ngencerf/git_info.json <<EOF
+{
+  "ngencerf-cli": {
+    "release": "dev ($(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown))",
+    "build_date": "$(date -u '+%Y-%m-%dT%H:%M:%SZ')",
+    "commit_hash": "$(git rev-parse HEAD 2>/dev/null || echo unknown)",
+    "commit_date": "$(git log -1 --pretty=format:'%cI' 2>/dev/null || echo unknown)",
+    "author": "$(git log -1 --pretty=format:'%an' 2>/dev/null || echo unknown)",
+    "message": "$(git log -1 --pretty=format:'%s' 2>/dev/null | sed 's/"/\\"/g' || echo unknown)"
+  }
+}
+EOF
+
 echo "==> Running PyInstaller..."
 if ! pyinstaller --onefile \
   --name "$APP_NAME" \
   --strip \
+  --add-data "ngencerf/git_info.json:ngencerf" \
   "$ENTRY_POINT"; then
   echo "❌ PyInstaller build failed."
   exit 1

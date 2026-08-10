@@ -4,6 +4,7 @@ import logging
 import os
 import time
 from datetime import datetime
+from typing import Any
 
 from django.db import transaction
 from drf_spectacular.utils import extend_schema, OpenApiResponse
@@ -13,29 +14,27 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 
 from calibration.enums import StatusEnum, ForcingSourceEnum, ObservationalSourceEnum, GeopackageSourceEnum, JobGenesis
-from calibration.models import CalibrationFormulation, CalibrationStopCriteria, Gage, CalibrationRun
-from calibration.util.caching import get_cached_module_by_name, get_cached_modules_by_id, get_gage_by_id
-from calibration.util.calibration_validators import CalibrationRunSerializer, ExportResponseSerializer, ErrorResponseSerializer, \
+from calibration.models import CalibrationFormulation, CalibrationStopCriteria, Gage, CalibrationRun, CalibrationModulePropertyValue
+from calibration.util.caching import get_cached_module_by_name, get_cached_modules_by_id, get_gage_by_id, get_cached_module_properties
+from calibration.util.calibration_validators import CalibrationRunIdSerializer, ExportResponseSerializer, ErrorResponseSerializer, \
     LoadCalibrationJobSerializer, LoadCalibrationRunResponseSerializer
-from calibration.util.cloud_util import path_exists
-from calibration.util.file_util import get_single_file
 from calibration.util.geopkg import gpkg_to_png_selected_layers, get_geometry_from_gpkg
-from calibration.util.ngen_locations import get_geopackage_dir_for_job, \
-    get_ngen_logging_file
+from calibration.util.ngen_locations import get_ngen_logging_file, get_geopackage_file_path
 from calibration.views import ngen_cal_input
-from calibration.views.calibration_formulation_views import get_sloth_parameters, validate_modules, SLOTH, add_sloth_parameters, validate_formulation
-from calibration.views.calibration_gage_views import save_gage, get_data_files_status
+from calibration.views.calibration_formulation_views import get_sloth_parameters, SLOTH, add_sloth_parameters, validate_formulation, \
+    build_module_property_write_plan, apply_module_property_write_plan, _property_value_to_str
+from calibration.views.calibration_gage_views import get_data_files_status, reset_gage_dependent_state_on_change
 from calibration.views.calibration_optimization_views import get_user_optimization, validate_optimizations, validate_objective_function, \
     write_optimization_inputs
-from calibration.views.calibration_run_views import map_path_to_host, normalize_failure_messages
-from calibration.views.calibration_tuning_views import get_times, get_parameters_for_export, validate_and_save_times, validate_parameters, \
+from calibration.views.calibration_run_views import normalize_failure_messages
+from calibration.views.calibration_tuning_views import get_times, get_parameters_for_export, validate_and_save_times, validate_parameter_values, \
     save_parameters, has_user_selected_tuning_parameters, compute_time_range, persist_time_range
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import get_calibration_run, ResponseError, handle_exceptions, validate_response, create_calibration_run_internal, \
-    validate_request, get_valid_path, truncate_large_fields, get_user_email, generate_ngen_logging_config, get_elapsed_str, readonly_transaction, \
-    format_datetime
-from calibration.views.data_services import DataServicesException, get_module_metadata_from_data_services, get_geopackage_from_data_services, \
-    get_forcing_data_from_s3, get_observational_data_from_data_services
+    validate_request, truncate_large_fields, get_user_email, generate_ngen_logging_config, get_elapsed_str, readonly_transaction, \
+    format_datetime, map_path_to_host
+from calibration.views.data_services import DataServicesException, get_geopackage_from_data_services, \
+    get_module_metadata_from_data_services, update_parameters
 
 logger = logging.getLogger(__name__)
 
@@ -75,25 +74,39 @@ def import_calibration_run_data(request: Request,
     # Inputs pulled once
     gage_id = calibration_run_data.get('gage_id')
     modules_list = calibration_run_data.get('modules')
-    module_names = set(modules_list) if modules_list else set()
+
+    if isinstance(modules_list, list):
+        module_names: set[str] = set(modules_list)
+    else:
+        module_names = set()
+
+    module_properties: list[dict[str, Any]] = calibration_run_data.get("module_properties") or []
+
     sloth_parameters = calibration_run_data.get('sloth_parameters')
     use_sloth = calibration_run_data.get('use_sloth')
     parameters = calibration_run_data.get('parameters')
+
     automatic_validation = calibration_run_data.get('automatic_validation')  # defaults handled later on run
     calibration_times = calibration_run_data.get('calibration_times')
     validation_times = calibration_run_data.get('validation_times')
+
     optimization_name = calibration_run_data.get('optimization')
     objective_function_name = calibration_run_data.get('objective_function')
     streamflow_threshold = calibration_run_data.get('streamflow_threshold')
     peak_flow_threshold = calibration_run_data.get('peak_flow_threshold')
-    optimization_inputs = calibration_run_data.get('optimization_inputs')
+    raw_optimization_inputs = calibration_run_data.get('optimization_inputs')
+
+    if isinstance(raw_optimization_inputs, list):
+        optimization_inputs: list[dict[str, Any]] = raw_optimization_inputs
+    else:
+        optimization_inputs = []
     stop_criteria = calibration_run_data.get('stop_criteria')
     save_plot_iteration_frequency = calibration_run_data.get('save_plot_iteration_frequency')
     save_output_iteration = calibration_run_data.get('save_output_iteration')
     logging_config = calibration_run_data.get('logging_config')
 
     geopackage_source_name = calibration_run_data.get('geopackage_source')
-    forcing_source_requested_name = calibration_run_data.get('forcing_source')
+    forcing_source_name = calibration_run_data.get('forcing_source')
     observational_source_name = calibration_run_data.get('observational_source')
 
     # Prepared (read-only) outputs
@@ -111,12 +124,8 @@ def import_calibration_run_data(request: Request,
     with readonly_transaction():
         # Validate modules list
         if module_names:
-            error_message = validate_modules(module_names)
-            if error_message:
-                return None, None, ResponseError(error_message)
-
             # Formulation-level checks (read-only)
-            f_errors, f_warnings, f_info = validate_formulation(module_names, return_group_info=is_cli)
+            f_errors, f_warnings, f_info = validate_formulation(module_names, geopackage_path=None, return_group_info=is_cli)
             formulation_errors.extend(f_errors or [])
             formulation_warnings.extend(f_warnings or [])
             formulation_info.extend(f_info or [])
@@ -136,6 +145,31 @@ def import_calibration_run_data(request: Request,
                 "stop_criteria, save_plot_iteration_frequency or save_output_iteration when using LSTM"
             )
 
+        # -----------------------------
+        # Module properties: validate & prepare write plan (no DB writes)
+        # -----------------------------
+        # Safety for non-serializer callers (clone paths etc.)
+        if module_properties and not module_names:
+            return None, None, ResponseError("module_properties cannot be specified unless modules is non-empty")
+
+        modules_by_id = get_cached_modules_by_id()
+        modules_by_name = {m.name: m for m in modules_by_id.values()}
+
+        module_property_plan, plan_error = build_module_property_write_plan(
+            module_properties=module_properties or [],
+            user=request.user,
+            modules_by_name=modules_by_name,
+        )
+        if plan_error:
+            # build_module_property_write_plan returns a structured error object
+            # (typically {"module_properties": [...]}). Keep the import_calibration_run_data contract:
+            #   (CalibrationRun|None, messages|None, Response|None)
+            return None, None, ResponseError(
+                "Validation error",
+                validation_errors=plan_error,
+                http_status=status.HTTP_400_BAD_REQUEST,
+            )
+
         # Sloth parameter gating checks (no writes here)
         if use_sloth and not sloth_parameters:
             return None, None, ResponseError(f"If you indicate 'use_sloth', you must enter {SLOTH} parameters")
@@ -148,6 +182,7 @@ def import_calibration_run_data(request: Request,
 
         # Optimization validations (assigns to `run` in memory only; no DB write)
         if optimization_name:
+            assert isinstance(optimization_name, str)
             _, prepared_inputs, error_message = validate_optimizations(run, optimization_name, optimization_inputs)
             if error_message:
                 return None, None, ResponseError(error_message)
@@ -162,6 +197,7 @@ def import_calibration_run_data(request: Request,
 
         # If a gage_id was provided, ensure the gage exists
         if gage_id:
+            assert isinstance(gage_id, str)
             gage_dict = get_gage_by_id(gage_id)
             if not gage_dict:
                 return None, None, ResponseError(
@@ -173,58 +209,72 @@ def import_calibration_run_data(request: Request,
     # WRITE PHASE: perform DB mutations & keep IO where it was
     # ---------------------------------------------------------------------
     gage = None
+    module_metadata: dict = {}  # used later by update_parameters()
+
     if gage_id:
-        # Check cache first to confirm the gage exists and is active
+        # Confirm the gage exists and is active
         gage_dict = get_gage_by_id(gage_id)
         if not gage_dict:
             raise Gage.DoesNotExist(f"Gage '{gage_id}' does not exist or is not active")
 
-        # Fetch the actual DB object to assign to the FK
-        gage = Gage.objects.only('gage_id').get(gage_id=gage_id)
+        # Fetch the DB object to assign to the FK
+        gage = Gage.objects.only("gage_id", "domain").select_related("domain").get(gage_id=gage_id)
+
+        # Pull parameter metadata for modules from Data Services (HTTP call must be outside transaction)
+        if module_names:
+            module_metadata, module_eds_errors = get_module_metadata_from_data_services(
+                run,
+                module_names,
+                gage_id=gage_id,
+                domain=gage.domain.name
+            )
+            if module_eds_errors:
+                eds_errors.extend(module_eds_errors)
+                module_metadata = {}
+            else:
+                # Only pass through modules that actually returned params
+                modules_with_params = [
+                    m for m in (module_metadata or {}).get("modules", [])
+                    if not m.get("error")
+                ]
+                module_metadata = {"modules": modules_with_params} if modules_with_params else {}
 
     with transaction.atomic():
         # -----------------------------
         # Gage
         # -----------------------------
         if gage_id:
-            # Persist the gage on the run
-            try:
-                save_gage(run, gage)
-            except Gage.DoesNotExist:
-                return None, None, ResponseError(
-                    f"Gage '{gage_id}' does not exist or is not active",
-                    http_status=status.HTTP_404_NOT_FOUND
-                )
+            assert gage is not None
+            reset_gage_dependent_state_on_change(run, gage, cli=is_cli)
 
             # -----------------------------
             # Formulations & Modules
             # -----------------------------
-            if module_names:
-                # Persist formulations for this run
-                for m_name in module_names:
-                    module_instance = get_cached_module_by_name(m_name)
-                    CalibrationFormulation.objects.get_or_create(calibration_run=run, module=module_instance)
+            # Persist formulations for this run
+            for m_name in module_names:
+                module_instance = get_cached_module_by_name(m_name)
+                CalibrationFormulation.objects.get_or_create(
+                    calibration_run=run,
+                    module=module_instance
+                )
 
-                # Handle SLOTH parameters (persist)
-                if use_sloth:
-                    error_message = add_sloth_parameters(run, sloth_parameters, module_names)  # type: ignore[arg-type]
-                    if error_message:
-                        return None, None, ResponseError(error_message)
+            # -----------------------------
+            # Module properties (persist)
+            # -----------------------------
+            if module_property_plan is not None:
+                apply_module_property_write_plan(run=run, plan=module_property_plan)
 
-                # Refresh modules queryset on the run (needed for DS metadata and later steps)
-                modules = CalibrationFormulation.objects.filter(calibration_run=run)
+            # -----------------------------
+            # Handle SLOTH parameters (persist)
+            # -----------------------------
+            if use_sloth:
+                error_message = add_sloth_parameters(run, sloth_parameters, module_names)  # type: ignore[arg-type]
+                if error_message:
+                    return None, None, ResponseError(error_message)
 
-                # Pull parameter metadata for modules from Data Services (kept where it was)
-                try:
-                    if modules and run.gage:
-                        get_module_metadata_from_data_services(run, modules)  # type: ignore
-                except DataServicesException as e:
-                    errors.append(f"Error retrieving module parameter data from Data Services - status code: {e.status_code} - {str(e)}")
-                    eds_errors.append({
-                        'name': 'parameters',
-                        'message': str(e),
-                        'status_code': e.status_code if e.status_code else None
-                    })
+        # module_metadata is only populated when a gage exists and metadata fetch succeeded
+        if module_metadata:
+            update_parameters(run, module_metadata, gage_changed=True)
 
         # -----------------------------
         # Geopackage
@@ -240,7 +290,8 @@ def import_calibration_run_data(request: Request,
                 'message': str(e),
                 'status_code': e.status_code if e.status_code else None
             })
-        geopackage_path = get_valid_path(run.geopackage_eds_file_path, lambda: get_single_file(get_geopackage_dir_for_job(run)))
+
+        geopackage_path = get_geopackage_file_path(run)
         if geopackage_path:
             catchments = list(get_geometry_from_gpkg(geopackage_path)['catchments'].keys())
             run.num_catchments = len(catchments)
@@ -249,69 +300,30 @@ def import_calibration_run_data(request: Request,
         # -----------------------------
         # Forcing data
         # -----------------------------
-        # TODO his code is duplicaed form calibration_gage_views.  Need to re-factor once we are fully on BMI
-        # Determine forcing forcing source
-        forcing_source_requested = (
-            ForcingSourceEnum.get_instance(forcing_source_requested_name)
-            if forcing_source_requested_name
+        forcing_source = (
+            ForcingSourceEnum.get_instance(forcing_source_name)
+            if forcing_source_name
             else None
         )
 
-        # Decide whether we need to fetch BEFORE mutating the run
-        needs_forcing_fetch = (
-                forcing_source_requested_name
-                and (
-                        not run.forcing_source_requested
-                        or run.forcing_source_requested.name != forcing_source_requested_name
-                )
-        )
-
         # Must be set before get_forcing_data_from_s3() because should_use_bmi_forcing() reads it
-        run.forcing_source_requested = forcing_source_requested
-
-        if gage_id and needs_forcing_fetch:
-            try:
-                get_forcing_data_from_s3(run, run.forcing_source_requested.name)
-            except DataServicesException as e:
-                errors.append(f"Error retrieving forcing data from Data Services - status code: {e.status_code} - {str(e)}")
-                eds_errors.append({
-                    'name': 'forcing',
-                    'message': str(e),
-                    'status_code': e.status_code if e.status_code else None
-                })
-
-        elif not forcing_source_requested_name:
-            # No forcing requested → clear any existing forcing state
-            run.forcing_eds_dir_path = None
-            run.forcing_source_actual = None
-
-        run.forcing_source_requested = ForcingSourceEnum.get_instance(forcing_source_requested_name) if forcing_source_requested_name else None
-
+        run.forcing_source = forcing_source
         # -----------------------------
         # Observational data
         # -----------------------------
-        run.observational_source = ObservationalSourceEnum.get_instance(observational_source_name) if observational_source_name else None
-
-        try:
-            if gage_id:
-                get_observational_data_from_data_services(run)
-        except DataServicesException as e:
-            errors.append(f"Error retrieving observational data from Data Services - status code: {e.status_code} - {str(e)}")
-            eds_errors.append({
-                'name': 'observational',
-                'message': str(e),
-                'status_code': e.status_code if e.status_code else None
-            })
+        if observational_source_name:
+            assert isinstance(observational_source_name, str)
+            run.observational_source = ObservationalSourceEnum.get_instance(observational_source_name)
 
         # -----------------------------
         # Tuning (validate & persist)
         # -----------------------------
         run.automatic_validation = automatic_validation
 
-        # Only validate parameters if we didn't hit DS parameter metadata errors
+        # Only validate parameters if we didn't hit Data Services parameter metadata errors
         if parameters and not any(error.get('name') == 'parameters' for error in eds_errors):
             # These validations read from DB; saving persists selections
-            parameter_errors, parameter_warnings = validate_parameters(run, parameters)
+            parameter_errors, parameter_warnings = validate_parameter_values(run, parameters)
             if parameter_errors:
                 return None, None, ResponseError(parameter_errors)
             save_parameters(run, parameters, allow_nulls=True)
@@ -320,8 +332,7 @@ def import_calibration_run_data(request: Request,
         time_range = compute_time_range(run)
 
         if time_range and (not run.time_range_start or not run.time_range_end):
-            with transaction.atomic():
-                persist_time_range(run, time_range)
+            persist_time_range(run, time_range)
 
         # Times (persist)
         error_message = validate_and_save_times(run, calibration_times, validation_times)
@@ -357,7 +368,6 @@ def import_calibration_run_data(request: Request,
         # Final persistence of run fields updated above
         run.use_sloth = use_sloth
         run.job_name = calibration_run_data.get('job_name')
-        run.is_aet_rootzone = calibration_run_data.get('is_aet_rootzone', False)
         run.save()
 
     # ---------------------------------------------------------------------
@@ -378,7 +388,7 @@ def import_calibration_run_data(request: Request,
 
 
 @extend_schema(
-    request=CalibrationRunSerializer,
+    request=CalibrationRunIdSerializer,
     responses={
         200: ExportResponseSerializer,
         400: OpenApiResponse(
@@ -408,7 +418,7 @@ def export_job(request: Request) -> Response:
     data = request.data if request.method == 'POST' else request.query_params.dict()
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
 
-    validator, error_return = validate_request(CalibrationRunSerializer, data)
+    validator, error_return = validate_request(CalibrationRunIdSerializer, data)
     if error_return:
         return error_return
 
@@ -421,6 +431,7 @@ def export_job(request: Request) -> Response:
         run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=list(StatusEnum))
         if error_return:
             return error_return
+        assert run is not None
 
         calibration_run_data, _ = load_calibration_run_data(run, export=True)
 
@@ -498,7 +509,6 @@ def load_calibration_run_data(run: CalibrationRun, export: bool = False, include
             'time_range': serialized_time_range,
             'job_data_dir': map_path_to_host(run.job_data_dir),
             'num_catchments': run.num_catchments,
-            'forcing_source_actual': run.forcing_source_actual.name if run.forcing_source_actual else None,
         }
         fm = normalize_failure_messages(run.failure_messages)
         if fm is not None:
@@ -507,7 +517,7 @@ def load_calibration_run_data(run: CalibrationRun, export: bool = False, include
         calibration_run_data['metadata'] = metadata
         calibration_run_data['run_after_import'] = False
         calibration_run_data['gage_id'] = run.gage.gage_id if run.gage else None
-        calibration_run_data['forcing_source'] = run.forcing_source_requested.name if run.forcing_source_requested else None
+        calibration_run_data['forcing_source'] = run.forcing_source.name if run.forcing_source else None
 
         # Use cached modules when exporting parameters
         calibration_run_data['parameters'] = get_parameters_for_export(run)
@@ -542,14 +552,13 @@ def load_calibration_run_data(run: CalibrationRun, export: bool = False, include
         if fm is not None:
             calibration_run_data['failure_messages'] = fm
 
-        calibration_run_data['forcing_source_requested'] = run.forcing_source_requested.name if run.forcing_source_requested else None
-        calibration_run_data['forcing_source_actual'] = run.forcing_source_actual.name if run.forcing_source_actual else None
+        calibration_run_data['forcing_source'] = run.forcing_source.name if run.forcing_source else None
 
         # Generate Geopackage map if requested
         if include_gpkg_map:
             gpkg_map_start = time.perf_counter()
-            geopackage_path = run.geopackage_eds_file_path
-            if geopackage_path and path_exists(geopackage_path):
+            geopackage_path = get_geopackage_file_path(run)
+            if geopackage_path and os.path.exists(geopackage_path):
                 geopackage_png = gpkg_to_png_selected_layers(geopackage_path)
                 base64_str = base64.b64encode(geopackage_png.getvalue()).decode('utf-8')
                 calibration_run_data['geopackage_image_url'] = f'data:image/png;base64,{base64_str}'
@@ -587,11 +596,76 @@ def load_calibration_run_data(run: CalibrationRun, export: bool = False, include
     # Use cache for module resolution
     modules_by_id = get_cached_modules_by_id()
     module_names = {modules_by_id[mid].name for mid in module_ids if mid in modules_by_id}
-    calibration_run_data['modules'] = module_names
-    calibration_run_data['is_aet_rootzone'] = run.is_aet_rootzone
+    calibration_run_data['modules'] = sorted(module_names)
+
+    # ---------------------------------------------------------
+    # Module properties (export only): flat list in import format
+    # ---------------------------------------------------------
+    if export:
+        module_id_set = set(module_ids)
+
+        # Pull ALL property defs for modules in this run (cached, filter in-memory)
+        all_props = get_cached_module_properties()
+        prop_defs = [p for p in all_props if p.module_id in module_id_set]
+
+        # Map module_id -> formulation_id for joining saved values
+        formulations_for_run = list(
+            CalibrationFormulation.objects
+            .filter(calibration_run=run, module_id__in=module_ids)
+            .only("id", "module_id")
+        )
+        formulation_id_by_module_id = {f.module_id: f.id for f in formulations_for_run}
+        formulation_ids = [f.id for f in formulations_for_run]
+
+        # Pull all saved values for this run in one query and map by (formulation_id, property_id)
+        current_value_map: dict[tuple[int, int], CalibrationModulePropertyValue] = {}
+        if formulation_ids:
+            current_values = list(
+                CalibrationModulePropertyValue.objects
+                .filter(calibration_formulation_id__in=formulation_ids)
+                .only(
+                    "calibration_formulation_id",
+                    "module_property_id",
+                    "value_bool",
+                    "value_int",
+                    "value_double",
+                    "value_str",
+                )
+            )
+            current_value_map = {
+                (v.calibration_formulation_id, v.module_property_id): v
+                for v in current_values
+            }
+
+        module_properties_export: list[dict[str, str]] = []
+
+        for p in prop_defs:
+            module = modules_by_id[p.module_id]  # KeyError if cache invariant is violated
+
+            formulation_id = formulation_id_by_module_id.get(p.module_id)
+            saved_v = current_value_map.get((formulation_id, p.id)) if formulation_id else None
+
+            effective_value = (
+                _property_value_to_str(saved_v, p.data_type)
+                if saved_v is not None
+                else p.default_value
+            )
+
+            property_value = effective_value or ""
+            # Always export (materialize defaults)
+            module_properties_export.append({
+                "module": module.name,
+                "property_name": p.name,
+                "property_value": property_value
+            })
+
+        # Stable ordering helps diffs / test fixtures
+        module_properties_export.sort(key=lambda x: (x["module"], x["property_name"]))
+
+        calibration_run_data["module_properties"] = module_properties_export
 
     # Validation warnings
-    formulation_errors, formulation_warnings, _ = validate_formulation(module_names)
+    formulation_errors, formulation_warnings, _ = validate_formulation(module_names, get_geopackage_file_path(run))
     if formulation_warnings and not export:
         calibration_run_data['formulation_warnings'] = formulation_warnings
     if formulation_errors and not export:
@@ -693,6 +767,7 @@ def load_calibration_run(request: Request) -> Response:
         run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=list(StatusEnum))
         if error_return:
             return error_return
+        assert run is not None
 
         # Do all the heavy lifting in read-only mode
         calibration_run_data, time_range = load_calibration_run_data(

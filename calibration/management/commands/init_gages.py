@@ -35,7 +35,7 @@ class Command(BaseCommand):
         Configure CLI arguments for the management command.
 
         --data_dir: Directory containing:
-          - gages.csv (primary input)
+          - gages.csv (primary input - all gages are assumed to be active)
           - inactive_gages.csv (optional overrides applied after gages.csv is read)
         """
         parser.add_argument("--data_dir", type=str, help="Path to directory containing gage files.")
@@ -280,18 +280,23 @@ def read_gages(gages_file: Path) -> None:
     """
     Read gages.csv into the global `gages` dict.
 
+    Expected CSV columns:
+        gage_id,nws_id,agency,station_name,latitude,longitude,altitude,
+        huc,drainage_area,domain,rfc,headwater_calibration,nwm_v3_calibration
+
     - Uses the CSV header via DictReader (no hard-coded columns / required list).
-    - Validates required (null=False) Gage fields that do not have safe "blank" semantics:
+    - Validates required columns and required Gage fields:
         * gage_id
         * agency
-        * station_name
-        * huc
+        * station_name (column required; blank value allowed)
+        * huc (column required; blank value allowed)
         * domain (resolved to domain_id)
     - Parses booleans and ensures they never become None before writing to null=False model fields:
-        * is_active
         * headwater_calibration
         * nwm_v3_calibration
-      (If blank in the CSV, the loader applies the model’s defaults explicitly.)
+      (If blank in the CSV, the loader applies explicit defaults.)
+    - All rows loaded from gages.csv are assumed to be active by default.
+      inactive_gages.csv may be applied afterward to force selected gage_ids to is_active=False.
     - Allows blanks for nullable fields:
         * nws_id
         * rfc (resolved to rfc_id)
@@ -316,16 +321,15 @@ def read_gages(gages_file: Path) -> None:
             domain_id = domain_id_from_value(row.get("domain"), row_num=row_num, file_name=gages_file.name)
             rfc_id = rfc_id_from_value(row.get("rfc"), row_num=row_num, file_name=gages_file.name)
 
-            is_active = parse_bool(row.get("is_active"))
             headwater_calibration = parse_bool(row.get("headwater_calibration"))
             nwm_v3_calibration = parse_bool(row.get("nwm_v3_calibration"))
 
-            # Ensure null=False booleans never get None (model has defaults; keep it explicit here)
-            is_active = True if is_active is None else is_active
             headwater_calibration = False if headwater_calibration is None else headwater_calibration
             nwm_v3_calibration = False if nwm_v3_calibration is None else nwm_v3_calibration
 
-            # Stage/update in global dict; later we upsert into DB.
+            # Default all loaded gages to active. inactive_gages.csv may override later.
+            is_active = True
+
             gage = gages.get(gage_id)
             if not gage:
                 gage = {"gage_id": gage_id}

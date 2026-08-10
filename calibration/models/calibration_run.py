@@ -26,17 +26,12 @@ class CalibrationRun(BaseRun):  # Inherit from BaseRun
     streamflow_threshold = models.FloatField(null=True)
     peak_flow_threshold = models.FloatField(null=True)
     geopackage_source = models.ForeignKey('GeopackageSource', null=True, on_delete=models.RESTRICT)
-    geopackage_eds_file_path = models.TextField(null=True)
-    forcing_source_requested = models.ForeignKey('ForcingSource', null=True, on_delete=models.RESTRICT, related_name='+', related_query_name='+')
-    forcing_source_actual = models.ForeignKey('ForcingSource', null=True, on_delete=models.RESTRICT, related_name='+', related_query_name='+')
-    forcing_eds_dir_path = models.TextField(null=True)
+    forcing_source = models.ForeignKey('ForcingSource', null=True, on_delete=models.RESTRICT, related_name='+', related_query_name='+')
     observational_source = models.ForeignKey('ObservationalSource', null=True, on_delete=models.RESTRICT)
-    observational_eds_file_path = models.TextField(null=True)
     user_parameter_filename = models.TextField(null=True)
     realization_file_path = models.TextField(null=True)
     status = models.ForeignKey('Status', null=False, on_delete=models.RESTRICT, db_index=True)
     job_name = models.CharField(max_length=100, null=True)
-    is_aet_rootzone = models.BooleanField(null=False, default=False)
     save_plot_iteration_frequency = models.PositiveIntegerField(null=True)
     save_output_iteration = models.BooleanField(default=False)
     automatic_validation = models.BooleanField(null=False, default=False)
@@ -63,9 +58,6 @@ class CalibrationRun(BaseRun):  # Inherit from BaseRun
             f"CalibrationRun {self.id}, {gage_info}, "
             f"owner: {self.owner.username}, "  # type: ignore[attr-defined]  # Suppress PyCharm warning for unresolved attribute
             f"job_data_directory: {self.job_data_dir},"
-            f"geopackage_eds_file_path: {self.geopackage_eds_file_path}, "
-            f"forcing_eds_dir_path: {self.forcing_eds_dir_path}, "
-            f"observational_eds_file_path: {self.observational_eds_file_path}, "
             f"objective_function.name: {self.objective_function.name if self.objective_function else 'None'}, "
             f"optimization.name: {self.optimization.name if self.optimization else 'None'}, "
             f"status.name: {self.status.name}, "

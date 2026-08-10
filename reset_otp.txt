@@ -1,0 +1,18 @@
+-- Reset MFA for a user by disabling the mfa_enabled flag
+--
+-- The user will be required to set up MFA again on next login.
+
+-- Disable MFA flag on the user
+UPDATE custom_user
+SET mfa_enabled = FALSE
+WHERE email = 'peter@nextgenwaterprediction.com';
+
+
+-- ------------------------------------------------------------
+-- Verification (optional)
+-- ------------------------------------------------------------
+
+-- Check user MFA flag
+SELECT id, email, mfa_enabled
+FROM custom_user
+WHERE email = 'peter@nextgenwaterprediction.com';

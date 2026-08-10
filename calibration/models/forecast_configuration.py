@@ -16,6 +16,7 @@ class ForecastConfiguration(BaseModel):
     fcst_win = models.IntegerField(null=False)
     fcst_timestep = models.FloatField(null=False)
     order = models.IntegerField(null=True)
+    supports_hindcast = models.BooleanField(default=False)
 
     class Meta:
         db_table = 'forecast_configuration'

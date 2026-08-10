@@ -22,12 +22,11 @@ DJANGO_START_TIME = datetime.now(tz=timezone.utc)
 
 EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+FILE_PATH = os.path.abspath(str(__file__))
+BASE_DIR = os.path.dirname(os.path.dirname(FILE_PATH))
+THIS_DIR = os.path.dirname(FILE_PATH)
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = str(os.getenv('DJANGO_DEBUG', 'true')).lower() == 'true'
-
-dotenv_path = os.path.join(os.path.dirname(__file__), '.env')
+dotenv_path = os.path.join(THIS_DIR, '.env')
 print(f'Loading values from {dotenv_path}')
 load_dotenv(dotenv_path)
 
@@ -35,10 +34,16 @@ version_path = os.path.join(BASE_DIR, 'version.env')
 print(f'Loading values from {version_path}')
 load_dotenv(version_path)
 
+# SECURITY WARNING: don't run with debug turned on in production!
+DEBUG = str(os.getenv('DJANGO_DEBUG', 'true')).lower() == 'true'
+
 NGENCERF_VERSION = os.getenv("NGENCERF_VERSION", "<unknown>")
 NGENCERF_DATE = os.getenv("NGENCERF_DATE", "<unknown>")
 CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "<unknown>")
 NGENCERF_COPYRIGHT = f"© 2024-{datetime.now().year}, RTX"
+
+# used to find ngencerf-ui Docker image
+NGENCERF_UI_TAG = os.getenv("NGENCERF_UI_TAG", "latest")
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.0/howto/deployment/checklist/
@@ -62,6 +67,9 @@ INSTALLED_APPS = [
     "djoser",
     "rest_framework_simplejwt",
     'corsheaders',
+    "django_otp",
+    "django_otp.plugins.otp_totp",
+    "django_otp.plugins.otp_static",
 ]
 
 # Points to which token model should be used for authentication. In case if only stateless
@@ -91,7 +99,8 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
-    'calibration.util.middleware.LogUnmatchedCalibrationRequestsMiddleware',
+    "django_otp.middleware.OTPMiddleware",
+    'calibration.util.middleware.ApiRequestDiagnosticsMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'django_currentuser.middleware.ThreadLocalUserMiddleware',
@@ -99,18 +108,17 @@ MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
 ]
 
+# Comma separated list in the env
 CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "http://localhost:3001",
+    origin.strip()
+    for origin in os.getenv(
+        "CORS_ALLOWED_ORIGINS",
+        "http://localhost:3000,http://localhost:3001",
+    ).split(",")
+    if origin.strip()
 ]
 
-# Needed for zip file download
-CORS_EXPOSE_HEADERS = ['Content-Disposition']
-
-ZIP_DIR = os.path.join('/tmp', 'ngencerf-zips')
-os.makedirs(ZIP_DIR, exist_ok=True)
-ZIP_TTL_SECONDS = 7200  # 2 hours
-ZIP_DOWNLOAD_URL_TTL_SECONDS = 300  # 5 minutes to allow for large downloads
+MFA_ENABLED = str(os.getenv('MFA_ENABLED', 'false')).lower() == 'true'
 
 ROOT_URLCONF = 'cerfServer.urls'
 
@@ -204,31 +212,36 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # -----------------------------
 # Enterprise Data
 # -----------------------------
-ENTERPRISE_DATA_VERSION = "2.2"
-ENTERPRISE_DATA_GEOPACKAGE_ENDPOINT = [True, 'hydrofabric/geopackages?gage_id={gage_id}&source={source}&domain={domain}&version={version}']
-ENTERPRISE_DATA_MODULE_METADATA_ENDPOINT = [True, 'hydrofabric/modules/parameters/']
-ENTERPRISE_DATA_OBSERVATION_DATA_ENDPOINT = [True, 'hydrofabric/2.1/observational?gage_id={gage_id}&source={agency}&domain={domain}']
+HYDROFABRIC_SOURCE = 'nhf'
+ENTERPRISE_DATA_MODULE_METADATA_ENDPOINT = 'api/v1/modules/parameter_metadata/'
+ENTERPRISE_DATA_OBSERVATION_DATA_INFO_ENDPOINT = 'api/v1/streamflow_observations/{gage_id}/info'
+ENTERPRISE_DATA_OBSERVATION_DATA_ENDPOINT = 'api/v1/streamflow_observations/{gage_id}/csv'
 
-ENTERPRISE_DATA_URL = os.getenv('ENTERPRISE_DATA_URL', 'http://localhost:8001')
-
-# Due to circular imports, can't use the enums as keys.  But the values must match exactly
-FORCING_DATA_DIRS_AORC = {
-    "AORC": 's3://ngwpc-forcing/aorc_2.2',
-    "NWM Retrospective": 's3://ngwpc-forcing/retrospective_2.2'
-}
-FORCING_DATA_DIRS_RETRO = {
-    "NWM Retrospective": 's3://ngwpc-forcing/retrospective_2.2'
-}
+ENTERPRISE_DATA_URL = os.getenv('ENTERPRISE_DATA_URL')
+ENTERPRISE_DATA_ENV = os.getenv('ENTERPRISE_DATA_ENV')
 
 # Default time range for BMI forcing data
-FORCING_BMI_DATE_RANGE = DateTimeRange("1980-01-01T00:00:00+0000", "2024-12-31T23:59:59+0000")
-USE_BMI_FORCING = str(os.getenv('USE_BMI_FORCING', 'true')).lower() == 'true'
-
-# Translate urls from the format s3://bucket-name to S3_MOUNT_POINT/bucket
-# S3_MOUNT_POINT = os.getenv('S3_MOUNT_POINT', os.path.join(os.path.expanduser("~"), 's3'))
+FORCING_AORC_BMI_DATE_RANGE = DateTimeRange("1980-01-01T00:00:00+0000", "2024-12-31T23:59:59+0000")
+FORCING_NWM_RETROSPECTIVE_BMI_DATE_RANGE = DateTimeRange("1980-01-01T00:00:00+0000", "2023-01-31T23:59:59+0000")
 
 # Location of archive files
 NGENCERF_ARCHIVE_S3_PATH = os.getenv('NGENCERF_ARCHIVE_S3_PATH')
+
+# Location of download zip files on S3
+NGENCERF_ZIPS_S3_PATH = os.getenv('NGENCERF_ZIPS_S3_PATH')
+# AWS Profile to use for r/w buckets (.e.g, for archives and zips)
+# Use None for AWS Dev (uses default profile)
+NGENCERF_RW_PROFILE = os.getenv('NGENCERF_RW_PROFILE') or None
+
+# Local temp directory for building ZIPs before upload (and for CLI zips)
+ZIP_TEMP_DIR = os.path.join('/tmp', 'ngencerf-zips')
+os.makedirs(ZIP_TEMP_DIR, exist_ok=True)
+
+# How long a presigned download URL is valid
+ZIP_DOWNLOAD_URL_TTL_SECONDS = 300
+
+# How long the ZIP object is kept in S3 (and how long status is cached) before cleanup may delete it
+ZIP_RETENTION_SECONDS = 3600
 
 # -----------------------------
 # ngen/nwm-cal-mgr Locations
@@ -293,10 +306,10 @@ NGEN_FORECAST_DOCKER_CMD = f'docker run --rm --name {{name}} -v {NGEN_CAL_MOUNT_
 NWM_VERF_DOCKER_CMD = f'docker run --rm --name {{name}} -v {NGEN_CAL_MOUNT_POINT}:{NGEN_CAL_MOUNT_POINT} nwm-verf'
 
 # Used when running in NGEN_ENVIRONMENT=LOCAL
-CAL_MGR_SCRIPT = os.path.join(CAL_MGR_REPO_ROOT, 'docker', 'run-ngen-cal.sh')
+CAL_MGR_SCRIPT = os.path.join(CAL_MGR_REPO_ROOT, 'docker', 'run-nwm-cal-mgr.sh')
 NGEN_FORECAST_SCRIPT = os.path.join(NGEN_FORECAST_REPO_ROOT, 'docker', 'run-ngen-fcst.sh')
 NGEN_COLD_START_SCRIPT = os.path.join(NGEN_FORECAST_REPO_ROOT, 'docker', 'run-ngen-fcst.sh')
-VERIFICATION_SCRIPT = os.path.join(NWM_VERF_REPO_ROOT, 'docker', 'run-ngen-verf.sh')
+VERIFICATION_SCRIPT = os.path.join(NWM_VERF_REPO_ROOT, 'docker', 'run-nwm-verf.sh')
 
 RUNTIME_INFO = {
     ScriptEnum.CALIBRATION: (CAL_MGR_DOCKER_CMD, CAL_MGR_SCRIPT),
@@ -304,6 +317,7 @@ RUNTIME_INFO = {
     ScriptEnum.VALIDATION_ITERATION: (CAL_MGR_DOCKER_CMD, CAL_MGR_SCRIPT),
     ScriptEnum.COLD_START: (NGEN_FORECAST_DOCKER_CMD, NGEN_COLD_START_SCRIPT),
     ScriptEnum.FORECAST: (NGEN_FORECAST_DOCKER_CMD, NGEN_FORECAST_SCRIPT),
+    ScriptEnum.HINDCAST: (NGEN_FORECAST_DOCKER_CMD, NGEN_FORECAST_SCRIPT),
     ScriptEnum.VERIFICATION: (NWM_VERF_DOCKER_CMD, VERIFICATION_SCRIPT)
 }
 
@@ -335,6 +349,7 @@ SLURM_SUBMIT_CALIBRATION_JOB_ENDPOINT = 'submit-calibration-job'
 SLURM_SUBMIT_VALIDATION_JOB_ENDPOINT = 'submit-validation-job'
 SLURM_SUBMIT_COLD_START_JOB_ENDPOINT = 'submit-cold-start-job'
 SLURM_SUBMIT_FORECAST_JOB_ENDPOINT = 'submit-forecast-job'
+SLURM_SUBMIT_HINDCAST_JOB_ENDPOINT = 'submit-hindcast-job'
 SLURM_SUBMIT_VERIFICATION_JOB_ENDPOINT = 'submit-verification-job'
 SLURM_JOB_STATUS_ENDPOINT = 'job-status'
 SLURM_CANCEL_JOB_ENDPOINT = 'cancel-job'

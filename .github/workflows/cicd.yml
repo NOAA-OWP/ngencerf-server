@@ -2,11 +2,63 @@ name: CI/CD Pipeline
 
 on:
   pull_request:
-    branches: [ngwpc-candidate, ngwpc-release, main, nwm-main, development, release-candidate]
+    branches:
+      - ngwpc-candidate
+      - ngwpc-release
+      - main
+      - nwm-main
+      - development
+      - release-candidate
   push:
-    branches: [ngwpc-candidate, ngwpc-release, main, nwm-main, development, release-candidate]
-  release:
-    types: [published]
+    branches:
+      - ngwpc-candidate
+      - ngwpc-release
+      - main
+      - nwm-main
+      - development
+      - release-candidate
+  workflow_dispatch:
+    inputs:
+      NGEN_ORG:
+        description: 'NGEN_ORG'
+        required: false
+        type: string
+      NGEN_REF:
+        description: 'NGEN_REF'
+        required: false
+        type: string
+      MSW_MGR_ORG:
+        description: 'MSW_MGR_ORG'
+        required: false
+        type: string
+      MSW_MGR_REF:
+        description: 'MSW_MGR_REF'
+        required: false
+        type: string
+      DATA_ASSIMILATION_ORG:
+        description: 'DATA_ASSIMILATION_ORG'
+        required: false
+        type: string
+      DATA_ASSIMILATION_REF:
+        description: 'DATA_ASSIMILATION_REF'
+        required: false
+        type: string
+      NGEN_FORCING_ORG:
+        description: 'NGEN_FORCING_ORG'
+        required: false
+        type: string
+      NGEN_FORCING_REF:
+        description: 'NGEN_FORCING_REF'
+        required: false
+        type: string
+      EWTS_ORG:
+        description: 'EWTS_ORG'
+        required: false
+        type: string
+      EWTS_REF:
+        description: 'EWTS_REF'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -16,45 +68,161 @@ permissions:
 env:
   REGISTRY: ghcr.io
   PYTHON_VERSION: '3.11'
+  BASE_NAME: rockylinux:8
 
 jobs:
+  # set variables to use in other jobs
   setup:
+    name: setup
     runs-on: ubuntu-latest
     outputs:
+      org: ${{ steps.vars.outputs.org }}
       image_base: ${{ steps.vars.outputs.image_base }}
       pr_tag: ${{ steps.vars.outputs.pr_tag }}
       commit_sha: ${{ steps.vars.outputs.commit_sha }}
       commit_sha_short: ${{ steps.vars.outputs.commit_sha_short }}
       test_image_tag: ${{ steps.vars.outputs.test_image_tag }}
+      alias_tag: ${{ steps.vars.outputs.alias_tag }}
+      clean_ref: ${{ steps.vars.outputs.clean_ref }}
+      base_name: ${{ steps.vars.outputs.base_name }}
+      base_digest: ${{ steps.vars.outputs.base_digest }}
+      base_revision: ${{ steps.vars.outputs.base_revision }}
+      data_assimilation_revision: ${{ steps.vars.outputs.data_assimilation_revision }}
+      ewts_revision: ${{ steps.vars.outputs.ewts_revision }}
+      msw_mgr_revision: ${{ steps.vars.outputs.msw_mgr_revision }}
+      ngen_revision: ${{ steps.vars.outputs.ngen_revision }}
+      ngen_forcing_revision: ${{ steps.vars.outputs.ngen_forcing_revision }}
     steps:
       - name: Compute image vars
         id: vars
         shell: bash
         run: |
           set -euo pipefail
+
+          # set variables to use with Docker images
           ORG="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
           REPO="$(basename "${GITHUB_REPOSITORY}")"
           IMAGE_BASE="${REGISTRY}/${ORG}/${REPO}"
-          echo "image_base=${IMAGE_BASE}" >> "$GITHUB_OUTPUT"
 
-          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
-            PR_NUM="${{ github.event.pull_request.number }}"
-            PR_TAG="pr-${PR_NUM}-build"
-            echo "pr_tag=${PR_TAG}" >> "$GITHUB_OUTPUT"
-            echo "test_image_tag=${PR_TAG}" >> "$GITHUB_OUTPUT"
+          # for Docker image tags
+          TIMESTAMP=$(date -u +'%Y%m%d%H%M%SZ')
+
+          # logic to get the real branch name and commit SHA on pull requests
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            REAL_REF="${{ github.head_ref }}"
+            REAL_SHA="${{ github.event.pull_request.head.sha }}"
+          else
+            REAL_REF="${{ github.ref_name }}"
+            REAL_SHA="${GITHUB_SHA}"
           fi
 
-          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
-            COMMIT_SHA="${GITHUB_SHA}"
-            SHORT_SHA="${COMMIT_SHA:0:12}"
-            echo "commit_sha=${COMMIT_SHA}" >> "$GITHUB_OUTPUT"
-            echo "commit_sha_short=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
-            echo "test_image_tag=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          # clean ref name and short commit sha
+          CLEAN_REF=$(echo "$REAL_REF" | tr '[:upper:]' '[:lower:]' | sed 's/\//-/g')
+          SHORT_SHA="${REAL_SHA:0:7}"
+
+          # skopeo is needed to inspect the base image
+          if ! command -v skopeo >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y --no-install-recommends skopeo
           fi
 
+          # base image metadata for Dockerfile labels
+          BASE_INSPECT=$(skopeo inspect --override-os linux --override-arch amd64 "docker://${BASE_NAME}")
+          BASE_DIGEST=$(echo "$BASE_INSPECT" | jq -r '.Digest // "unknown"')
+          BASE_REVISION=$(echo "$BASE_INSPECT" | jq -r '.Labels["org.opencontainers.image.revision"] // .Labels["io.ngwpc.image.base.revision"] // "unknown"')
+
+          # resolve each source repo's ref (branch/tag/SHA) to its commit SHA for revision labels
+          resolve_sha() {
+            local url="$1" ref="$2" out sha
+            # a full 40-char SHA can't be looked up via ls-remote; use it directly
+            if [[ "$ref" =~ ^[0-9a-f]{40}$ ]]; then echo "$ref"; return; fi
+            out=$(git ls-remote "$url" "$ref" "refs/tags/${ref}^{}" 2>/dev/null)
+            # prefer the dereferenced commit (^{}) for annotated tags; else first match
+            sha=$(echo "$out" | grep '\^{}$' | head -n1 | cut -f1)
+            [ -z "$sha" ] && sha=$(echo "$out" | head -n1 | cut -f1)
+            echo "${sha:-unknown}"
+          }
+
+          DATA_ASSIMILATION_REVISION=$(resolve_sha "https://github.com/${{ inputs.DATA_ASSIMILATION_ORG || 'NGWPC' }}/nwm-data-assimilation.git" "${{ inputs.DATA_ASSIMILATION_REF || 'development' }}")
+          EWTS_REVISION=$(resolve_sha "https://github.com/${{ inputs.EWTS_ORG || 'NGWPC' }}/nwm-ewts.git" "${{ inputs.EWTS_REF || 'development' }}")
+          MSW_MGR_REVISION=$(resolve_sha "https://github.com/${{ inputs.MSW_MGR_ORG || 'NGWPC' }}/nwm-msw-mgr.git" "${{ inputs.MSW_MGR_REF || 'development' }}")
+          NGEN_REVISION=$(resolve_sha "https://github.com/${{ inputs.NGEN_ORG || 'NGWPC' }}/ngen.git" "${{ inputs.NGEN_REF || 'development' }}")
+          NGEN_FORCING_REVISION=$(resolve_sha "https://github.com/${{ inputs.NGEN_FORCING_ORG || 'NGWPC' }}/ngen-forcing.git" "${{ inputs.NGEN_FORCING_REF || 'development' }}")
+
+          # logic for the tags:
+          # test_image_tag (commit short sha): used for the initial build and test
+          # alias_tag: used for final tagging on successful tests
+
+          # test tag is always commit short sha
+          TEST_TAG="${SHORT_SHA}"
+
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            # for pull requests, use pr-<pr number>-build
+            ALIAS="pr-${{ github.event.pull_request.number }}-build"
+          elif [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "${{ github.ref_type }}" = "tag" ]; then
+            # for manual workflow dispatch on tags, use the git tag
+            ALIAS="${CLEAN_REF}"
+          else
+            # for pushes to branches, use timestamp-branchname
+            ALIAS="${TIMESTAMP}-${CLEAN_REF}"
+          fi
+
+          # save outputs
+          cat >> "$GITHUB_OUTPUT" <<EOF
+          org=${ORG}
+          image_base=${IMAGE_BASE}
+          test_image_tag=${TEST_TAG}
+          alias_tag=${ALIAS}
+          commit_sha=${REAL_SHA}
+          commit_sha_short=${SHORT_SHA}
+          clean_ref=${CLEAN_REF}
+          base_name=${BASE_NAME}
+          base_digest=${BASE_DIGEST}
+          base_revision=${BASE_REVISION}
+          data_assimilation_revision=${DATA_ASSIMILATION_REVISION}
+          ewts_revision=${EWTS_REVISION}
+          msw_mgr_revision=${MSW_MGR_REVISION}
+          ngen_revision=${NGEN_REVISION}
+          ngen_forcing_revision=${NGEN_FORCING_REVISION}
+          EOF
+
+  # CodeQL scan
+  codeql-scan:
+    name: codeql-scan
+    if: |
+      (github.event_name == 'pull_request') ||
+      (github.event_name == 'push') ||
+      (github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    needs: setup
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: python
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v4
+
+  # build ngencerf-server Dockerfile and Dockerfile.production-pw images
   build:
     name: build
-    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    if: |
+      (github.event_name == 'pull_request') ||
+      (github.event_name == 'push') ||
+      (github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     needs: setup
     strategy:
@@ -62,19 +230,17 @@ jobs:
       matrix:
         include:
           - dockerfile: Dockerfile
-            tag_suffix: ""
+            tag_suffix: "-dev"
           - dockerfile: Dockerfile.production-pw
-            tag_suffix: "-pw"
+            tag_suffix: "-prod"
     steps:
-      - uses: actions/checkout@v4
-
+      - uses: actions/checkout@v6
       - name: Log in to registry
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Build & push (${{ matrix.dockerfile }}) image
         uses: docker/build-push-action@v6
         with:
@@ -83,153 +249,135 @@ jobs:
           push: true
           tags: ${{ needs.setup.outputs.image_base }}:${{ needs.setup.outputs.test_image_tag }}${{ matrix.tag_suffix }}
           build-args: |
-            MSWM_ORG=${{ env.MSWM_ORG || 'NGWPC' }}
-            MSWM_TAG=${{ env.MSWM_TAG || 'development' }}
-            NGEN_FORCING_ORG=${{ env.NGEN_FORCING_ORG || 'NGWPC' }}
-            NGEN_FORCING_TAG=${{ env.NGEN_FORCING_TAG || 'development' }}
+            NGEN_ORG=${{ inputs.NGEN_ORG || 'NGWPC' }}
+            NGEN_REF=${{ inputs.NGEN_REF || 'development' }}
+            NGEN_REVISION=${{ needs.setup.outputs.ngen_revision }}
+            MSW_MGR_ORG=${{ inputs.MSW_MGR_ORG || 'NGWPC' }}
+            MSW_MGR_REF=${{ inputs.MSW_MGR_REF || 'development' }}
+            MSW_MGR_REVISION=${{ needs.setup.outputs.msw_mgr_revision }}
+            DATA_ASSIMILATION_ORG=${{ inputs.DATA_ASSIMILATION_ORG || 'NGWPC' }}
+            DATA_ASSIMILATION_REF=${{ inputs.DATA_ASSIMILATION_REF || 'development' }}
+            DATA_ASSIMILATION_REVISION=${{ needs.setup.outputs.data_assimilation_revision }}
+            NGEN_FORCING_ORG=${{ inputs.NGEN_FORCING_ORG || 'NGWPC' }}
+            NGEN_FORCING_REF=${{ inputs.NGEN_FORCING_REF || 'development' }}
+            NGEN_FORCING_REVISION=${{ needs.setup.outputs.ngen_forcing_revision }}
+            EWTS_ORG=${{ inputs.EWTS_ORG || 'NGWPC' }}
+            EWTS_REF=${{ inputs.EWTS_REF || 'development' }}
+            EWTS_REVISION=${{ needs.setup.outputs.ewts_revision }}
+            BASE_NAME=${{ needs.setup.outputs.base_name }}
+            BASE_DIGEST=${{ needs.setup.outputs.base_digest }}
+            BASE_REVISION=${{ needs.setup.outputs.base_revision }}
+            IMAGE_SOURCE=https://github.com/${{ github.repository }}
+            IMAGE_VENDOR=${{ github.repository_owner }}
+            IMAGE_VERSION=${{ needs.setup.outputs.clean_ref }}
+            IMAGE_REVISION=${{ needs.setup.outputs.commit_sha }}
 
-
+# run unit tests inside the Docker images
   unit-test:
     name: unit-test
-    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    if: |
+      (github.event_name == 'pull_request') ||
+      (github.event_name == 'push') ||
+      (github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
-    needs: [setup, build]
+    needs:
+      - setup
+      - build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - tag_suffix: "-dev"
+          - tag_suffix: "-prod"
     container:
-      image: ${{ needs.setup.outputs.image_base }}:${{ needs.setup.outputs.test_image_tag }}
+      image: ${{ needs.setup.outputs.image_base }}:${{ needs.setup.outputs.test_image_tag }}${{ matrix.tag_suffix }}
     steps:
       - name: Run unit tests
         run: |
           echo "TODO: add unit tests here"
 
-  codeql-scan:
-    if: github.event_name == 'pull_request' || github.event_name == 'push'
-    runs-on: ubuntu-latest
-    needs: unit-test
-    permissions:
-      actions: read
-      contents: read
-      security-events: write
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
-        with:
-          languages: python
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-      - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
-
+  # run container security scan using Trivy
   container-scanning:
-    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    name: container-scanning
+    if: |
+      (github.event_name == 'pull_request') ||
+      (github.event_name == 'push') ||
+      (github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
-    needs: [setup, build]
+    needs:
+      - setup
+      - build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - tag_suffix: "-dev"
+          - tag_suffix: "-prod"
     steps:
-      - name: Scan container with Trivy
-        uses: aquasecurity/trivy-action@0.20.0
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@v0.2.6
         with:
-          image-ref: ${{ needs.setup.outputs.image_base }}:${{ needs.setup.outputs.test_image_tag }}
-          format: 'template'
-          template: '@/contrib/sarif.tpl'
-          output: 'trivy-results.sarif'
-          severity: 'CRITICAL,HIGH'
-      - name: Upload Trivy SARIF
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: 'trivy-results.sarif'
+          cache: true
+          version: v0.69.3
 
-  deploy-latest-on-development:
-    name: deploy-latest-on-development
-    if: github.event_name == 'push' && github.ref_name == 'development'
-    runs-on: ubuntu-latest
-    needs: [setup, build, unit-test, codeql-scan, container-scanning]
-    steps:
-      - name: Tag image with 'latest'
-        shell: bash
-        run: |
-          set -euo pipefail
-          IMAGE_BASE="${{ needs.setup.outputs.image_base }}"
-
-          # get short sha tag for Dockerfile.production-pw
-          SHORT_SHA_PW="${{ needs.setup.outputs.commit_sha_short }}-pw"
-
-          # ensure skopeo is available
-          if ! command -v skopeo >/dev/null 2>&1; then
-            sudo apt-get update -y
-            sudo apt-get install -y --no-install-recommends skopeo
-          fi
-
-          skopeo copy \
-            --src-creds "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
-            --dest-creds "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
-            docker://"${IMAGE_BASE}:${SHORT_SHA_PW}" docker://"${IMAGE_BASE}:latest"
-
-  release:
-    name: release
-    if: github.event_name == 'release' && github.event.action == 'published'
-    runs-on: ubuntu-latest
-    needs: setup
-    steps:
-      - name: Get commit sha for the tag
-        id: rev
-        shell: bash
+      - name: Trivy scan
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TMPDIR: /mnt/trivy-temp
         run: |
-          set -euo pipefail
-          TAG="${{ github.event.release.tag_name }}"
-          REPO="${{ github.repository }}"
+          sudo mkdir -p $TMPDIR
+          sudo chown -R $USER:$USER $TMPDIR
 
-          # ensure jq is available
-          if ! command -v jq >/dev/null 2>&1; then
-            sudo apt-get update -y
-            sudo apt-get install -y --no-install-recommends jq
-          fi
+          trivy image \
+            --format sarif \
+            --output trivy-results${{ matrix.tag_suffix }}.sarif \
+            --severity CRITICAL,HIGH \
+            --scanners vuln \
+            --ignore-unfixed \
+            --timeout 45m \
+            ${{ needs.setup.outputs.image_base }}:${{ needs.setup.outputs.test_image_tag }}${{ matrix.tag_suffix }}
 
-          # ensure gh cli is available
-          if ! command -v gh >/dev/null 2>&1; then
-            sudo apt-get update -y
-            sudo apt-get install -y --no-install-recommends gh
-          fi
-
-          # get the commit sha for the tag
-          REF_JSON="$(gh api "repos/${REPO}/git/refs/tags/${TAG}")"
-          OBJ_SHA="$(jq -r '.object.sha' <<<"$REF_JSON")"
-          OBJ_TYPE="$(jq -r '.object.type' <<<"$REF_JSON")"
-
-          if [ "$OBJ_TYPE" = "tag" ]; then
-            TAG_OBJ="$(gh api "repos/${REPO}/git/tags/${OBJ_SHA}")"
-            COMMIT_SHA="$(jq -r '.object.sha' <<<"$TAG_OBJ")"
-          else
-            COMMIT_SHA="$OBJ_SHA"
-          fi
-
-          # get short sha
-          SHORT_SHA="${COMMIT_SHA:0:12}"
-          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
-
-      - name: Tag image with release tag
+  # promote Dockerfile.production-pw image tag after successful tests
+  promote-tags:
+    name: Promote Tags
+    if: |
+      (github.event_name == 'pull_request') ||
+      (github.event_name == 'push') ||
+      (github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    needs:
+      - setup
+      - codeql-scan
+      - build
+      - unit-test
+      - container-scanning
+    steps:
+      - name: Tag image with alias and latest
         shell: bash
         run: |
           set -euo pipefail
-          IMAGE_BASE="${{ needs.setup.outputs.image_base }}"
-          # get short sha tag for Dockerfile.production-pw
-          SHORT_SHA_PW="${{ steps.rev.outputs.short_sha }}-pw"
-          RELEASE_TAG="${{ github.event.release.tag_name }}"
 
-          # ensure skopeo is available
+          # ensure skopeo is available for promotion
           if ! command -v skopeo >/dev/null 2>&1; then
             sudo apt-get update -y
             sudo apt-get install -y --no-install-recommends skopeo
           fi
 
+          IMAGE_BASE="${{ needs.setup.outputs.image_base }}"
+          TEST_TAG="${{ needs.setup.outputs.test_image_tag }}-prod"
+          ALIAS_TAG="${{ needs.setup.outputs.alias_tag }}"
+
+          # apply the primary alias (pr tag or timestamp-branch)
           skopeo copy \
             --src-creds "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
             --dest-creds "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
-            docker://"${IMAGE_BASE}:${SHORT_SHA_PW}" docker://"${IMAGE_BASE}:${RELEASE_TAG}"
+            --all \
+            "docker://${IMAGE_BASE}:${TEST_TAG}" "docker://${IMAGE_BASE}:${ALIAS_TAG}"
+
+          # tag with 'latest' on development branch
+          if [ "$GITHUB_REF_NAME" = "development" ]; then
+            skopeo copy \
+              --src-creds "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
+              --dest-creds "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
+              --all \
+              "docker://${IMAGE_BASE}:${TEST_TAG}" "docker://${IMAGE_BASE}:latest"
+          fi

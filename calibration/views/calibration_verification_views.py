@@ -3,7 +3,6 @@ import logging
 import os
 import shutil
 
-import yaml
 from django.core.cache import cache
 from django.db import transaction
 from drf_spectacular.utils import extend_schema, OpenApiResponse
@@ -12,21 +11,19 @@ from rest_framework.decorators import api_view
 from rest_framework.request import Request
 from rest_framework.response import Response
 
-from calibration.enums import StatusEnum, LogName
+from calibration.enums import StatusEnum
 from calibration.enums_vanilla import JobType
-from calibration.models import VerificationRun
+from calibration.models import ForecastRun
 from calibration.run_util.run_common import submit_job
-from calibration.util.calibration_validators import ErrorResponseSerializer, VerificationJobSerializer, \
+from calibration.util.calibration_validators import ErrorResponseSerializer, \
     CreateAndRunVerificationRequestSerializer, CreateAndRunVerificationResponseSerializer, \
     GetVerificationPlotNamesResponseSerializer, GetVerificationPlotRequestSerializer, \
-    GetVerificationPlotResponseSerializer, DeleteVerificationJobResponseSerializer
-from calibration.util.ngen_locations import get_verification_run_dir, get_verification_yaml_config_file, \
-    get_verification_log_file, get_verification_stdout_file
+    GetVerificationPlotResponseSerializer, DeleteVerificationJobResponseSerializer, VerificationRunIdSerializer
+from calibration.util.ngen_locations import get_verification_run_dir
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import handle_exceptions, validate_response, validate_request, \
     get_forecast_run, get_verification_run, ResponseError, get_user_email, get_elapsed_str, \
-    create_verification_run_internal, png_to_base64_url, truncate_large_fields, get_job_description, \
-    CerfException
+    create_verification_run_internal, png_to_base64_url, truncate_large_fields, get_job_description, get_hindcast_run
 
 logger = logging.getLogger(__name__)
 
@@ -66,13 +63,21 @@ def create_and_run_verification_job(request: Request) -> Response:
         return error_return
 
     forecast_run_id = validator.get('forecast_run_id')
+    hindcast_run_id = validator.get('hindcast_run_id')
     logging_config = validator.get('logging_config')
 
-    forecast_run, error_return = get_forecast_run(forecast_run_id, request.user, run_status=[StatusEnum.DONE])
-    if error_return:
-        return error_return
+    if forecast_run_id:
+        run, error_return = get_forecast_run(forecast_run_id, request.user, run_status=[StatusEnum.DONE])
+        if error_return:
+            return error_return
+    else:
+        run, error_return = get_hindcast_run(hindcast_run_id, request.user, run_status=[StatusEnum.DONE])
+        if error_return:
+            return error_return
 
-    verification_run = create_verification_run_internal(forecast_run)
+    assert run is not None
+
+    verification_run = create_verification_run_internal(run)
 
     error_response = submit_job(verification_run, logging_config=logging_config)
     if error_response:
@@ -81,24 +86,33 @@ def create_and_run_verification_job(request: Request) -> Response:
     msg = get_job_description(verification_run) + ' created and submitted'
     response = {
         'message': msg,
-        'calibration_run_id': forecast_run.calibration_run.id,
-        'forecast_run_id': forecast_run.id,
+        'calibration_run_id': run.calibration_run.id,
         'verification_run_id': verification_run.id,
         'submit_date': verification_run.submit_date,
         'status': verification_run.status.name
     }
 
-    response_validator, error_response = validate_response(CreateAndRunVerificationResponseSerializer, response)
+    if isinstance(run, ForecastRun):
+        response['forecast_run_id'] = run.id
+    else:
+        response['hindcast_run_id'] = run.id
+
+    response_validator, error_response = validate_response(
+        CreateAndRunVerificationResponseSerializer,
+        response
+    )
     if error_response:
         return error_response
 
     logger.debug(
-        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
+        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - '
+        f'{json.dumps(response_validator.data)}'
+    )
     return Response(response_validator.data, status=status.HTTP_201_CREATED)
 
 
 @extend_schema(
-    request=VerificationJobSerializer,
+    request=VerificationRunIdSerializer,
     responses={
         200: GetVerificationPlotNamesResponseSerializer,
         400: OpenApiResponse(
@@ -124,37 +138,44 @@ def get_verification_plot_names(request: Request) -> Response:
     data = request.data if request.method == 'POST' else request.query_params.dict()
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
 
-    validator, error_return = validate_request(VerificationJobSerializer, data)
+    validator, error_return = validate_request(VerificationRunIdSerializer, data)
     if error_return:
         return error_return
 
     verification_run_id = validator.get('verification_run_id')
 
-    run, error_return = get_verification_run(verification_run_id, request.user,
-                                             run_status=[StatusEnum.RUNNING, StatusEnum.DONE, StatusEnum.CANCELLED, StatusEnum.FAILED,
-                                                         StatusEnum.SERVER_ERROR])
+    run, error_return = get_verification_run(
+        verification_run_id,
+        request.user,
+        run_status=[
+            StatusEnum.RUNNING, StatusEnum.DONE, StatusEnum.CANCELLED,
+            StatusEnum.FAILED, StatusEnum.SERVER_ERROR
+        ]
+    )
     if error_return:
         return error_return
+    assert run is not None
 
     plot_names = []
 
-    # For now, get verification plots directly from the file system
-    try:
-        with open(get_verification_yaml_config_file(run), 'r') as file:
-            yaml_config_data = yaml.safe_load(file)
-            if 'general' in yaml_config_data and 'nwm_configuration' in yaml_config_data['general']:
-                verification_plot_location = os.path.join(get_verification_run_dir(run), 'plots', yaml_config_data['general']['nwm_configuration'])
-                for root, dirs, files in os.walk(verification_plot_location):
-                    if files:
-                        for file_name in files:
-                            plot_names.append({
-                                'name': os.path.relpath(os.path.join(root, file_name), get_verification_run_dir(run)),
-                                'display_name': file_name,
-                                'description': f'Placeholder description of {file_name}',
-                                'timeseries_available': False
-                            })
-    except Exception as e:
-        logger.warning(f"Unable to get plots for {get_job_description(run)} due to error: {e}")
+    config_name = run.parent_run.configuration.internal_name
+
+    base_dir = get_verification_run_dir(run)
+    verification_plot_location = os.path.join(base_dir, 'plots', config_name)
+
+    for root, _, files in os.walk(verification_plot_location):
+        for file_name in files:
+            if not file_name.lower().endswith('.png'):
+                continue
+
+            full_path = os.path.join(root, file_name)
+
+            plot_names.append({
+                'name': os.path.relpath(full_path, base_dir),
+                'display_name': file_name,
+                'description': f'Placeholder description of {file_name}',
+                'timeseries_available': False
+            })
 
     response = {
         "verification_run_id": run.id,
@@ -165,12 +186,16 @@ def get_verification_plot_names(request: Request) -> Response:
     response_validator, error_response = validate_response(
         GetVerificationPlotNamesResponseSerializer,
         response,
-        fields_to_truncate=['plot_names'], max_length=3
-
+        fields_to_truncate=['plot_names'],
+        max_length=3
     )
     if error_response:
         return error_response
-    logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {json.dumps(response_validator.data)}')
+
+    logger.debug(
+        f'{get_caller_name()}() request from {get_user_email(request)} - '
+        f'{json.dumps(response_validator.data)}'
+    )
     logger.debug(
         f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - '
         f'{json.dumps(truncate_large_fields(response_validator.data, fields_to_truncate=["plot_names"], max_length=3))}'
@@ -224,6 +249,7 @@ def get_verification_plot(request: Request) -> Response:
     run, error_return = get_verification_run(verification_run_id, request.user, run_status=[StatusEnum.RUNNING, StatusEnum.DONE])
     if error_return:
         return error_return
+    assert run is not None
 
     # Just retrieve the file for now
     plot_file_path = os.path.join(get_verification_run_dir(run), plot_name)
@@ -236,7 +262,8 @@ def get_verification_plot(request: Request) -> Response:
         cache.set(cache_key_plot_url, plot_url, timeout=3600)
     else:
         return ResponseError(
-            f"Error while checking existence of plot '{plot_name}' for {JobType.VERIFICATION.value.capitalize()} {run.id}: File Not Found")
+            f"Plot '{plot_name}' for {JobType.VERIFICATION.value.capitalize()} {run.id}: File Not Found"
+        )
 
     response = {
         'plot_name': plot_name,
@@ -261,7 +288,7 @@ def get_verification_plot(request: Request) -> Response:
 
 
 @extend_schema(
-    request=VerificationJobSerializer,
+    request=VerificationRunIdSerializer,
     responses={
         200: DeleteVerificationJobResponseSerializer,
         400: OpenApiResponse(
@@ -287,7 +314,7 @@ def delete_verification_job(request: Request) -> Response:
     data = request.data if request.method == 'POST' else request.query_params.dict()
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
 
-    validator, error_return = validate_request(VerificationJobSerializer, data)
+    validator, error_return = validate_request(VerificationRunIdSerializer, data)
     if error_return:
         return error_return
 
@@ -296,6 +323,7 @@ def delete_verification_job(request: Request) -> Response:
     run, error_return = get_verification_run(verification_run_id, request.user, run_status=list(StatusEnum))
     if error_return:
         return error_return
+    assert run is not None
 
     if run.status in [StatusEnum.RUNNING.db_instance, StatusEnum.SUBMITTED.db_instance]:
         return ResponseError(f'Verification Job {run.id} is running.  Cannot delete a running job')
@@ -323,21 +351,3 @@ def delete_verification_job(request: Request) -> Response:
         f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
 
     return Response(response_validator.data)
-
-
-def get_verification_log(verification_run: VerificationRun, log_name: LogName) -> str:
-    """
-    Fetches the appropriate log file for a specific verification run.
-
-    - Supports logs like `verification` and `verification.stdout`.
-
-    :param verification_run: The VerificationRun object for which the log is retrieved.
-    :param log_name: The LogName enum specifying the log type.
-    :return: The path to the log file.
-    """
-    if log_name == LogName.VERIFICATION:
-        return get_verification_log_file(verification_run)
-    elif log_name == LogName.VERIFICATION_STDOUT:
-        return get_verification_stdout_file(verification_run)
-
-    raise CerfException(f'Invalid log_name: {log_name}')

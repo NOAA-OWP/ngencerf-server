@@ -5,7 +5,9 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Global table of MPI rules.  Can be updated dynamically with endpoint update_mpi_rules or using env variable MPI_NODE_RULES
+# Global table of MPI rules.  Can be updated dynamically using env variable MPI_NODE_RULES
+# These values are the default, fallback values if not specified in .env-docker-prod or elsewhere in the env
+# Updating these values will likely not have any effect
 # Each pair represents [max_catchments, num_nodes]
 DEFAULT_MPI_NODE_RULES: list[list[int]] = [
     [10, 1],

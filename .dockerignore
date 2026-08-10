@@ -3,5 +3,6 @@
 .aws_credentials
 .gitlab_token
 cli/dist
+*_git_info.json
 
 data

@@ -10,8 +10,10 @@ from rest_framework import status
 from calibration.enums import StatusEnum, SlurmCallbackStatusEnum
 from calibration.models import CalibrationRun, ValidationRun, ForecastRun, ColdStartRun, VerificationRun
 from calibration.models.base_run import BaseRun
+from calibration.models.hindcast_run import HindcastRun
 from calibration.run_util.run_common import set_job_status, run_generic_job_end_callback, finalize_calibration_after_callback, \
-    finalize_validation_after_callback, finalize_forecast_after_callback, finalize_cold_start_after_callback, finalize_verification_after_callback
+    finalize_validation_after_callback, finalize_forecast_after_callback, finalize_cold_start_after_callback, finalize_verification_after_callback, \
+    finalize_hindcast_after_callback
 from calibration.util.calibration_validators import GenericMessageResponseSerializer, SlurmSubmitResponseSerializer
 from calibration.views.common import generate_custom_token, TOKEN_SLURM_SCOPE, get_job_description, validate_response_data
 
@@ -41,7 +43,7 @@ def submit_job_to_slurm(run: BaseRun, owner: User, arguments: dict[str, str], st
             'calibration_run_id': (None, run.id),
             'input_file': (None, arguments['input_file']),
             'output_file': (None, stdout_file),
-            'nprocs': (None, str(run.mpi_nprocs)),
+            'nprocs': (None, arguments['nprocs']),
             'node_type': (None, run.node_type)
         }
     elif isinstance(run, ValidationRun):
@@ -62,7 +64,7 @@ def submit_job_to_slurm(run: BaseRun, owner: User, arguments: dict[str, str], st
             'cold_start_run_id': (None, run.id),
             'validation_yaml': (None, arguments['validation_yaml']),
             'realization_file': (None, arguments['realization_file']),
-            'stdout_file': (None, stdout_file),
+            'stdout_file': (None, stdout_file)
         }
     elif isinstance(run, ForecastRun):
         url_endpoint = settings.SLURM_SUBMIT_FORECAST_JOB_ENDPOINT
@@ -70,7 +72,19 @@ def submit_job_to_slurm(run: BaseRun, owner: User, arguments: dict[str, str], st
             'forecast_run_id': (None, run.id),
             'validation_yaml': (None, arguments['validation_yaml']),
             'realization_file': (None, arguments['realization_file']),
-            'stdout_file': (None, stdout_file),
+            'stdout_file': (None, stdout_file)
+        }
+    elif isinstance(run, HindcastRun):
+        url_endpoint = settings.SLURM_SUBMIT_HINDCAST_JOB_ENDPOINT
+        payload = {
+            'hindcast_run_id': (None, run.id),
+            'validation_yaml': (None, arguments['validation_yaml']),
+            'config_file': (None, arguments['config_file']),
+            'run_name': (None, arguments['run_name']),
+            'interval_cycle': (None, arguments['interval_cycle']),
+            'num_iterations': (None, arguments['num_iterations']),
+            'use_state': (None, arguments['use_state']),
+            'stdout_file': (None, stdout_file)
         }
     elif isinstance(run, VerificationRun):
         url_endpoint = settings.SLURM_SUBMIT_VERIFICATION_JOB_ENDPOINT
@@ -81,7 +95,7 @@ def submit_job_to_slurm(run: BaseRun, owner: User, arguments: dict[str, str], st
         }
     else:
         raise ValueError(
-            f"Unsupported run type: {type(run).__name__}. Expected one of CalibrationRun, ValidationRun, ColdStartRun, ForecastRun, VerificationRun."
+            f"Unsupported run type: {type(run).__name__}. Expected one of CalibrationRun, ValidationRun, ColdStartRun, ForecastRun, HindcastRun, VerificationRun."
         )
 
     url = urljoin(settings.SLURM_URL, url_endpoint)
@@ -163,9 +177,16 @@ run_forecast_job_callback_pw = functools.partial(
     run_generic_job_end_callback, check_if_failed=check_pw_for_failure, finalize_func=finalize_forecast_after_callback
 )
 
+# Handles the completion of a hindcast job in the PW environment.
+# - Uses `check_pw_status` to validate the job's status.
+# - Executes `finalize_hindcast` to finalize the hindcast job and mark it as DONE.
+run_hindcast_job_callback_pw = functools.partial(
+    run_generic_job_end_callback, check_if_failed=check_pw_for_failure, finalize_func=finalize_hindcast_after_callback
+)
+
 # Handles the completion of a verification job in the PW environment.
 # - Uses `check_pw_status` to validate the job's status.
-# - Executes `finalize_forecast` to finalize the forecast job and mark it as DONE.
+# - Executes `finalize_verification` to finalize the verification job and mark it as DONE.
 run_verification_job_callback_pw = functools.partial(
     run_generic_job_end_callback, check_if_failed=check_pw_for_failure, finalize_func=finalize_verification_after_callback
 )

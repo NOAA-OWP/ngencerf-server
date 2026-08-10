@@ -1,33 +1,36 @@
-Django~=5.2.10
-djangorestframework~=3.16.1
+Django~=5.2.13
+djangorestframework~=3.17.1
 djangorestframework-simplejwt~=5.5.1
 django-redis~=6.0.0
-geopandas~=1.1.2
-matplotlib~=3.10.7
+geopandas~=1.1.3
+matplotlib~=3.10.9
 fiona~=1.10.1
 shapely~=2.1.2
 toml~=0.10.2
 DateTimeRange~=2.3.2
-python-dotenv~=1.2.1
+python-dotenv~=1.2.2
 django-currentuser~=0.10.0
 psycopg~=3.3.2
-django_dbconn_retry~=0.1.9
+django_dbconn_retry~=0.2.0
 djoser~=2.3.3
-pyjwt~=2.10.1
+pyjwt~=2.12.1
 PyYAML~=6.0.3
 drf_spectacular~=0.29.0
 django-cors-headers~=4.9.0
-requests~=2.32.5
+requests~=2.33.1
 pyarrow~=22.0.0
 pyogrio~=0.12.1
-tabulate~=0.9.0
+tabulate~=0.10.0
+django-otp[qrcode]~=1.7.0
+Pillow~=12.2.0
 
-# AWS stack - pinned together to avoid resolver conflicts
-aiobotocore~=2.24.2
-boto3==1.40.17
-botocore==1.40.17
-fsspec==2025.3.0
-s3fs==2025.3.0
+# AWS stack - keep botocore pinned because aiobotocore 3.1.x caps botocore < 1.42.50; boto3 must match botocore’s patch level
+botocore==1.42.49
+boto3==1.42.49
+aiobotocore~=3.1.3
+
+fsspec==2026.2.0
+s3fs==2026.2.0
 
 # Use the same versions as mswm
 numpy < 2.0, >= 1.23

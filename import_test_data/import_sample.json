@@ -12,7 +12,7 @@
     },
     "run_after_import": false,
     "gage_id": "01123000",
-    "forcing_source": "AORC",
+    "forcing_source": "NWM",
     "observational_source": "Historical",
     "geopackage_source": "Hydrofabric",
     "modules": [
@@ -57,16 +57,16 @@
     "automatic_validation": true,
 
     "calibration_times": {
-        "calibration_start_time": "2014-10-01T00:00:00Z",
-        "calibration_end_time": "2015-09-30T23:00:00Z",
-        "simulation_start_time": "2014-10-01T00:00:00Z",
-        "simulation_end_time": "2016-05-18T23:00:00Z"
+        "calibration_start_time": "2016-10-01T00:00:00Z",
+        "calibration_end_time": "2017-09-30T23:00:00Z",
+        "simulation_start_time": "2016-10-01T00:00:00Z",
+        "simulation_end_time": "2018-05-18T23:00:00Z"
     },
     "validation_times": {
-        "validation_start_time": "2015-10-01T00:00:00Z",
-        "validation_end_time": "2016-05-18T23:00:00Z",
-        "simulation_start_time": "2014-10-01T00:00:00Z",
-        "simulation_end_time": "2016-05-18T23:00:00Z"
+        "validation_start_time": "2017-10-01T00:00:00Z",
+        "validation_end_time": "2018-05-18T23:00:00Z",
+        "simulation_start_time": "2016-10-01T00:00:00Z",
+        "simulation_end_time": "2018-05-18T23:00:00Z"
     },
     "streamflow_threshold": 1.0,
     "peak_flow_threshold": 2.0,

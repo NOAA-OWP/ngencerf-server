@@ -42,3 +42,5 @@ logrotate-ngencerf.dev.conf
 
 data_source_mapping.xml
 dataSources.xml
+
+*.sha

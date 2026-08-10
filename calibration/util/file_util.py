@@ -94,7 +94,7 @@ def delete_all_files_in_directory(source_dir: str):
     logger.info(f"All files in directory '{source_dir}' have been deleted.")
 
 
-def get_single_file(source_dir: str):
+def get_single_file(source_dir: str) -> str | None:
     """
     Retrieves the first file found in the given directory.
     If the directory is empty, it returns None. If more than one file exists,

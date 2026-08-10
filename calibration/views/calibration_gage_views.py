@@ -1,6 +1,8 @@
 import json
 import logging
+import os
 
+from django.db import transaction
 from drf_spectacular.utils import OpenApiParameter, extend_schema, OpenApiResponse
 from pyogrio.errors import DataLayerError
 from rest_framework import status
@@ -11,20 +13,16 @@ from rest_framework.response import Response
 from calibration.enums import ObservationalSourceEnum, ForcingSourceEnum, DomainEnum, GeopackageSourceEnum
 from calibration.models import Gage, CalibrationRun, CalibrationFormulation
 from calibration.util.caching import get_cached_gages, get_gage_by_id, update_and_get_cached_gage_status
-from calibration.util.calibration_validators import SaveGageRequestSerializer, GageIdSerializer, SaveGageResponseSerializer, \
-    LoadGageResponseSerializer, GageSerializer, ErrorResponseSerializer, UpdateGageStatusRequestSerializer, UpdateGageStatusResponseSerializer, \
-    EmptySerializer
-from calibration.util.cloud_util import path_exists
-from calibration.util.file_util import get_single_file
+from calibration.util.calibration_validators import SaveGageRequestSerializer, GageIdSerializer, SaveGageResponseSerializer, GageSerializer, \
+    LoadGageResponseSerializer, ErrorResponseSerializer, UpdateGageStatusRequestSerializer, UpdateGageStatusResponseSerializer, EmptySerializer
 from calibration.util.geopkg import gpkg_to_png_selected_layers, get_geometry_from_gpkg
-from calibration.util.ngen_locations import get_forcing_dir_for_job, get_observational_file_for_job, \
-    get_geopackage_dir_for_job
+from calibration.util.ngen_locations import get_geopackage_file_path
 from calibration.views import ngen_cal_input
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import get_calibration_run, ResponseError, handle_exceptions, validate_response, validate_request, \
-    png_str_to_base64_url, truncate_large_fields, get_valid_path, get_user_email, get_elapsed_str, CerfException
-from calibration.views.data_services import get_geopackage_from_data_services, get_observational_data_from_data_services, \
-    get_forcing_data_from_s3, DataServicesException, get_module_metadata_from_data_services, clear_times, should_use_bmi_forcing
+    png_str_to_base64_url, truncate_large_fields, get_user_email, get_elapsed_str, CerfException
+from calibration.views.data_services import get_geopackage_from_data_services, \
+    DataServicesException, get_module_metadata_from_data_services, clear_times, update_parameters
 
 logger = logging.getLogger(__name__)
 
@@ -69,24 +67,22 @@ def load_gage_tab(request: Request) -> Response:
         return error_return
 
     # Retrieve active source and domain options
-    forcing_source_values = ForcingSourceEnum.get_choices_with_fields(fields=['name', 'description'])
+    forcing_source_values = ForcingSourceEnum.get_choices_with_fields(fields=['name', 'display_name', 'description'])
     observational_source_values = ObservationalSourceEnum.get_choices_with_fields(fields=['name', 'description'])
     geopackage_source_values = GeopackageSourceEnum.get_choices_with_fields(fields=['name', 'description'])
-    domain_values = [
-        {
-            **item,
-            'name': item['name'].replace('_', ' ')
-        }
-        for item in DomainEnum.get_choices_with_fields(fields=['name', 'description'])
-    ]
+    domain_values = DomainEnum.get_choices_with_fields(fields=['name', 'display_name', 'description'])
 
     # Retrieve cached active gages with necessary fields
-    gages = [{
-        'gage_id': gage.get('gage_id'),
-        'headwater_calibration': gage.get('headwater_calibration'),
-        'nws_id': gage.get('nws_id'),
-        'domain': gage.get('domain').replace('_', ' ') if gage.get('domain') else None
-    } for gage in get_cached_gages().values() if gage.get('is_active')]
+    gages = [
+        {
+            'gage_id': gage.get('gage_id'),
+            'headwater_calibration': gage.get('headwater_calibration'),
+            'nws_id': gage.get('nws_id'),
+            'domain': gage.get('domain')
+        }
+        for gage in get_cached_gages().values()
+        if gage.get('is_active')
+    ]
 
     response = {
         'domain_values': domain_values,
@@ -200,7 +196,7 @@ def save_gage_tab(request: Request):
 
     calibration_run_id = validator.get('calibration_run_id')
     gage_id = validator.get('gage_id')
-    forcing_source_requested_name = validator.get('forcing_source_requested')
+    forcing_source_name = validator.get('forcing_source')
     observational_source_name = validator.get('observational_source')
     geopackage_source_name = validator.get('geopackage_source')
     job_name = validator.get('job_name')
@@ -208,11 +204,11 @@ def save_gage_tab(request: Request):
     run, error_return = get_calibration_run(calibration_run_id, request.user)
     if error_return:
         return error_return
+    assert run is not None
 
     run.job_name = job_name
 
-    eds_errors = []
-
+    eds_errors: list[dict] = []
     geopackage_image_url = None
 
     # Check cache first to confirm the gage exists and is active
@@ -220,39 +216,61 @@ def save_gage_tab(request: Request):
     if not gage_dict:
         raise Gage.DoesNotExist(f"Gage '{gage_id}' does not exist or is not active")
 
-    # Fetch the actual DB object to assign to the FK
-    gage = Gage.objects.only('gage_id').get(gage_id=gage_id)
+    # Fetch the actual DB object to assign to the FK (include domain for Data Services calls)
+    gage = (
+        Gage.objects
+        .select_related("domain")
+        .only("id", "gage_id", "domain")
+        .get(gage_id=gage_id)
+    )
 
     gage_is_new_or_changed = (run.gage is None) or (run.gage != gage)
 
     if gage_is_new_or_changed:
-        try:
-            eds_errors_entry = save_gage(run, gage)
-            if eds_errors_entry:
-                eds_errors.append(eds_errors_entry)
-        except Gage.DoesNotExist:
-            return ResponseError(f"Gage '{gage_id}' does not exist or is not active", http_status=status.HTTP_404_NOT_FOUND)
+        # reset + set gage (non-CLI path)
+        reset_gage_dependent_state_on_change(run, gage, cli=False)
 
-        # Get Geopackage
-        if geopackage_source_name:
-            if geopackage_source_name == GeopackageSourceEnum.HYDROFABRIC.value:
-                try:
-                    get_geopackage_from_data_services(run)
-                except DataServicesException as e:
-                    logger.exception("Error retrieving geopackage data from Data Services")
-                    eds_errors.append({
-                        'name': 'geopackage',
-                        'message': str(e),
-                        'status_code': e.status_code if e.status_code else None
-                    })
+        # Refresh module parameters for existing formulations (if any).
+        # Data Services call must be outside a write transaction.
+        my_formulations = (
+            CalibrationFormulation.objects
+            .filter(calibration_run_id=run.id)
+            .select_related("module")
+        )
+        module_names = set(my_formulations.values_list("module__name", flat=True))
+
+        if module_names:
+            module_metadata, module_eds_errors = get_module_metadata_from_data_services(run, module_names)
+
+            if module_eds_errors:
+                eds_errors.extend(module_eds_errors)
             else:
-                raise CerfException("Invalid geopackage source")
+                modules_with_params = [
+                    m for m in (module_metadata or {}).get("modules", [])
+                    if not m.get("error")
+                ]
+
+                if modules_with_params:
+                    with transaction.atomic():
+                        update_parameters(run, {"modules": modules_with_params}, gage_changed=True)
+
+        # Get Geopackage - for now HYDROFABRIC is the only possibility
+        if geopackage_source_name and geopackage_source_name == GeopackageSourceEnum.HYDROFABRIC.value:
+            try:
+                get_geopackage_from_data_services(run)
+            except DataServicesException as e:
+                logger.exception("Error retrieving geopackage data from Data Services")
+                eds_errors.append({
+                    'name': 'geopackage',
+                    'message': str(e),
+                    'status_code': e.status_code if e.status_code else None
+                })
         else:
-            run.geopackage_eds_file_path = None
+            raise CerfException("Invalid geopackage source")
 
         run.geopackage_source = GeopackageSourceEnum.get_instance(geopackage_source_name) if geopackage_source_name else None
 
-        geopackage_path = get_valid_path(run.geopackage_eds_file_path, lambda: get_single_file(get_geopackage_dir_for_job(run)))
+        geopackage_path = get_geopackage_file_path(run)
         if geopackage_path:
             catchments = list(get_geometry_from_gpkg(geopackage_path)['catchments'].keys())
             run.num_catchments = len(catchments)
@@ -260,89 +278,15 @@ def save_gage_tab(request: Request):
 
         geopackage_image_url = get_geopackage_image_url(geopackage_path)
 
-        # Get Observational data
-        if observational_source_name:
-            if observational_source_name == ObservationalSourceEnum.HISTORICAL.value:
-                try:
-                    get_observational_data_from_data_services(run)
-                except DataServicesException as e:
-                    logger.exception("Error retrieving observational data from Data Services")
-                    eds_errors.append({
-                        'name': 'observational',
-                        'message': str(e),
-                        'status_code': e.status_code if e.status_code else None
-                    })
-            else:
-                raise CerfException("Invalid observational source")
-        else:
-            run.observational_eds_file_path = None
-            clear_times(run)
-
         run.observational_source = ObservationalSourceEnum.get_instance(observational_source_name) if observational_source_name else None
 
-        # Get Forcing data
+    forcing_source = (
+        ForcingSourceEnum.get_instance(forcing_source_name)
+        if forcing_source_name
+        else None
+    )
 
-        # Determine requested forcing source
-        forcing_source_requested = (
-            ForcingSourceEnum.get_instance(forcing_source_requested_name)
-            if forcing_source_requested_name
-            else None
-        )
-
-        # Must be set before get_forcing_data_from_s3() because should_use_bmi_forcing() reads it
-        run.forcing_source_requested = forcing_source_requested
-
-        if forcing_source_requested_name:
-            try:
-                get_forcing_data_from_s3(run, forcing_source_requested_name)
-            except DataServicesException as e:
-                logger.exception("Error retrieving forcing data from Data Services")
-                eds_errors.append({
-                    'name': 'forcing',
-                    'message': str(e),
-                    'status_code': e.status_code if e.status_code else None
-                })
-        else:
-            # No forcing_source_requested → clear any existing forcing state
-            run.forcing_eds_dir_path = None
-            run.forcing_source_actual = None
-
-    else:
-        # Get Forcing data
-        # Gage unchanged → refetch only if requested source changed
-
-        forcing_source_requested = (
-            ForcingSourceEnum.get_instance(forcing_source_requested_name)
-            if forcing_source_requested_name
-            else None
-        )
-
-        needs_forcing_fetch = (
-            forcing_source_requested_name
-            and (
-                not run.forcing_source_requested
-                or run.forcing_source_requested.name != forcing_source_requested_name
-            )
-        )
-
-        # Persist the requested source selection even if we don't refetch
-        run.forcing_source_requested = forcing_source_requested
-
-        if needs_forcing_fetch:
-            try:
-                get_forcing_data_from_s3(run, forcing_source_requested_name)
-            except DataServicesException as e:
-                logger.exception("Error retrieving forcing data from Data Services")
-                eds_errors.append({
-                    'name': 'forcing',
-                    'message': str(e),
-                    'status_code': e.status_code if e.status_code else None
-                })
-        elif not forcing_source_requested_name:
-            # No forcing_source_requested → clear any existing forcing state
-            run.forcing_eds_dir_path = None
-            run.forcing_source_actual = None
-            clear_times(run)
+    run.forcing_source = forcing_source
 
     # -------------------------
     # Write phase
@@ -351,19 +295,15 @@ def save_gage_tab(request: Request):
 
     ngen_cal_input.ready_to_run(run)
 
-    response = {'message': f'Calibration Job {run.id} updated',
-                'calibration_run_id': run.id,
-                'status': run.status.name,
-                'geopackage_image_url': geopackage_image_url,
-                'num_catchments': run.num_catchments,
-                'forcing_source_requested': run.forcing_source_requested.name if run.forcing_source_requested else None,
-                'forcing_source_actual': run.forcing_source_actual.name if run.forcing_source_actual else None}
-    should_use_bmi = should_use_bmi_forcing(run)
-    if not should_use_bmi:
-        if run.forcing_source_requested and run.forcing_source_requested != run.forcing_source_actual:
-            response['warnings'] = [
-                f'{run.forcing_source_requested.name} forcing data not found.  Using {run.forcing_source_actual.name if run.forcing_source_actual else None}'
-            ]
+    response = {
+        'message': f'Calibration Job {run.id} updated',
+        'calibration_run_id': run.id,
+        'status': run.status.name,
+        'geopackage_image_url': geopackage_image_url,
+        'num_catchments': run.num_catchments,
+        'forcing_source': run.forcing_source.name if run.forcing_source else None
+    }
+
     if eds_errors:
         response['eds_errors'] = eds_errors
 
@@ -442,7 +382,7 @@ def get_geopackage_image_url(geopackage_path: str | None) -> str | None:
     :param geopackage_path: The file path of the GeoPackage.
     :return: A base64-encoded URL string of the PNG image if conversion is successful; otherwise, None.
     """
-    if geopackage_path and path_exists(geopackage_path):
+    if geopackage_path and os.path.exists(geopackage_path):
         try:
             # Attempt to convert the GeoPackage to PNG for selected layers
             geopackage_png = gpkg_to_png_selected_layers(geopackage_path)
@@ -459,51 +399,27 @@ def get_geopackage_image_url(geopackage_path: str | None) -> str | None:
         return None
 
 
-def save_gage(run: CalibrationRun, gage: Gage) -> dict | None:
+def reset_gage_dependent_state_on_change(run: CalibrationRun, new_gage: Gage, *, cli: bool = False) -> bool:
     """
-    Apply a gage to a calibration run (initial set or change).
+    If the gage changes, clear any fields derived from the prior gage and clear derived times.
 
-    - If the run already had a gage, clear any gage-dependent EDS paths (forcing/observational/geopackage)
-      and clear derived time fields so they will be recalculated.
-    - Set run.gage to the provided gage.
-    - Refresh module metadata/initial parameter values via Data Services.
-
-    Caller:
-    - Should call when the gage is being set for the first time or when it has changed.
-    - Should not call when the gage is unchanged (to preserve existing EDS paths and time fields).
-
-    :param run: The CalibrationRun instance to update (not saved here).
-    :param gage: The gage being applied.
-    :return: Error dict for Data Services failures; otherwise None.
+    This function performs no DB writes; it only mutates `run` in memory.
+    Returns True if the gage changed (or was newly set), else False.
     """
+    gage_changed = (run.gage is None) or (run.gage_id != new_gage.id)
+    if not gage_changed:
+        return False
 
-    # We only get here when the gage is new or changed, but we may have existing state from the prior gage.
-    if run.gage:
-        # Clear any EDS-derived file paths associated with the prior gage.
-        # TODO Need to delete anything in the geopackage_original directory
-        run.geopackage_eds_file_path = None
-        run.forcing_eds_dir_path = None
-        run.observational_eds_file_path = None
+    # Clear file paths associated with the prior gage.
+    geopackage = get_geopackage_file_path(run)
+    if geopackage and os.path.exists(geopackage):
+        os.remove(geopackage)
 
-        clear_times(run)
+    run.forcing_eds_dir_path = None
 
-    run.gage = gage
-
-    # Compute once and reuse
-    my_formulations = CalibrationFormulation.objects.filter(calibration_run_id=run.id)
-
-    if my_formulations.exists():
-        try:
-            get_module_metadata_from_data_services(run, my_formulations, gage_changed=True)  # type: ignore
-        except DataServicesException as e:
-            logger.exception("Error retrieving module parameter data from Data Services")
-            return {
-                'name': 'parameters',
-                'message': str(e),
-                'status_code': e.status_code if e.status_code else None
-            }
-
-    return None
+    clear_times(run, cli=cli)
+    run.gage = new_gage
+    return True
 
 
 def get_data_files_status(run: CalibrationRun) -> dict:
@@ -515,12 +431,11 @@ def get_data_files_status(run: CalibrationRun) -> dict:
     :param run: The calibration run instance to check.
     :return: A dictionary with boolean values indicating the presence of observational, forcing, and geopackage files.
     """
-    observation_path = get_valid_path(run.observational_eds_file_path, lambda: get_observational_file_for_job(run))
+    geopackage_path = get_geopackage_file_path(run)
 
-    forcing_path = True if should_use_bmi_forcing(run) else get_valid_path(run.forcing_eds_dir_path, lambda: get_forcing_dir_for_job(run))
-
-    geopackage_path = get_valid_path(run.geopackage_eds_file_path, lambda: get_single_file(get_geopackage_dir_for_job(run)))
-
-    return {'observational': bool(observation_path),
-            'forcing': bool(forcing_path),
-            'geopackage': bool(geopackage_path)}
+    # TODO Talk to Richard about this.  Do we really need Obs status?
+    return {
+        'observational': True,
+        'forcing': True,
+        'geopackage': bool(geopackage_path)
+    }

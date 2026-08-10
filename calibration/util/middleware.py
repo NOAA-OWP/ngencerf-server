@@ -1,3 +1,4 @@
+import json
 import logging
 import time
 
@@ -8,6 +9,7 @@ from django.utils.deprecation import MiddlewareMixin
 logger = logging.getLogger(__name__)
 
 CALIBRATION_PREFIX = "/calibration/"
+AUTH_PREFIX = "/auth/"
 
 
 class TimingMiddleware:
@@ -61,48 +63,99 @@ class TimingMiddleware:
         return response
 
 
-class LogUnmatchedCalibrationRequestsMiddleware(MiddlewareMixin):
+class ApiRequestDiagnosticsMiddleware(MiddlewareMixin):
     """
-    Logs requests to /calibration/* that never reach DRF views
-    and would normally only show 'Not Found' or 'Method Not Allowed'.
+    Logs diagnostic details for failed API requests.
     """
 
-    def process_view(self, request, view_func, view_args, view_kwargs):
-        # If a view is matched, do nothing
+    def process_request(self, request):
+        path = request.path
+
+        if not path.startswith((CALIBRATION_PREFIX, AUTH_PREFIX)):
+            return None
+
+        try:
+            raw_body = request.body.decode("utf-8", errors="ignore")
+
+            if "application/json" in request.META.get("CONTENT_TYPE", ""):
+                parsed = json.loads(raw_body)
+                sanitized = redact_sensitive_data(parsed)
+                request._diagnostic_body = json.dumps(sanitized)
+            else:
+                request._diagnostic_body = raw_body
+
+        except Exception as e:
+            request._diagnostic_body = f"<unreadable: {type(e).__name__}: {e}>"
+
         return None
 
     def process_response(self, request, response):
         path = request.path
 
         # Only inspect calibration endpoints
-        if not path.startswith(CALIBRATION_PREFIX):
+        if not path.startswith((CALIBRATION_PREFIX, AUTH_PREFIX)):
             return response
 
-        # Case: URL not found or method not allowed
-        if response.status_code in (404, 405):
-            try:
-                user = getattr(request, "user", None)
-                user_str = (
-                    user.email
-                    if hasattr(user, "email") and user.is_authenticated
-                    else "Anonymous"
-                )
-            except Exception:
-                user_str = "Unknown"
+        body = getattr(request, "_diagnostic_body", "<not captured>")
 
-            # Best-effort body capture
-            try:
-                body = request.body.decode("utf-8", errors="ignore")
-            except Exception:
-                body = "<unreadable>"
+        try:
+            user = getattr(request, "user", None)
+            user_str = (
+                user.email
+                if hasattr(user, "email") and user.is_authenticated
+                else "Anonymous"
+            )
+        except Exception:
+            user_str = "Unknown"
 
-            user_agent = request.META.get("HTTP_USER_AGENT", "")
-            ip = request.META.get("REMOTE_ADDR")
+        user_agent = request.META.get("HTTP_USER_AGENT", "")
+        ip = request.META.get("REMOTE_ADDR")
 
+        if path.startswith(CALIBRATION_PREFIX) and response.status_code in (404, 405):
             logger.warning(
                 f"UNMATCHED API REQUEST: {path} "
                 f"method={request.method} user={user_str} ip={ip} "
                 f"user_agent='{user_agent}' body='{body}'"
             )
 
+        elif path.startswith(AUTH_PREFIX) and response.status_code >= 400:
+            try:
+                response_body = response.content.decode("utf-8", errors="ignore")
+            except Exception as e:
+                response_body = f"<unreadable: {type(e).__name__}: {e}>"
+
+            logger.warning(
+                f"AUTH API REQUEST FAILED: {path} "
+                f"method={request.method} status={response.status_code} "
+                f"user={user_str} ip={ip} "
+                f"content_type='{request.META.get('CONTENT_TYPE', '')}' "
+                f"user_agent='{user_agent}' "
+                f"body='{body}' response_body='{response_body}'"
+            )
+
         return response
+
+
+SENSITIVE_FIELDS = {
+    "password",
+    "re_password",
+    "current_password",
+    "new_password",
+    "token",
+    "access",
+    "refresh",
+    "mfa_token",
+}
+
+
+def redact_sensitive_data(value):
+    if isinstance(value, dict):
+        return {
+            k: ("***REDACTED***" if k in SENSITIVE_FIELDS else redact_sensitive_data(v))
+            for k, v in value.items()
+        }
+
+    if isinstance(value, list):
+        return [redact_sensitive_data(v) for v in value]
+
+    return value

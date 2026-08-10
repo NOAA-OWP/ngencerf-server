@@ -77,42 +77,52 @@ aws_secret_access_key = <access_key>
 aws_session_token = <token>
 ```
 
-# Archive Directory
+# Archive/Zips Directory
 
-In `ngencerf/.env`, Define an s3 bucket/directory that will be used for archiving.
+In `ngencerf/.env`, Define an s3 bucket/directory that will be used for archiving and zipping
 
 In AWS Workspace, you can use any directory that you have write access to.  For example,
 ```
 `NGENCERF_ARCHIVE_S3_PATH=s3://ngwpc-dev/peter.kronenberg/ngencerf_archive/`
+`NGENCERF_ARCHIVE_S3_PATH=s3://ngwpc-dev/peter.kronenberg/ngencerf_zips/`
  ```
-Use your own directory. Do not sure a directory with someone else
+Use your own directory. Do not share a directory with someone else
 
 For Parallel Works, you must use the directory corresponding to the cluster and for which you have read/write access.
-The bucket used is `s3://ngwpc-ngencerf-archive` and the directory will be unique for each cluster, e.g., `s3://ngwpc-ngencerf-archive/integration`
+The bucket used is `s3://ngwpc-ngencerf-archive` for archiving and `s3://ngwpc-ngencerf-zips` for zip files, 
+and the directory will be unique for each cluster, e.g., `s3://ngwpc-ngencerf-archive/integration`
 ```
 `NGENCERF_ARCHIVE_S3_PATH=s3://ngwpc-ngencerf-archive/integration
+`NGENCERF_ARCHIVE_S3_PATH=s3://ngwpc-ngencerf-zips/integration
 ```
 
 **_Important:_**
 Since S3 directories aren't real directories, they will not persist if they are empty.  So it is important to
-create a dummy file in the directory that will remain there.  Enter this command
+create a dummy file in the directory that will remain there.  Enter these commands
 ```
 printf "Do not delete.\nThis placeholder file ensures this S3 prefix is retained.\nS3 does not preserve empty directories; at least one object must exist.\n" \
   | aws s3 cp - s3://ngwpc-dev/peter.kronenberg/ngencerf_archive/.keep
+  printf "Do not delete.\nThis placeholder file ensures this S3 prefix is retained.\nS3 does not preserve empty directories; at least one object must exist.\n" \
+  | aws s3 cp - s3://ngwpc-dev/peter.kronenberg/ngencerf_zips/.keep
 ```
 or
 ```
 printf "Do not delete.\nThis placeholder file ensures this S3 prefix is retained.\nS3 does not preserve empty directories; at least one object must exist.\n" \
   | aws s3 cp - s3://ngwpc-ngencerf-archive/integration/.keep
+printf "Do not delete.\nThis placeholder file ensures this S3 prefix is retained.\nS3 does not preserve empty directories; at least one object must exist.\n" \
+  | aws s3 cp - s3://ngwpc-ngencerf-zips/integration/.keep
 ```
 
 # Static Files
 There are some static files that are required for Ngen to run.  They should be in a directory under the data directory at `/ngencerf/data` called `ngen-static-files`.  
 
-The data for the `ngen-static-files` directory is in 2 locations.  Copy everything from  `s3://ngwpc-dev/ngen-static-files/` to
-`/ngencerf/data/ngen-static-files` or `/ngencerf-app/data/ngen-cal-data/ngen-static-files`
+The data for the `ngen-static-files` directory is in several locations.  Execxute the following commands to copy everything 
+to`/ngencerf/data/ngen-static-files` (dev) or `/ngencerf-app/data/ngen-cal-data/ngen-static-files` (prod)
 ```
 aws s3 cp --recursive s3://ngwpc-dev/ngen-static-files /ngencerf/data/ngen-static-files
+aws s3 cp s3://ngwpc-hydrofabric/sac_sma_params_2.2.csv /ngencerf/data/ngen-static-files/module_parameter_files/sac-sma/
+aws s3 cp s3://ngwpc-hydrofabric/snow17_params_2.2.csv /ngencerf/data/ngen-static-files/module_parameter_files/snow-17/
+aws s3 cp s3://ngwpc-dev/rte-test-data/esmf/ /ngencerf/data/ngen-static-files/forcing_static_dir/ --recursive
 ```
 
 In addition, copy the directory `module_parameter_files` and all its contents from 
@@ -164,8 +174,7 @@ ngen-static-files/
 │  ├── lasam
 │  ├── noah-owp-modular
 │  └── ueb
-├── nwm_retrospective
-└── parquet
+└── nwm_retrospective
 
 
 
@@ -350,8 +359,6 @@ peter.a.kronenberg@U-12SMBYD5450YI:~$ tree /ngencerf -L 4 -n -A
         │       ├── GENPARM.TBL
         │       ├── MPTABLE.TBL
         │       └── SOILPARM.TBL
-        ├── parquet
-        │   └── conus_model_attributes.parquet
         └── nwm_retrospective
             ├── 01118000.csv
             ├── 01121000.csv

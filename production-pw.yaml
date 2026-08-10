@@ -24,9 +24,11 @@ services:
       dockerfile: ./Dockerfile.production-pw
       context: .
       args:
-        - MSWM_TAG=${MSWM_TAG:-development}
-        - NGEN_FORCING_TAG=${NGEN_FORCING_TAG:-development}
-        - DATA_ASSIMILATION_TAG=${DATA_ASSIMILATION_TAG:-development}
+        - DATA_ASSIMILATION_REF=${DATA_ASSIMILATION_REF:-development}
+        - EWTS_REF=${EWTS_REF:-development}
+        - MSW_MGR_REF=${MSW_MGR_REF:-development}
+        - NGEN_REF=${NGEN_REF:-development}
+        - NGEN_FORCING_REF=${NGEN_FORCING_REF:-development}
         - CACHE_BUST=${CACHE_BUST:-1}
     image: ghcr.io/ngwpc/ngencerf-server:${NGENCERF_SERVER_TAG:-latest}
     pull_policy: always
@@ -40,7 +42,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - /ngencerf-app/aws:/root/.aws:ro
     environment:
-      - NGEN_CAL_DATA_PATH=${NGEN_CAL_DATA_PATH}
+      - NGEN_CAL_DATA_PATH=${NGEN_CAL_DATA_PATH:-/ngencerf-app/data/ngen-cal-data/}
+      - NGENCERF_UI_TAG=${NGENCERF_UI_TAG:-latest}
     env_file:
       - path: ./cerfServer/.env-docker-prod
         required: true

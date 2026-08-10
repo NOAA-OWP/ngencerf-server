@@ -8,7 +8,27 @@
 # was skipped. Keeping them separate ensures both files always rotate.
 #
 # To trigger manually in development:
-# $ /usr/sbin/logrotate -s ./logrotate.status -f ./logrotate-ngencerf.dev.conf
+# $ /usr/sbin/logrotate -s ~/.logrotate-status -f ./logrotate-ngencerf.dev.conf
+#
+# DIFFERENCES FROM PRODUCTION:
+# - Uses copytruncate in development because both log writers keep their
+#   files open:
+#       * ngencerf.log is written through: exec > >(tee -a "$LOGFILE_DEV") 2>&1
+#       * ngencerf_db.log is written by Django logging.FileHandler
+#   Rename-and-recreate rotation would not work correctly unless each writer
+#   explicitly re-opened its log file.
+# - Does NOT use create, because in this dev setup the existing log writers
+#   would continue writing to their already-open file descriptors after a
+#   rename-and-recreate rotation.
+# - Does NOT use the Gunicorn postrotate USR1 signal block, because Gunicorn
+#   is not running in normal development mode.
+# - Does NOT use "su root root", because this file must be generic for any
+#   developer account and should not assume root ownership.
+# - Does NOT use minsize 10M, unlike production. In development, it is useful
+#   to allow scheduled rotations to occur consistently even when logs are small,
+#   so log history remains predictable during testing and debugging.
+# - Keeps compression enabled in dev to reduce disk usage from repeated local
+#   rotations, since developers may generate logs quickly during iterative work.
 
 
 # Rotate the main application log
@@ -18,23 +38,19 @@ __LOG_DIR__/ngencerf.log {
 
     # keep 14 rotations
     rotate 14
-    # gzip older logs
-    compress
-    # don’t compress the most recent rotated log
-    delaycompress
     # don’t error if file missing
     missingok
     # don’t rotate empty logs
     notifempty
-    sharedscripts
 
-    # Create a fresh file owned by the invoking user (dev environment)
-    create 644 - -
-
-    # Tell Gunicorn master to reopen logs cleanly
-    postrotate
-        pkill -USR1 -f "gunicorn: master"
-    endscript
+    # Truncate in place so the existing tee writer continues writing
+    # to the same file without needing a reopen signal or restart.
+    #
+    # DEV NOTE:
+    # copytruncate can theoretically lose a small amount of log output
+    # during the copy/truncate window, but it is the correct tradeoff
+    # for this local development setup.
+    copytruncate
 
     # use date- and time-based rotation
     dateext
@@ -57,15 +73,10 @@ __LOG_DIR__/ngencerf_db.log {
     missingok
     # don’t rotate empty logs
     notifempty
-    sharedscripts
 
-    # Create a fresh file owned by the invoking user (dev environment)
-    create 644 - -
-
-    # Tell Gunicorn master to reopen logs cleanly
-    postrotate
-        pkill -USR1 -f "gunicorn: master"
-    endscript
+    # Truncate in place so Django's logging.FileHandler keeps writing
+    # to the same file without needing a reopen signal or process restart.
+    copytruncate
 
     # use date- and time-based rotation
     dateext

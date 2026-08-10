@@ -1,5 +1,14 @@
 #! /bin/bash
 
+MSWM_REPO="https://github.com/NGWPC/nwm-msw-mgr.git"
+DATA_ASSIM_REPO="https://github.com/NGWPC/nwm-data-assimilation.git"
+
+# Branches/tags for git repos
+#MSWM_BRANCH='jwade_NGWPC-7589_add_aet_rootzone'
+MSWM_BRANCH='development'
+DATA_ASSIMILATION_BRANCH='development'
+NGEN_FORCING_TAG='development'
+
 #=======================================================================
 # Script must be sourced for 'activate' mode
 #=======================================================================
@@ -11,33 +20,65 @@ fi
 
 #=======================================================================
 # Resolve script directory
+#   Ordering prerequisite:
+#     - SCRIPT_DIR must be defined before any code/function that references
+#       files relative to the repo (manage.py, requirements.txt, templates, etc.)
 #=======================================================================
 SCRIPT_DIR="$(dirname "$(realpath "${BASH_SOURCE[0]}")")"
 
-#=======================================================================
-# Load environment variables
-#   - cerfserver.env is ALWAYS loaded
-#   - .env and .env-override are loaded ONLY when NOT in Docker
-#=======================================================================
-set -a  # auto-export
+# Use the same directory variable for cerfServer (needed by ensure_virtualenv)
+cerfServer="$SCRIPT_DIR"
 
-# Always load cerfserver.env
+#=======================================================================
+# Early env bootstrap
+#   - Needed by ensure_virtualenv and Docker detection
+#   - Kept near the top so the 'activate' fast path can exit early
+#=======================================================================
+set -a
+# shellcheck source=./cerfserver.env
 source "$SCRIPT_DIR/cerfserver.env"
+set +a
 
-#-----------------------------------------------------------------------
-# Detect Docker (AFTER cerfserver.env is loaded)
-#-----------------------------------------------------------------------
 IN_DOCKER=false
 if [ "${CERF_VENV}" = "Docker" ]; then
     IN_DOCKER=true
 fi
-readonly IN_DOCKER
 
-echo "IN_DOCKER=$IN_DOCKER"
 
-#-----------------------------------------------------------------------
-# Load optional local-only env files
-#-----------------------------------------------------------------------
+#=======================================================================
+# Function: ensure_virtualenv
+#   - If CERF_VENV is empty or “Docker”, do nothing
+#   - If the directory "$cerfServer/$CERF_VENV" does not exist, create it
+#   - Activate that venv so “python3” and “pip” later refer to the venv
+#=======================================================================
+ensure_virtualenv() {
+    # Requires: CERF_VENV loaded, IN_DOCKER set, cerfServer set
+    if [ -n "${CERF_VENV}" ] && [ "$IN_DOCKER" = false ]; then
+        VENV_PATH="$cerfServer/${CERF_VENV}"
+
+        if [ ! -d "$VENV_PATH" ]; then
+            echo "Virtual environment not found at $VENV_PATH. Creating it..."
+            python3.11 -m venv "$VENV_PATH"
+        fi
+
+        source "$VENV_PATH/bin/activate"
+        echo "Activated virtual environment at $VENV_PATH"
+    fi
+}
+
+#=======================================================================
+# Special case: if the first argument is "activate", just activate the
+# venv and return immediately before any other startup work.
+#=======================================================================
+if [ "$1" == "activate" ]; then
+    ensure_virtualenv
+    return 0
+fi
+
+#=======================================================================
+# Load optional local-only env files (non-Docker only)
+#   Prerequisite: optional; missing files are not fatal
+#=======================================================================
 if [ "$IN_DOCKER" = false ]; then
     echo "Non-Docker environment: checking for local env files"
 
@@ -46,38 +87,39 @@ if [ "$IN_DOCKER" = false ]; then
 
     if [ -f "$ENV_FILE" ]; then
         echo "Loaded env file: $ENV_FILE"
+        # shellcheck source=./cerfServer/.env
         source "$ENV_FILE"
     else
         echo "WARNING: env file not found: $ENV_FILE"
     fi
 
-    # When running locally, the override file usually will not exist, so we won't issue an error
     if [ -f "$ENV_OVERRIDE_FILE" ]; then
         echo "Loaded env override file: $ENV_OVERRIDE_FILE"
+        # shellcheck source=./cerfServer/.env-override
         source "$ENV_OVERRIDE_FILE"
     fi
 else
     echo "Docker environment detected: skipping local env files (.env, .env-override)"
 fi
 
-set +a
-
 #=======================================================================
 # Validate RUN_CERF_FLAG_DIRECTORY
+#   Ordering prerequisite:
+#     - Must happen before any code that writes marker files into it:
+#         * SHA markers (.mswm.sha, .data_assimilation_engine.sha)
+#         * gage flags/fingerprints (.load_gages, .gages_fingerprint)
 #=======================================================================
 if [ -z "${RUN_CERF_FLAG_DIRECTORY}" ]; then
     echo "WARNING: RUN_CERF_FLAG_DIRECTORY is not set in cerfserver.env; defaulting to ./"
     RUN_CERF_FLAG_DIRECTORY="./"
 fi
-
-# Normalize: remove any trailing slash so we don't end up with // in paths
 RUN_CERF_FLAG_DIRECTORY="${RUN_CERF_FLAG_DIRECTORY%/}"
 
-# Use the same directory variable for cerfServer
-cerfServer="$SCRIPT_DIR"
-
 #=======================================================================
-# Bootstrap logging
+# Bootstrap logging (MUST happen before any run_manage_command calls)
+#   Ordering prerequisite:
+#     - Must happen before any run_manage_command calls, migrations, init_sql, etc.
+#     - Defines LOGFILE_DEV and saves FD 3/4 used by run_manage_command.
 #=======================================================================
 mkdir -p "$cerfServer/logs"
 LOGFILE_DEV="$cerfServer/logs/ngencerf.log"
@@ -89,25 +131,13 @@ exec 3>&1 4>&2
 exec > >(tee -a "$LOGFILE_DEV") 2>&1
 
 #=======================================================================
-# Function: ensure_virtualenv
-#   - If CERF_VENV is empty or “Docker”, do nothing
-#   - If the directory "$cerfServer/$CERF_VENV" does not exist, create it
-#   - Activate that venv so “python3” and “pip” later refer to the venv
+# Fingerprint globals (RUN_CERF_FLAG_DIRECTORY must already be valid)
+#   Ordering prerequisite:
+#     - Must be defined before store_gages_fingerprint is ever called.
 #=======================================================================
-ensure_virtualenv() {
-    if [ -n "${CERF_VENV}" ] && [ "$IN_DOCKER" = false ]; then
-        VENV_PATH="$cerfServer/${CERF_VENV}"
-
-        if [ ! -d "$VENV_PATH" ]; then
-            echo "Virtual environment not found at $VENV_PATH. Creating it..."
-            python3.11 -m venv "$VENV_PATH"
-        fi
-
-        # shellcheck disable=SC1090
-        source "$VENV_PATH/bin/activate"
-        echo "Activated virtual environment at $VENV_PATH"
-    fi
-}
+CERF_GAGES_FPRINT="${RUN_CERF_FLAG_DIRECTORY}/.gages_fingerprint"
+echo "Gages fingerprint $CERF_GAGES_FPRINT"
+[ -e "$CERF_GAGES_FPRINT" ] && ls -al "$CERF_GAGES_FPRINT"
 
 #=======================================================================
 # Function: check_aws_credentials_early
@@ -116,9 +146,12 @@ ensure_virtualenv() {
 #   - Skips if aws CLI is not installed
 #   - Fails startup if credentials are invalid/expired
 #   - Logs the resolved identity ARN on success
+#
+#   Prerequisites:
+#     - IN_DOCKER has been set
 #=======================================================================
 check_aws_credentials_early() {
-    # Skip in Docker.  We'll rely on the server check
+    # Skip in Docker.
     if [ "$IN_DOCKER" = true ]; then
         echo "Skipping AWS credential check (Docker environment)"
         return 0
@@ -144,7 +177,7 @@ check_aws_credentials_early() {
     else
         echo "ERROR: AWS credentials are missing, expired, or invalid"
 
-         # If this script is being sourced, don't kill the caller's shell.
+        # If this script is being sourced, don't kill the caller's shell.
         if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
             return 2
         fi
@@ -156,9 +189,18 @@ check_aws_credentials_early() {
 
 #=======================================================================
 # Function: run_manage_command
-#   - Temporarily un-redirect stdout/stderr for interactive output
-#   - Runs “python manage.py <args…>”
-#   - Then re-redirects stdout/stderr back to the logfile
+#
+# PREREQUISITES (must be true before calling this function):
+#   - Logging must already be initialized
+#   - LOGFILE_DEV must be defined
+#   - FD 3 and 4 must contain the original stdout/stderr:
+#         exec 3>&1 4>&2
+#   - stdout/stderr must currently be redirected to LOGFILE_DEV
+#
+# REASON:
+#   This function temporarily restores the original stdout/stderr for
+#   interactive Django output, then re-applies the logfile redirection.
+#   If those file descriptors or variables are missing, output will break.
 #=======================================================================
 run_manage_command() {
     echo "Running manage.py $*"
@@ -177,52 +219,11 @@ run_manage_command() {
     return $status
 }
 
-#=======================================================================
-# Special case: if the first argument is “manage”, just run manage.py <args>
-#=======================================================================
-if [ "$1" == "manage" ]; then
-    shift
-    ensure_virtualenv  # Activates and creates virtualenv if needed
-    run_manage_command "$@"
-    exit $?
-fi
 
-#=======================================================================
-# Special case: if the first argument is "activate", just activate the venv and return
-#=======================================================================
-if [ "$1" == "activate" ]; then
-    ensure_virtualenv  # Activates and creates virtualenv if needed
-    echo "Virtual environment activated. You can now run Python commands in this environment."
-    # Return to stop further execution but not exit the terminal
-    return 0
-fi
-
-check_aws_credentials_early
-echo
-echo --------------------------------------------------------
-
-
-#=======================================================================
-# Parse flags
-#   --load-gages
-#   auto_reload   (enables Django auto-reloader; disables --noreload)
-#=======================================================================
-LOAD_GAGE_DATA=false
-AUTO_RELOAD=false
-
-for arg in "$@"; do
-  case $arg in
-    --load-gages)
-      LOAD_GAGE_DATA=true
-      ;;
-    auto_reload)
-      AUTO_RELOAD=true
-      ;;
-  esac
-done
 
 #=======================================================================
 # Function: generate_git_info
+#
 #   - Writes <repo>_git_info.json with commit metadata similar to how the Dockerfile does it
 #=======================================================================
 generate_git_info() {
@@ -250,13 +251,11 @@ generate_git_info() {
 # Fingerprint logic for init_gages inputs
 #   - Computes a stable SHA256 for init_gages.py + files in gage_data/
 #   - Stores/compares to decide whether to re-run init_gages
+#
+#   Prerequisites:
+#     - SCRIPT_DIR must be set (paths are relative to it)
+#     - CERF_GAGES_FPRINT must be set before store_gages_fingerprint is called
 #=======================================================================
-CERF_GAGES_FPRINT="${RUN_CERF_FLAG_DIRECTORY}/.gages_fingerprint"
-echo "Gages fingerprint $CERF_GAGES_FPRINT"
-[ -e "$CERF_GAGES_FPRINT" ] && ls -al "$CERF_GAGES_FPRINT"
-
-
-# Compute a stable combined SHA256 of init_gages.py + all files in gage_data
 compute_gages_fingerprint() {
     set -o pipefail
     local base="$SCRIPT_DIR/calibration/management/commands"
@@ -281,6 +280,7 @@ compute_gages_fingerprint() {
 }
 
 store_gages_fingerprint() {
+    # Prerequisite: CERF_GAGES_FPRINT is set to a writable path
     local fp="$1"
     if [ -z "$fp" ]; then
         echo "store_gages_fingerprint: empty fingerprint" >&2
@@ -290,8 +290,12 @@ store_gages_fingerprint() {
     echo "Saved gage fingerprint: ${fp:0:12}… -> $CERF_GAGES_FPRINT"
 }
 
+
 #=======================================================================
 # Helper: run init_gages and store a provided fingerprint (or recompute if empty)
+#   Ordering prerequisites:
+#     - run_manage_command must be usable (logging bootstrapped + FD 3/4 saved)
+#     - CERF_GAGES_FPRINT must be set before calling store_gages_fingerprint
 #=======================================================================
 run_init_gages_and_store() {
     local fp="$1"
@@ -397,6 +401,7 @@ ensure_superuser() {
     fi
 }
 
+
 #=======================================================================
 # Function: run_migrate_with_showmigrations
 #   - Always runs 'showmigrations' immediately after 'migrate'.
@@ -419,48 +424,194 @@ run_migrate_with_showmigrations() {
     fi
 }
 
+validate_git_ref_or_exit() {
+    local repo_url="$1"
+    local ref="$2"
+    local label="$3"  # just for nicer error messages
+
+    # Allow exact commit SHA refs (7-40 hex chars)
+    if [[ "$ref" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+        return 0
+    fi
+
+    # Check for branch or tag on the remote
+    if git ls-remote --exit-code --heads "$repo_url" "$ref" >/dev/null 2>&1; then
+        return 0
+    fi
+    if git ls-remote --exit-code --tags "$repo_url" "$ref" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    echo "ERROR: Invalid git ref for ${label}: '${ref}'"
+    echo "ERROR: Not found as branch or tag on: ${repo_url}"
+    exit 2
+}
+
+#=======================================================================
+# Validate git refs early so we fail before any installs or setup work
+#=======================================================================
+validate_git_ref_or_exit "$MSWM_REPO" "$MSWM_BRANCH" "mswm"
+validate_git_ref_or_exit "$DATA_ASSIM_REPO" "$DATA_ASSIMILATION_BRANCH" "data_assimilation_engine"
+
+#=======================================================================
+# Special case: if the first argument is “manage”, just run manage.py <args>
+#=======================================================================
+if [ "$1" == "manage" ]; then
+    shift
+    ensure_virtualenv  # Activates and creates virtualenv if needed
+    run_manage_command "$@"
+    exit $?
+fi
+
+
+
+check_aws_credentials_early
+echo
+echo --------------------------------------------------------
+
+
+#=======================================================================
+# Parse flags
+#   --load-gages
+#   auto_reload   (enables Django auto-reloader; disables --noreload)
+#=======================================================================
+LOAD_GAGE_DATA=false
+AUTO_RELOAD=false
+
+for arg in "$@"; do
+  case $arg in
+    --load-gages)
+      LOAD_GAGE_DATA=true
+      ;;
+    auto_reload)
+      AUTO_RELOAD=true
+      ;;
+  esac
+done
+
 #=======================================================================
 # Non-Docker environment setup (packages, deps, git info)
 #=======================================================================
 if [ "$IN_DOCKER" = false ]; then
-    # Docker takes care of installing dependencies in the Dockerfile
     if [ -n "${CERF_VENV}" ]; then
-        ensure_virtualenv  # Activates and creates virtualenv if needed
+        ensure_virtualenv
 
-        # Install all requirements
+        echo
+        echo --------------------------------------------------------
         echo "Upgrading pip"
         pip install --upgrade pip
         pip --version
+
+        echo
+        echo --------------------------------------------------------
         echo "Installing requirements.txt"
         pip install -r "$SCRIPT_DIR/requirements.txt"
 
-        # Doing a pip install with requirements.txt does not reliably pick up changes to the other repos, so we have to force a re-install every time
-        #MSWM_BRANCH='jwade_NGWPC-7589_add_aet_rootzone'
-        MSWM_BRANCH='development'
-        DATA_ASSIMILATION_BRANCH='development'
-        NGEN_FORCING_TAG='development'
+        FORCE_REINSTALL_VCS="${FORCE_REINSTALL_VCS:-0}"
+
+        resolve_branch_sha() {
+            local repo_url="$1"
+            local branch="$2"
+            local sha
+            sha="$(git ls-remote "$repo_url" "refs/heads/${branch}" | awk '{print $1}')"
+            if [ -z "$sha" ]; then
+                echo "WARNING: Could not resolve SHA for $repo_url branch $branch (will reinstall as fallback)"
+                return 1
+            fi
+            echo "$sha"
+        }
+
+        should_reinstall_git_pkg() {
+            local pkg_name="$1"
+            local desired_sha="$2"
+            local sha_marker="$3"
+
+            if [ "$FORCE_REINSTALL_VCS" != "0" ]; then
+                echo "FORCE_REINSTALL_VCS=1; will reinstall $pkg_name"
+                return 0
+            fi
+
+            if ! pip show "$pkg_name" >/dev/null 2>&1; then
+                echo "$pkg_name not installed; will install"
+                return 0
+            fi
+
+            if [ ! -f "$sha_marker" ]; then
+                echo "No SHA marker for $pkg_name; will reinstall"
+                return 0
+            fi
+
+            if ! grep -qx "$desired_sha" "$sha_marker"; then
+                echo "$pkg_name SHA changed; will reinstall"
+                return 0
+            fi
+
+            echo "$pkg_name already at $desired_sha; skipping reinstall"
+            return 1
+        }
+
+        record_sha_marker() {
+            local sha="$1"
+            local sha_marker="$2"
+            echo "$sha" > "$sha_marker"
+        }
+
+
+        # requirements.txt does not reliably pick up changes in the git-installed repos.
+        # With SHA caching, reinstall when the branch tip SHA changes
+        # (or FORCE_REINSTALL_VCS=1). Do NOT use --no-deps here, because these
+        # packages may add or change dependencies in pyproject.toml.
 
         echo
-        echo "Installing mswm"
-        if pip show "mswm" > /dev/null 2>&1; then
-            # Package is installed, reinstall without dependencies
-            pip install --force-reinstall --no-deps --no-cache-dir "git+https://github.com/NGWPC/nwm-msw-mgr.git@${MSWM_BRANCH}"
+        echo --------------------------------------------------------
+        echo "Installing mswm from branch '$MSWM_BRANCH'"
+        MSWM_SHA_MARKER="${RUN_CERF_FLAG_DIRECTORY}/.mswm.sha"
+        if MSWM_SHA="$(resolve_branch_sha "$MSWM_REPO" "$MSWM_BRANCH")"; then
+            echo "mswm ${MSWM_BRANCH} -> ${MSWM_SHA}"
+            if should_reinstall_git_pkg "mswm" "$MSWM_SHA" "$MSWM_SHA_MARKER"; then
+                pip install --force-reinstall --no-cache-dir "git+${MSWM_REPO}@${MSWM_BRANCH}"
+                record_sha_marker "$MSWM_SHA" "$MSWM_SHA_MARKER"
+            fi
         else
-            # Package is not installed, install with dependencies
-            pip install "git+https://github.com/NGWPC/nwm-msw-mgr.git@${MSWM_BRANCH}"
+            # Fallback: could not resolve the branch SHA; revert to branch-based install behavior.
+            pip install --force-reinstall --no-cache-dir "git+${MSWM_REPO}@${MSWM_BRANCH}"
         fi
 
         echo
-        echo "Installing data_assimilation"
-        if pip show "data_assimilation" > /dev/null 2>&1; then
-            # Package is installed, reinstall without dependencies
-            pip install --force-reinstall --no-deps --no-cache-dir "git+https://github.com/NGWPC/data-assimilation-engine.git@${DATA_ASSIMILATION_BRANCH}"
+        echo --------------------------------------------------------
+        echo "Installing data_assimilation_engine from branch '$DATA_ASSIMILATION_BRANCH'"
+        DATA_ASSIM_SHA_MARKER="${RUN_CERF_FLAG_DIRECTORY}/.data_assimilation_engine.sha"
+        if DATA_ASSIM_SHA="$(resolve_branch_sha "$DATA_ASSIM_REPO" "$DATA_ASSIMILATION_BRANCH")"; then
+            echo "data_assimilation_engine ${DATA_ASSIMILATION_BRANCH} -> ${DATA_ASSIM_SHA}"
+            if should_reinstall_git_pkg "data_assimilation_engine" "$DATA_ASSIM_SHA" "$DATA_ASSIM_SHA_MARKER"; then
+                pip install --force-reinstall --no-cache-dir "git+${DATA_ASSIM_REPO}@${DATA_ASSIMILATION_BRANCH}"
+                record_sha_marker "$DATA_ASSIM_SHA" "$DATA_ASSIM_SHA_MARKER"
+            fi
         else
-            # Package is not installed, install with dependencies
-            pip install "git+https://github.com/NGWPC/data-assimilation-engine.git@${DATA_ASSIMILATION_BRANCH}"
-
+            # Fallback: could not resolve the branch SHA; revert to branch-based install behavior.
+            pip install --force-reinstall --no-cache-dir "git+${DATA_ASSIM_REPO}@${DATA_ASSIMILATION_BRANCH}"
         fi
 
+        echo
+        echo --------------------------------------------------------
+        echo "Running pip check..."
+        if ! pip check; then
+            echo
+            echo "######################################################################"
+            echo "##############################  WARNING  #############################"
+            echo "######################################################################"
+            echo "# pip check found broken requirements. Continuing startup anyway."
+            echo "# You may see runtime import errors or unexpected behavior until deps are fixed."
+            echo "# To diagnose: run 'pip check' and reinstall the missing/conflicting packages."
+            echo "# If you suspect the git-installed packages are in a bad state, uninstall them and rerun this script:"
+            echo "#   pip uninstall -y data_assimilation_engine"
+            echo "#   pip uninstall -y mswm"
+            echo "######################################################################"
+            echo
+        fi
+
+        echo
+        echo --------------------------------------------------------
         generate_git_info
 
         echo
@@ -626,20 +777,29 @@ else
 
     echo "Not running in Docker: cloning bmi_forcing_templates from ${NGEN_FORCING_URL}, branch: ${NGEN_FORCING_TAG}"
 
-    cd "$STATIC_DIR"
+    cd "$STATIC_DIR" || {
+    echo "ERROR: could not cd to $STATIC_DIR"
+    exit 1
+    }
 
     git clone --depth 1 --filter=blob:none --sparse \
         -b "${NGEN_FORCING_TAG}" \
         "$NGEN_FORCING_URL" tmp-ngen-forcing
 
-    cd tmp-ngen-forcing
+    cd tmp-ngen-forcing || {
+    echo "ERROR: could not cd to tmp-ngen-forcing"
+    exit 1
+    }
     git sparse-checkout set NextGen_Forcings_Engine_BMI/BMI_NextGen_Configs/config_templates
 
     # Move *contents* of config_templates into TARGET_DIR
     cp -a NextGen_Forcings_Engine_BMI/BMI_NextGen_Configs/config_templates/. \
         "$TARGET_DIR"/
 
-    cd "$STATIC_DIR"
+    cd "$STATIC_DIR" || {
+    echo "ERROR: could not cd to $STATIC_DIR"
+    exit 1
+    }
     rm -rf tmp-ngen-forcing
 
     echo "bmi_forcing_templates updated successfully in $TARGET_DIR (non-Docker)."
@@ -708,14 +868,14 @@ if [ "$ASGI_FLAG" = "1" ] || [ "$PROD_FLAG" = "1" ]; then
     # --graceful-timeout extra time to finish in-flight requests on restart
     exec gunicorn cerfServer.asgi:application \
             --name ngencerf \
-            --workers ${WORKERS} \
+            --workers "${WORKERS}" \
             --worker-class uvicorn.workers.UvicornWorker \
-            --max-requests ${GUNICORN_MAX_REQUESTS:-300} \
-            --max-requests-jitter ${GUNICORN_MAX_REQUESTS_JITTER:-100} \
+            --max-requests "${GUNICORN_MAX_REQUESTS:-300}" \
+            --max-requests-jitter "${GUNICORN_MAX_REQUESTS_JITTER:-100}" \
             --preload \
-            --bind ${BIND_ADDR} \
-            --timeout ${TIMEOUT} \
-            --graceful-timeout ${GUNICORN_GRACEFUL_TIMEOUT:-30} \
+            --bind "${BIND_ADDR}" \
+            --timeout "${TIMEOUT}" \
+            --graceful-timeout "${GUNICORN_GRACEFUL_TIMEOUT:-30}" \
             --config "$(dirname "$0")/gunicorn_conf.py"
 else
     echo "Launching Django development server (runserver)"

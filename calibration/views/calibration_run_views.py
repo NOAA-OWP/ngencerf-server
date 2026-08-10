@@ -1,6 +1,5 @@
 import json
 import logging
-import os
 from datetime import datetime, timezone
 
 import requests
@@ -18,24 +17,27 @@ from calibration.enums import StatusEnum, ValidationType
 from calibration.enums_vanilla import JobType, SecondaryDataEnum
 from calibration.models import Iteration, ValidationRun, ForecastRun, CalibrationRun, Status, ColdStartRun, VerificationRun
 from calibration.models.base_run import BaseRun
+from calibration.models.hindcast_run import HindcastRun
 from calibration.run_util.run_common import cancel_job_common, submit_job
 from calibration.run_util.run_ngen_cal_pw import SlurmCallbackStatusEnum, run_calibration_job_callback_pw, run_validation_job_callback_pw, \
-    run_forecast_job_callback_pw, run_cold_start_job_callback_pw, run_verification_job_callback_pw
-from calibration.util.calibration_validators import CalibrationRunSerializer, GenericResponseSerializer, \
+    run_forecast_job_callback_pw, run_cold_start_job_callback_pw, run_verification_job_callback_pw, run_hindcast_job_callback_pw
+from calibration.util.calibration_validators import CalibrationRunIdSerializer, GenericResponseSerializer, \
     ErrorResponseSerializer, ReportIterationSerializer, SubmitCalibrationJobResponseSerializer, GetIterationsResponseSerializer, \
     CalibrationJobSlurmCallbackRequestSerializer, ValidationJobSlurmCallbackRequestSerializer, EmptySerializer, \
     GetStatusForCalibrationResponseSerializer, GetStatusForComparisonRequestSerializer, GetStatusForComparisonResponseSerializer, \
-    CalibrationOrValidationOrColdStartOrForecastOrVerificationRunSerializer, ForecastJobSlurmCallbackRequestSerializer, CancelJobResponseSerializer, \
-    ValidationRunSerializer, GenericResponseSerializerWithValidator, RunCalibrationJob, ColdStartJobSlurmCallbackRequestSerializer, \
+    CalibrationOrValidationOrColdStartOrForecastOrHindcastOrVerificationRunIdSerializer, ForecastJobSlurmCallbackRequestSerializer, \
+    CancelJobResponseSerializer, \
+    ValidationRunIdSerializer, GenericResponseSerializerWithValidator, RunCalibrationJob, ColdStartJobSlurmCallbackRequestSerializer, \
     VerificationJobSlurmCallbackRequestSerializer, GetStatusForValidationResponseSerializer, \
-    GetStatusForForecastResponseSerializer, GetStatusForVerificationResponseSerializer, GetStatusRequestSerializer
+    GetStatusForForecastResponseSerializer, GetStatusForVerificationResponseSerializer, GetStatusRequestSerializer, \
+    HindcastJobSlurmCallbackRequestSerializer, GetStatusForHindcastResponseSerializer
 from calibration.views import ngen_cal_input
 from calibration.views.calibration_secondary_data_views import generate_secondary_ts_data
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import ResponseError, get_calibration_run, handle_exceptions, validate_response, validate_request, \
     generate_custom_token, TOKEN_SLURM_SCOPE, get_validation_run, get_forecast_run, get_user_email, \
     get_job_description, get_elapsed_str, readonly_transaction, auth_scope_required, get_cold_start_run, get_verification_run, \
-    join_with_or, get_calibration_runs_bulk
+    join_with_or, get_calibration_runs_bulk, get_hindcast_run
 from calibration.views.end_of_job_processing import read_calibration_output
 
 logger = logging.getLogger(__name__)
@@ -118,6 +120,7 @@ def get_status(request: Request) -> Response:
     calibration_run_id = validator.get('calibration_run_id')
     validation_run_id = validator.get('validation_run_id')
     forecast_run_id = validator.get('forecast_run_id')
+    hindcast_run_id = validator.get('hindcast_run_id')
     verification_run_id = validator.get('verification_run_id')
 
     include_performance_metrics = validator.get('include_performance_metrics')
@@ -128,11 +131,14 @@ def get_status(request: Request) -> Response:
         serializer_class = GetStatusForValidationResponseSerializer
     elif forecast_run_id:
         serializer_class = GetStatusForForecastResponseSerializer
+    elif hindcast_run_id:
+        serializer_class = GetStatusForHindcastResponseSerializer
     else:
         serializer_class = GetStatusForVerificationResponseSerializer
 
     # Values captured during readonly phase
-    run = None
+    calibration_run: CalibrationRun | None = None
+    run: BaseRun | None = None
     needs_reconcile = False
     sacct_status = None
 
@@ -141,56 +147,84 @@ def get_status(request: Request) -> Response:
     # ─────────────────────────────────────────────────────────────
     with readonly_transaction():
         if calibration_run_id:
-            run, error_return = get_calibration_run(
+            calibration_run, error_return = get_calibration_run(
                 calibration_run_id, request.user, run_status=list(StatusEnum)
             )
             if error_return:
                 return error_return
+            assert calibration_run is not None
 
-            logger.info('Calling check_slurm_reconciliation')
+            run: CalibrationRun = calibration_run
+
+            logger.info(
+                f"{get_job_description(run)} (slurm_job_id: {run.slurm_job_id}) - "
+                f"calling check_slurm_reconciliation"
+            )
             needs_reconcile, sacct_status = check_slurm_reconciliation(run)
-            logger.info(f"Needs_reconcile={needs_reconcile} sacct_status={sacct_status}")
+            logger.info(
+                f"{get_job_description(run)} (slurm_job_id: {run.slurm_job_id}) - "
+                f"needs_reconcile={needs_reconcile}, sacct_status={sacct_status}"
+            )
 
-            response = get_status_for_calibration(run, include_performance_metrics)
+            response = get_status_for_calibration(calibration_run, include_performance_metrics)
 
         elif validation_run_id:
-            run, error_return = get_validation_run(
+            validation_run, error_return = get_validation_run(
                 validation_run_id, request.user, run_status=list(StatusEnum)
             )
             if error_return:
                 return error_return
+            assert validation_run is not None
 
-            needs_reconcile, sacct_status = check_slurm_reconciliation(run)
-            response = get_status_for_validation(run, include_performance_metrics)
+            run = validation_run
+            needs_reconcile, sacct_status = check_slurm_reconciliation(validation_run)
+            response = get_status_for_validation(validation_run, include_performance_metrics)
 
         elif forecast_run_id:
             # Handle cold start
-            run, error_return = get_forecast_run(
+            forecast_run, error_return = get_forecast_run(
                 forecast_run_id, request.user, run_status=list(StatusEnum)
             )
             if error_return:
                 return error_return
+            assert forecast_run is not None
 
-            needs_reconcile, sacct_status = check_slurm_reconciliation(run)
-            response = get_status_for_forecast(run, include_performance_metrics)
+            run = forecast_run
+            needs_reconcile, sacct_status = check_slurm_reconciliation(forecast_run)
+            response = get_status_for_forecast(forecast_run, include_performance_metrics)
+
+        elif hindcast_run_id:
+            # Handle cold start
+            hindcast_run, error_return = get_hindcast_run(
+                hindcast_run_id, request.user, run_status=list(StatusEnum)
+            )
+            if error_return:
+                return error_return
+            assert hindcast_run is not None
+
+            run = hindcast_run
+            needs_reconcile, sacct_status = check_slurm_reconciliation(hindcast_run)
+            response = get_status_for_hindcast(hindcast_run, include_performance_metrics)
 
         else:
-            run, error_return = get_verification_run(
+            verification_run, error_return = get_verification_run(
                 verification_run_id, request.user, run_status=list(StatusEnum)
             )
             if error_return:
                 return error_return
+            assert verification_run is not None
 
-            needs_reconcile, sacct_status = check_slurm_reconciliation(run)
-            response = get_status_for_verification(run, include_performance_metrics)
+            run = verification_run
+            needs_reconcile, sacct_status = check_slurm_reconciliation(verification_run)
+            response = get_status_for_verification(verification_run, include_performance_metrics)
 
     # TODO Can we combine these?
     # ---------------------------------------------------
     # WRITE-CAPABLE PHASE (calibration only, conditional)
     # ---------------------------------------------------
-    if calibration_run_id:
-        if run.status in [StatusEnum.SAVED.db_instance, StatusEnum.READY.db_instance]:
-            error_object, _ = ngen_cal_input.ready_to_run(run)
+    if calibration_run is not None:
+        if calibration_run.status in [StatusEnum.SAVED.db_instance, StatusEnum.READY.db_instance]:
+            error_object, _ = ngen_cal_input.ready_to_run(calibration_run)
             if error_object:
                 # mutate response dict only, not DB objects here
                 if error_object.has_warnings():
@@ -201,19 +235,37 @@ def get_status(request: Request) -> Response:
     # WRITE PHASE (ONLY IF NECESSARY)
     # ─────────────────────────────────────────────────────────────
     if needs_reconcile:
-        logger.info('reconciling')
+        assert run is not None
+
+        logger.info(
+            f"{get_job_description(run)} (slurm_job_id: {run.slurm_job_id}) - "
+            f"attempting Slurm reconciliation"
+        )
 
         with transaction.atomic():
-            # Re-fetch the row outside readonly_transaction before mutating
-            run = type(run).objects.select_for_update().get(id=run.id)
-            apply_slurm_reconciliation(run, sacct_status)
-            # Update some fields that were placed by get_status_for_xxx
-            response["status"] = StatusEnum.SERVER_ERROR.value
-            response["message"] = (
-                f"{get_job_description(run)} status updated to SERVER_ERROR "
-                f"due to Slurm inconsistency"
-            )
-            response["failure_messages"] = normalize_failure_messages(run.failure_messages)
+            # Re-fetch and lock the row before writing. The readonly copy may now be stale.
+            reconciled_run: BaseRun = type(run).objects.select_for_update().get(id=run.id)
+
+            # Only reconcile if the run is still active after acquiring the lock.
+            if reconciled_run.status in {
+                StatusEnum.SUBMITTED.db_instance,
+                StatusEnum.RUNNING.db_instance,
+            }:
+                apply_slurm_reconciliation(reconciled_run, sacct_status)
+
+                # Reflect the DB update in the response that was built earlier.
+                response["status"] = StatusEnum.SERVER_ERROR.value
+                response["message"] = (
+                    f"{get_job_description(reconciled_run)} status updated to SERVER_ERROR "
+                    f"due to Slurm inconsistency"
+                )
+                response["failure_messages"] = normalize_failure_messages(reconciled_run.failure_messages)
+            else:
+                # Another request or callback already moved the run out of an active state.
+                logger.info(
+                    f"{get_job_description(reconciled_run)} (slurm_job_id: {reconciled_run.slurm_job_id}) - "
+                    f"skipping Slurm reconciliation because DB status is now {reconciled_run.status.name}"
+                )
 
     response_validator, error_response = validate_response(serializer_class, response)
     if error_response:
@@ -450,6 +502,88 @@ def get_status_for_forecast(forecast_run: ForecastRun, include_performance_metri
     return forecast_data
 
 
+def get_status_for_hindcast(hindcast_run: HindcastRun, include_performance_metrics: bool) -> dict:
+    """
+    Return the current status of a single HindcastRun.
+
+    This includes:
+    - Hindcast timing, configuration, and status fields
+    - Failure messages (if any)
+    - Performance metrics (only if requested and job is DONE or FAILED)
+    - Cold start run status and metrics, if a cold start exists
+
+    All database access is read-only and executed inside a readonly transaction.
+
+    :param hindcast_run: The HindcastRun instance to inspect.
+    :param include_performance_metrics: Whether to include performance metrics
+        when the run status allows it.
+    :return: A dict suitable for GetStatusForHindcastResponseSerializer.
+    """
+
+    hindcast_data = {
+        'message': f'{get_job_description(hindcast_run)}, status is {hindcast_run.status.name}',
+        'hindcast_run_id': hindcast_run.id,
+        'calibration_run_id': hindcast_run.calibration_run_id,
+        'status': hindcast_run.status.name,
+        'configuration': hindcast_run.configuration.name,
+        'interval_cycle': hindcast_run.interval_cycle,
+        'num_iterations': hindcast_run.num_iterations,
+        'cycle_date': hindcast_run.cycle_date,
+        'submit_date': hindcast_run.submit_date,
+        'sent_date': hindcast_run.sent_date,
+        'run_start': hindcast_run.run_start,
+        'run_end': hindcast_run.run_end,
+        'created_new_cold_start': hindcast_run.created_new_cold_start
+    }
+
+    hindcast_failure_message = normalize_failure_messages(hindcast_run.failure_messages)
+    if hindcast_failure_message:
+        hindcast_data['failure_messages'] = hindcast_failure_message
+
+    if hindcast_run.run_end and hindcast_run.submit_date:
+        hindcast_data['elapsed_time'] = hindcast_run.run_end - hindcast_run.submit_date
+
+    hindcast_metrics = (
+        get_performance_metrics(hindcast_run.performance_metrics)
+        if should_include_metrics(hindcast_run.status, include_performance_metrics)
+        else None
+    )
+    if hindcast_metrics:
+        hindcast_data['performance_metrics'] = hindcast_metrics
+
+    # Get the cold start run, if it's there
+    cold_start_run = hindcast_run.cold_start_run
+    if cold_start_run:
+        cold_start_data = {
+            'cold_start_run_id': cold_start_run.id,
+            'cold_start_date': cold_start_run.cold_start_date,
+            'status': cold_start_run.status.name,
+            'submit_date': cold_start_run.submit_date,
+            'sent_date': cold_start_run.sent_date,
+            'run_start': cold_start_run.run_start,
+            'run_end': cold_start_run.run_end,
+        }
+
+        cold_start_failure_message = normalize_failure_messages(cold_start_run.failure_messages)
+        if cold_start_failure_message:
+            cold_start_data['failure_messages'] = cold_start_failure_message
+
+        if cold_start_run.run_end and cold_start_run.submit_date:
+            cold_start_data['elapsed_time'] = cold_start_run.run_end - cold_start_run.submit_date
+
+        cold_start_metrics = (
+            get_performance_metrics(cold_start_run.performance_metrics)
+            if should_include_metrics(cold_start_run.status, include_performance_metrics)
+            else None
+        )
+        if cold_start_metrics:
+            cold_start_data['performance_metrics'] = cold_start_metrics
+
+        hindcast_data['cold_start_run'] = cold_start_data
+
+    return hindcast_data
+
+
 def get_status_for_verification(verification_run: VerificationRun, include_performance_metrics: bool) -> dict:
     """
     Return the current status of a single VerificationRun.
@@ -458,20 +592,21 @@ def get_status_for_verification(verification_run: VerificationRun, include_perfo
     - Verification timing and status fields
     - Failure messages (if any)
     - Performance metrics (only if requested and job is DONE or FAILED)
-    - A summarized view of the associated ForecastRun
+    - A summarized view of the associated ForecastRun or HindcastRun
 
     All database access is read-only and executed inside a readonly transaction.
 
     :param verification_run: The VerificationRun instance to inspect.
     :param include_performance_metrics: Whether to include performance metrics
         when the run status allows it.
-    :return: A dict suitable for GetStatusForVerificationResponseSerializer.
+    :return: A dict suitable for the verification status response serializer.
     """
+    parent_run = verification_run.parent_run
 
     verification_data = {
         'message': f'{get_job_description(verification_run)}, status is {verification_run.status.name}',
         'verification_run_id': verification_run.id,
-        'calibration_run_id': verification_run.forecast_run.calibration_run_id,
+        'calibration_run_id': parent_run.calibration_run_id,
         'status': verification_run.status.name,
         'submit_date': verification_run.submit_date,
         'sent_date': verification_run.sent_date,
@@ -494,35 +629,46 @@ def get_status_for_verification(verification_run: VerificationRun, include_perfo
     if verification_metrics:
         verification_data['performance_metrics'] = verification_metrics
 
-    # Get the forecast run, which should always be there
-    forecast_run = verification_run.forecast_run
-    forecast_data = {
-        'forecast_run_id': forecast_run.id,
-        'status': forecast_run.status.name,
-        'configuration': forecast_run.configuration.name,
-        'cycle_date': forecast_run.cycle_date,
-        'submit_date': forecast_run.submit_date,
-        'sent_date': forecast_run.sent_date,
-        'run_start': forecast_run.run_start,
-        'run_end': forecast_run.run_end,
+    parent_data = {
+        'calibration_run_id': parent_run.calibration_run_id,
+        'status': parent_run.status.name,
+        'configuration': parent_run.configuration.name,
+        'cycle_date': parent_run.cycle_date,
+        'submit_date': parent_run.submit_date,
+        'sent_date': parent_run.sent_date,
+        'run_start': parent_run.run_start,
+        'run_end': parent_run.run_end,
     }
 
-    forecast_failure_message = normalize_failure_messages(forecast_run.failure_messages)
-    if forecast_failure_message:
-        forecast_data['failure_messages'] = forecast_failure_message
+    if isinstance(parent_run, ForecastRun):
+        parent_data['forecast_run_id'] = parent_run.id
+    elif isinstance(parent_run, HindcastRun):
+        parent_data['hindcast_run_id'] = parent_run.id
+        parent_data['interval_cycle'] = parent_run.interval_cycle
+        parent_data['num_iterations'] = parent_run.num_iterations
+        parent_data['created_new_cold_start'] = parent_run.created_new_cold_start
+    else:
+        raise TypeError(f"Unexpected verification parent run type: {type(parent_run).__name__}")
 
-    if forecast_run.run_end and forecast_run.submit_date:
-        forecast_data['elapsed_time'] = forecast_run.run_end - forecast_run.submit_date
+    parent_failure_message = normalize_failure_messages(parent_run.failure_messages)
+    if parent_failure_message:
+        parent_data['failure_messages'] = parent_failure_message
 
-    forecast_metrics = (
-        get_performance_metrics(forecast_run.performance_metrics)
-        if should_include_metrics(forecast_run.status, include_performance_metrics)
+    if parent_run.run_end and parent_run.submit_date:
+        parent_data['elapsed_time'] = parent_run.run_end - parent_run.submit_date
+
+    parent_metrics = (
+        get_performance_metrics(parent_run.performance_metrics)
+        if should_include_metrics(parent_run.status, include_performance_metrics)
         else None
     )
-    if forecast_metrics:
-        forecast_data['performance_metrics'] = forecast_metrics
+    if parent_metrics:
+        parent_data['performance_metrics'] = parent_metrics
 
-    verification_data['forecast_run'] = forecast_data
+    if verification_run.forecast_run_id is not None:
+        verification_data['forecast_run'] = parent_data
+    else:
+        verification_data['hindcast_run'] = parent_data
 
     return verification_data
 
@@ -660,6 +806,7 @@ def run_calibration(request: Request) -> Response:
     run, error_return = get_calibration_run(calibration_run_id, request.user)
     if error_return:
         return error_return
+    assert run is not None
 
     error_response = submit_job(run, logging_config=logging_config)
     if error_response:
@@ -718,7 +865,7 @@ def should_include_metrics(run_status: Status, include_performance_metrics: bool
 
 
 @extend_schema(
-    request=CalibrationRunSerializer,
+    request=CalibrationRunIdSerializer,
     responses={
         200: GenericResponseSerializer,
         400: OpenApiResponse(
@@ -743,7 +890,7 @@ def process_calibration_output(request):
     data = request.data if request.method == 'POST' else request.query_params.dict()
 
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
-    validator, error_return = validate_request(CalibrationRunSerializer, data)
+    validator, error_return = validate_request(CalibrationRunIdSerializer, data)
     if error_return:
         return error_return
 
@@ -753,6 +900,7 @@ def process_calibration_output(request):
 
     if error_return:
         return error_return
+    assert run is not None
 
     read_calibration_output(run, False)
 
@@ -770,7 +918,7 @@ def process_calibration_output(request):
 
 
 @extend_schema(
-    request=ValidationRunSerializer,
+    request=ValidationRunIdSerializer,
     responses={
         200: GenericResponseSerializerWithValidator,
         400: OpenApiResponse(
@@ -794,7 +942,7 @@ def process_swe_timeseries(request: Request) -> Response:
     data = request.data if request.method == 'POST' else request.query_params.dict()
 
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
-    validator, error_return = validate_request(ValidationRunSerializer, data)
+    validator, error_return = validate_request(ValidationRunIdSerializer, data)
     if error_return:
         return error_return
 
@@ -804,6 +952,7 @@ def process_swe_timeseries(request: Request) -> Response:
 
     if error_return:
         return error_return
+    assert run is not None
 
     generate_secondary_ts_data(run, SecondaryDataEnum.SWE)
 
@@ -879,6 +1028,7 @@ def report_iteration(request):
     run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=[StatusEnum.RUNNING])
     if error_return:
         return error_return
+    assert run is not None
 
     with transaction.atomic():
         if first_iteration_for_worker:
@@ -929,7 +1079,7 @@ def report_iteration(request):
 
 
 @extend_schema(
-    request=CalibrationRunSerializer,
+    request=CalibrationRunIdSerializer,
     responses={
         200: GetIterationsResponseSerializer,
         400: OpenApiResponse(
@@ -956,7 +1106,7 @@ def get_iteration(request: Request) -> Response:
     data = request.data if request.method == 'POST' else request.query_params.dict()
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
 
-    validator, error_return = validate_request(CalibrationRunSerializer, data)
+    validator, error_return = validate_request(CalibrationRunIdSerializer, data)
     if error_return:
         return error_return
 
@@ -971,6 +1121,7 @@ def get_iteration(request: Request) -> Response:
         )
         if error_return:
             return error_return
+        assert run is not None
 
         high_iteration = Iteration.objects.filter(calibration_run=run, worker_number=1).order_by('-iteration_num').first()
         high_iteration_number = high_iteration.iteration_num if high_iteration else None
@@ -990,7 +1141,7 @@ def get_iteration(request: Request) -> Response:
 
 
 @extend_schema(
-    request=CalibrationOrValidationOrColdStartOrForecastOrVerificationRunSerializer,
+    request=CalibrationOrValidationOrColdStartOrForecastOrHindcastOrVerificationRunIdSerializer,
     responses={
         200: GenericResponseSerializer,
         400: OpenApiResponse(
@@ -1008,7 +1159,11 @@ def get_iteration(request: Request) -> Response:
 @handle_exceptions
 def cancel_job(request: Request) -> Response:
     """
-    Cancel a running job for CalibrationRun, ValidationRun, or ForecastRun.
+    Cancel a running job for CalibrationRun, ValidationRun, ForecastRun, HindcastRun, or VerificationRun.
+
+    For forecast and hindcast runs with an associated cold start:
+    - cancel the cold start first while it is RUNNING or SUBMITTED
+    - once the cold start is DONE, cancel the forecast/hindcast job itself
 
     :param request: The HTTP request containing the run ID to cancel.
     :return: A Response indicating the cancellation result.
@@ -1016,14 +1171,21 @@ def cancel_job(request: Request) -> Response:
     data = request.data if request.method == 'POST' else request.query_params.dict()
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
 
-    validator, error_return = validate_request(CalibrationOrValidationOrColdStartOrForecastOrVerificationRunSerializer, data)
+    validator, error_return = validate_request(
+        CalibrationOrValidationOrColdStartOrForecastOrHindcastOrVerificationRunIdSerializer,
+        data
+    )
     if error_return:
         return error_return
 
     calibration_run_id = validator.get('calibration_run_id')
     validation_run_id = validator.get('validation_run_id')
     forecast_run_id = validator.get('forecast_run_id')
+    hindcast_run_id = validator.get('hindcast_run_id')
     verification_run_id = validator.get('verification_run_id')
+
+    run: BaseRun | None
+    run_type: str | None
 
     # Determine job type and retrieve the appropriate run instance
     if calibration_run_id:
@@ -1050,61 +1212,44 @@ def cancel_job(request: Request) -> Response:
         if error_return:
             return error_return
 
-    else:
-        # --------------------
-        # FORECAST LOGIC ONLY
-        # --------------------
+    elif forecast_run_id:
         forecast_run, error_return = get_forecast_run(
             forecast_run_id, request.user, run_status=list(StatusEnum)
         )
         if error_return:
             return error_return
+        assert forecast_run is not None
 
-        cold_start_run = forecast_run.cold_start_run
+        run_type, run, error_response = _get_cancellable_forecast_or_hindcast(
+            main_run=forecast_run,
+            main_run_type=JobType.FORECAST.value,
+        )
+        if error_response:
+            return error_response
 
-        # --- CASE 1: No cold start at all → cancel forecast directly ---
-        if cold_start_run is None:
-            if forecast_run.status in [StatusEnum.RUNNING.db_instance,
-                                       StatusEnum.SUBMITTED.db_instance]:
-                run_type = JobType.FORECAST.value
-                run = forecast_run
-            else:
-                error = (
-                    f'{ForecastRun.__name__} {forecast_run.id} is not in an allowed status: '
-                    f'{join_with_or([StatusEnum.RUNNING.value, StatusEnum.SUBMITTED.value])}. '
-                    f'Current status: {forecast_run.status.name}'
-                )
-                return ResponseError(error)
+    elif hindcast_run_id:
+        hindcast_run, error_return = get_hindcast_run(
+            hindcast_run_id,
+            request.user,
+            run_status=list(StatusEnum)
+        )
+        if error_return:
+            return error_return
+        assert hindcast_run is not None
 
-        else:
-            # --- CASE 2: Cold start is running/submitted → cancel cold start ---
-            if cold_start_run.status in [StatusEnum.RUNNING.db_instance, StatusEnum.SUBMITTED.db_instance]:
-                # Cold start job is running, so cancel it
-                run_type = JobType.COLD_START.value
-                run = cold_start_run
+        run_type, run, error_response = _get_cancellable_forecast_or_hindcast(
+            main_run=hindcast_run,
+            main_run_type=JobType.HINDCAST.value,
+        )
+        if error_response:
+            return error_response
 
-            # --- CASE 3: Cold start DONE → cancel forecast (if running/submitted) ---
-            elif cold_start_run.status == StatusEnum.DONE.db_instance:
-                # Cold start is done, check the status of the forecast job
-                if forecast_run.status in [StatusEnum.RUNNING.db_instance, StatusEnum.SUBMITTED.db_instance]:
-                    run_type = JobType.FORECAST.value
-                    run = forecast_run
-                else:
-                    error = (
-                        f'{ForecastRun.__name__} {forecast_run.id} is not in an allowed status: '
-                        f'{join_with_or([StatusEnum.RUNNING.value, StatusEnum.SUBMITTED.value])}. '
-                        f'Current status: {forecast_run.status.name}'
-                    )
-                    return ResponseError(error)
+    else:
+        # This shouldn't happen
+        return ResponseError("One run ID is required.")
 
-            # --- CASE 4: Cold start exists but in an invalid state ---
-            else:
-                error = (
-                    f'{ColdStartRun.__name__} {cold_start_run.id} is not in an allowed status: '
-                    f'{join_with_or([StatusEnum.RUNNING.value, StatusEnum.SUBMITTED.value])}. '
-                    f'Current status: {cold_start_run.status.name}'
-                )
-                return ResponseError(error)
+    assert run is not None
+    assert run_type is not None
 
     # --------------------
     # COMMON CANCEL LOGIC
@@ -1123,41 +1268,69 @@ def cancel_job(request: Request) -> Response:
     response_validator, error_response = validate_response(CancelJobResponseSerializer, response)
     if error_response:
         return error_response
+
     logger.debug(
-        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
+        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - '
+        f'{json.dumps(response_validator.data)}'
+    )
 
     return Response(response_validator.data)
 
 
-def map_path_to_host(path_to_normalize: str) -> str:
+def _get_cancellable_forecast_or_hindcast(
+        main_run: ForecastRun | HindcastRun,
+        main_run_type: str,
+) -> tuple[str | None, BaseRun | None, Response | None]:
     """
-    Normalize a job path (directory or file path) based on the current settings.
+    Resolve which run should actually be cancelled for a forecast or hindcast job.
 
-    This is used to translate paths stored using the container mount point
-    (settings.NGEN_CAL_MOUNT_POINT) into the host path (settings.NGEN_CAL_DATA_PATH),
-    when those differ.
+    If there is no cold start, cancel the main run directly if it is RUNNING or SUBMITTED.
 
-    :param path_to_normalize: Absolute path under NGEN_CAL_MOUNT_POINT
-    :return: Normalized host path (or the input unchanged if no translation needed)
-    :raises ValueError: If the path is not absolute or does not start with the expected root.
+    If there is a cold start:
+    - cancel the cold start while it is RUNNING or SUBMITTED
+    - once the cold start is DONE, cancel the main run if it is RUNNING or SUBMITTED
+
+    :param main_run: ForecastRun or HindcastRun.
+    :param main_run_type: JobType.FORECAST.value or JobType.HINDCAST.value.
+    :return: tuple of (run_type, run, error_response)
     """
-    if not path_to_normalize:
-        return path_to_normalize
+    cold_start_run = main_run.cold_start_run
 
-    if settings.NGEN_CAL_DATA_PATH and settings.NGEN_CAL_DATA_PATH != settings.NGEN_CAL_MOUNT_POINT:
-        # Ensure the absolute path starts with the old root
-        if not os.path.isabs(path_to_normalize):
-            raise ValueError(f"The path '{path_to_normalize}' is not absolute.")
-        if not path_to_normalize.startswith(settings.NGEN_CAL_MOUNT_POINT):
-            raise ValueError(
-                f"The path '{path_to_normalize}' does not start with the old root '{settings.NGEN_CAL_MOUNT_POINT}'."
-            )
+    # No cold start at all -> cancel the main run directly.
+    if cold_start_run is None:
+        if main_run.status in [StatusEnum.RUNNING.db_instance, StatusEnum.SUBMITTED.db_instance]:
+            return main_run_type, main_run, None
 
-        # Replace the old root with the new root
-        relative_path = os.path.relpath(path_to_normalize, start=settings.NGEN_CAL_MOUNT_POINT)
-        return os.path.join(settings.NGEN_CAL_DATA_PATH, relative_path)
+        error = (
+            f'{type(main_run).__name__} {main_run.id} is not in an allowed status: '
+            f'{join_with_or([StatusEnum.RUNNING.value, StatusEnum.SUBMITTED.value])}. '
+            f'Current status: {main_run.status.name}'
+        )
+        return None, None, ResponseError(error)
 
-    return path_to_normalize
+    # Cold start is still active -> cancel the cold start first.
+    if cold_start_run.status in [StatusEnum.RUNNING.db_instance, StatusEnum.SUBMITTED.db_instance]:
+        return JobType.COLD_START.value, cold_start_run, None
+
+    # Cold start finished -> now the main run may be cancelled.
+    if cold_start_run.status == StatusEnum.DONE.db_instance:
+        if main_run.status in [StatusEnum.RUNNING.db_instance, StatusEnum.SUBMITTED.db_instance]:
+            return main_run_type, main_run, None
+
+        error = (
+            f'{type(main_run).__name__} {main_run.id} is not in an allowed status: '
+            f'{join_with_or([StatusEnum.RUNNING.value, StatusEnum.SUBMITTED.value])}. '
+            f'Current status: {main_run.status.name}'
+        )
+        return None, None, ResponseError(error)
+
+    # Cold start exists but is not in a state where cancellation can proceed.
+    error = (
+        f'{ColdStartRun.__name__} {cold_start_run.id} is not in an allowed status: '
+        f'{join_with_or([StatusEnum.RUNNING.value, StatusEnum.SUBMITTED.value, StatusEnum.DONE.value])}. '
+        f'Current status: {cold_start_run.status.name}'
+    )
+    return None, None, ResponseError(error)
 
 
 @extend_schema(
@@ -1293,6 +1466,39 @@ def forecast_job_slurm_callback(request: Request) -> Response:
 
 
 @extend_schema(
+    request=HindcastJobSlurmCallbackRequestSerializer,
+    responses={
+        202: None,
+        400: OpenApiResponse(
+            response=ErrorResponseSerializer,
+            description="Validation error or parsing error"
+        ),
+        500: OpenApiResponse(
+            response=ErrorResponseSerializer,
+            description="Internal server error"
+        )
+    },
+    description="Callback for Slurm to call when a hindcast job ends"
+)
+@api_view(['POST'])
+@handle_exceptions
+@auth_scope_required(TOKEN_SLURM_SCOPE)
+def hindcast_job_slurm_callback(request: Request) -> Response:
+    """
+    Handles a callback from Slurm to update the status of a hindcast job.
+
+    :param request: HTTP request containing Slurm job details and status.
+    :return: HTTP 202 response indicating the callback was processed.
+    """
+    return handle_slurm_callback(
+        request,
+        HindcastJobSlurmCallbackRequestSerializer,
+        get_hindcast_run,
+        run_hindcast_job_callback_pw
+    )
+
+
+@extend_schema(
     request=VerificationJobSlurmCallbackRequestSerializer,
     responses={
         202: None,
@@ -1416,35 +1622,35 @@ def get_slurm_token(request: Request) -> Response:
 
 def check_slurm_reconciliation(run: BaseRun) -> tuple[bool, str | None]:
     """
-    Determine whether a run requires Slurm reconciliation.
+    Determine whether a run requires reconciliation against Slurm.
 
-    A run is eligible for reconciliation only if:
+    A run is considered for reconciliation only if:
     - it has a slurm_job_id, and
-    - its DB status is active (RUNNING or SUBMITTED).
+    - its database status is still active (SUBMITTED or RUNNING).
 
-    Reconciliation is needed when the DB says the job is active but Slurm no longer
-    reports it as active (squeue empty / job not present).
+    This function relies on get_slurm_status() to interpret the Slurm response
+    and decide whether the job is still active.
 
-    Race-condition exception:
-    - If Slurm reports the job as not active but sacct_status is "COMPLETED",
-      reconciliation is skipped. This indicates the job finished and the Slurm
-      callback is expected imminently, so the server status should be left unchanged.
+    Reconciliation is needed when:
+    - the database still shows the run as active, but
+    - Slurm no longer considers the job active.
 
-    Fallback behavior note:
-    - This relies on the Slurm callback to eventually arrive and update the run.
-      If callbacks are not reliably delivered in some environments, this logic
-      will need to be extended with a retry or timeout-based reconciliation path
-      (e.g., reconcile if the job remains COMPLETED in Slurm for longer than a
-      configured grace period).
+    Application-level exception:
+    - If Slurm reports the job as inactive and the returned status is "COMPLETED",
+      reconciliation is skipped. In that case, the job is treated as having
+      finished normally and the server waits for the Slurm callback to perform
+      the final database update.
 
-    This function performs no database writes and is safe to call inside a readonly transaction.
+    This function performs no database writes and is safe to call inside a
+    readonly transaction.
 
-    :param run: The run object (CalibrationRun / ValidationRun / ForecastRun / VerificationRun),
-        which must inherit from BaseRun.
+    :param run: The run object to inspect. Must inherit from BaseRun.
     :return: Tuple (needs_reconciliation, sacct_status)
-        - needs_reconciliation: True if the DB indicates an active job but Slurm indicates the job is not active
-          (excluding the COMPLETED race-condition exception).
-        - sacct_status: The terminal status reported by Slurm accounting (sacct), or None/UNKNOWN if indeterminate.
+        - needs_reconciliation: True if the database indicates the run is still
+          active but Slurm indicates it is no longer active, excluding the
+          COMPLETED callback-wait case.
+        - sacct_status: The status detail returned by get_slurm_status(), used
+          for logging and reconciliation messaging.
     """
     if not run.slurm_job_id:
         return False, None
@@ -1458,37 +1664,65 @@ def check_slurm_reconciliation(run: BaseRun) -> tuple[bool, str | None]:
     slurm_is_active, sacct_status = get_slurm_status(run.slurm_job_id)
 
     logger.debug(
-        f"{get_job_description(run)}: "
+        f"{get_job_description(run)} (slurm_job_id: {run.slurm_job_id}): "
         f"Slurm active={slurm_is_active}, sacct_status={sacct_status}"
     )
 
     # Race-condition exception:
     if not slurm_is_active and sacct_status == "COMPLETED":
         logger.info(
-            f"{get_job_description(run)}: slurm inactive but sacct_status=COMPLETED; "
+            f"{get_job_description(run)} (slurm_job_id: {run.slurm_job_id}): "
+            f"slurm inactive but sacct_status=COMPLETED; "
             f"skipping reconciliation (awaiting callback)"
         )
         return False, sacct_status
 
     if not slurm_is_active:
+        logger.warning(
+            f"{get_job_description(run)} (slurm_job_id: {run.slurm_job_id}): "
+            f"reconciliation needed; DB status={run.status.name}, sacct_status={sacct_status}"
+        )
         return True, sacct_status
 
     return False, None
 
 
-def apply_slurm_reconciliation(run: BaseRun, sacct_status: str) -> None:
+def apply_slurm_reconciliation(run: BaseRun, sacct_status: str | None) -> None:
     """
-    Escalate a run to SERVER_ERROR due to a Slurm/DB inconsistency.
+    Mark a run as SERVER_ERROR due to a Slurm/database inconsistency.
 
-    This is used when the database indicates the run is active (RUNNING/SUBMITTED),
-    but Slurm indicates the job is no longer active. The run is moved to SERVER_ERROR
-    and a structured reconciliation entry is appended to failure_messages.
+    This is used when the database still shows the run as active
+    (RUNNING or SUBMITTED), but Slurm indicates the job is no longer active.
 
-    :param run: The run object to mutate (must inherit from BaseRun). This object is expected
-        to be re-fetched under a write-capable transaction (e.g., select_for_update()) by the caller.
-    :param sacct_status: The terminal status reported by Slurm accounting (sacct) for the job.
+    The status check is repeated defensively because the run may have
+    changed between the read-only reconciliation check and the locked
+    write phase.
+
+    The reconciliation event is:
+    - logged as an error, and
+    - appended to failure_messages in structured form
+
+    so that it is visible in logs and persisted for later debugging.
+
+    :param run: The run object to update. The caller is expected to
+        re-fetch it inside a write-capable transaction before calling
+        this function.
+    :param sacct_status: The Slurm status detail associated with the
+        inconsistency.
     :return: None
     """
+    # Re-check the status after acquiring the row lock because another
+    # request or callback may already have updated the run.
+    if run.status not in {
+        StatusEnum.SUBMITTED.db_instance,
+        StatusEnum.RUNNING.db_instance,
+    }:
+        logger.info(
+            f"{get_job_description(run)} (slurm_job_id: {run.slurm_job_id}) - "
+            f"skipping Slurm reconciliation because DB status is now {run.status.name}"
+        )
+        return
+
     original_status = run.status.name
 
     message = (
@@ -1496,9 +1730,11 @@ def apply_slurm_reconciliation(run: BaseRun, sacct_status: str) -> None:
         f"{original_status}; sacct_status={sacct_status}"
     )
 
+    # Record the reconciliation event in the server logs.
     logger.error(f"{get_job_description(run)}: {message}")
 
-    # failure_messages is a TEXT field → treat as JSON string
+    # failure_messages is stored as text, so normalize it first and
+    # append a structured reconciliation entry before re-serializing.
     existing = normalize_failure_messages(run.failure_messages)
 
     existing.append({
@@ -1519,16 +1755,18 @@ def get_slurm_status(slurm_id: int) -> tuple[bool, str | None]:
     Query the Slurm status service for the current status of a job.
 
     Semantics:
-    - If squeue indicates the job is present/active, that is authoritative and the job is treated as active.
-    - If squeue is empty but sacct provides a terminal status, the job is treated as not active and the
-      terminal status is returned.
-    - If the response is non-200, not JSON, or missing usable fields, the job is treated as not active
-      with status "UNKNOWN" (conservative for reconciliation logic).
+    - If squeue is empty, the job is no longer active.
+    - If squeue reports COMPLETING, the job is in teardown/cleanup rather than normal execution.
+      In that case, if sacct already reports a terminal state, treat the job as inactive and use sacct.
+      Otherwise, treat it as still active and allow time for callback/accounting to settle.
+    - For any other non-empty squeue state, treat the job as active.
+    - If the response is unusable (non-200, invalid JSON, or missing fields), treat the job as not active
+      with status "UNKNOWN".
 
     :param slurm_id: Slurm job ID to query.
-    :return: Tuple (is_active, sacct_status)
-        - is_active: True if the job is currently active (squeue authoritative), False otherwise.
-        - sacct_status: The terminal status from sacct when available, or "UNKNOWN"/None if indeterminate.
+    :return: Tuple (is_active, status_detail)
+        - is_active: True if the job is considered active, False otherwise.
+        - status_detail: A relevant Slurm status string, or "UNKNOWN" if indeterminate.
     """
     # ----------------------------------
     # TODO Get rid of this debug code
@@ -1569,16 +1807,25 @@ def get_slurm_status(slurm_id: int) -> tuple[bool, str | None]:
         squeue_status = data.get("squeue")
         sacct_status = data.get("sacct")
 
-        if squeue_status:
-            # Job still active → squeue authoritative
-            return True, squeue_status
+        if isinstance(squeue_status, str):
+            squeue_status = squeue_status.strip().upper()
 
-        if sacct_status:
-            # Job finished → sacct authoritative
-            return False, sacct_status
+        if isinstance(sacct_status, str):
+            sacct_status = sacct_status.strip().upper()
 
-        # Defensive fallback: no usable status provided
-        return False, "UNKNOWN"
+        # No squeue entry -> job is no longer active; use sacct if available.
+        if not squeue_status:
+            return False, sacct_status or "UNKNOWN"
+
+        # COMPLETING is a cleanup/teardown state. If sacct already reports a terminal
+        # outcome, trust sacct; otherwise keep treating the job as active for now.
+        if squeue_status == "COMPLETING":
+            if sacct_status and sacct_status != "COMPLETED":
+                return False, sacct_status
+            return True, "COMPLETING"
+
+        # Any other visible squeue state is treated as active.
+        return True, squeue_status
 
     except Exception as ex:
         logger.exception(f"Error querying Slurm status for job {slurm_id}: {ex}")

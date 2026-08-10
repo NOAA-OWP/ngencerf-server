@@ -16,14 +16,35 @@ class CustomUserCreateSerializer(UserCreateSerializer):
         fields = ("id", "email", "first_name", "last_name", "password")
         extra_kwargs = {'password': {'write_only': True}}
 
+    def validate(self, attrs):
+        logger.info(
+            "User registration validate: email=%r provided_keys=%s",
+            attrs.get("email"),
+            sorted(attrs.keys()),
+        )
+
+        try:
+            return super().validate(attrs)
+        except serializers.ValidationError as e:
+            logger.warning(
+                "User registration validation failed: email=%r detail=%r",
+                attrs.get("email"),
+                getattr(e, "detail", None),
+            )
+            raise
+
     def create(self, validated_data):
+        logger.info(
+            "User registration create: email=%r provided_keys=%s",
+            validated_data.get("email"),
+            sorted(validated_data.keys()),
+        )
+
         # Automatically set username to email
         validated_data['username'] = validated_data['email']
 
         # Call the base implementation of create to ensure password hashing and other logic is applied
-        user = super().create(validated_data)
-
-        return user
+        return super().create(validated_data)
 
 
 class CustomUserSerializer(UserSerializer):
@@ -102,7 +123,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
 
         # Success
         logger.info(
-            "JWT login success: user_id=%s %s=%r is_active=%s is_staff=%s",
+            "JWT login success: %s, %s=%r, is_active=%s is_staff=%s",
             getattr(self.user, "id", None),
             login_field,
             getattr(self.user, login_field, None),

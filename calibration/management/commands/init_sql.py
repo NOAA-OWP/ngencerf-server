@@ -12,6 +12,8 @@ from calibration.models import Domain, ObservationalSource, Optimization, Metric
 from calibration.models.forcing_source import ForcingSource
 from calibration.models.module import Module
 from calibration.models.module_group import ModuleGroup
+from calibration.models.module_property import ModuleProperty
+from calibration.models.module_property_choice import ModulePropertyChoice
 from calibration.models.output_variable import OutputVariable
 from calibration.models.rfc import Rfc
 from calibration.models.status import Status
@@ -125,6 +127,8 @@ class Command(BaseCommand):
             self.define_module_groups,
             self.define_output_variables,
             self.define_modules,
+            self.define_module_properties,
+            self.define_module_property_choices,
             self.define_domains,
             self.define_rfc,
             self.define_forcing_source,
@@ -153,17 +157,23 @@ class Command(BaseCommand):
         if self.DELETE_FLAG:
             ModuleGroup.objects.all().delete()
 
-        values = [{"name": "Glacier", "order": 1},
-                  {"name": "Snowmelt", "order": 2},
-                  {"name": "Evapotranspiration", "order": 3},
-                  {"name": "Soil Moisture", "order": 4},
-                  {"name": "Rainfall Runoff", "order": 5},
-                  {"name": "Routing", "order": 6}
-                  ]
+        values = [
+            {"name": "Glacier", "order": 1},
+            {"name": "Snowmelt", "order": 2},
+            {"name": "Evapotranspiration", "order": 3},
+            {"name": "Soil Moisture", "order": 4},
+            {"name": "Rainfall Runoff", "order": 5},
+            {"name": "Routing", "order": 6}
+        ]
 
         for v in values:
-            ModuleGroup.objects.update_or_create(name=v['name'], defaults={"order": v['order'], "is_active": v.get('is_active', True),
-                                                                           "created_by": self.user})
+            ModuleGroup.objects.update_or_create(
+                name=v['name'],
+                defaults={
+                    "order": v['order'], "is_active": v.get('is_active', True),
+                    "created_by": self.user
+                }
+            )
 
     def define_output_variables(self):
         if self.DELETE_FLAG:
@@ -200,76 +210,125 @@ class Command(BaseCommand):
         values = [{"name": name, "order": order + 1} for order, name in enumerate(output_variable_names)]
 
         for v in values:
-            OutputVariable.objects.update_or_create(name=v['name'], defaults={"order": v['order'], "created_by": self.user})
+            OutputVariable.objects.update_or_create(
+                name=v['name'],
+                defaults={
+                    "order": v['order'], "created_by": self.user
+                }
+            )
 
     def define_modules(self):
         if self.DELETE_FLAG:
             Module.objects.all().delete()
 
-        values = [{"name": "Topoflow-Glacier",
-                   "description": "A glacier energy balance module as part of TopoFlow, which calculates runoff based on snow/ice melt",
-                   "groups": ["Glacier"],
-                   "output_variables": ["ACSNOM", "SNOWH", "SNEQV", "QSNOW", "TRAD", "LH", "FIRA", "HFX"],
-                   "is_active": False},
-                  {"name": "Noah-OWP-Modular",
-                   "description": "An extended, refactored version of the Noah-MP land surface model",
-                   "groups": ["Snowmelt", "Evapotranspiration"],
-                   "output_variables": ["ACSNOM", "SNOWT_AVG", "QRAIN", "FSNO", "SNOWH", "SNLIQ", "SNEQV", "QSNOW", "TRAD", "LH", "FIRA", "HFX"]},
-                  {"name": "Snow-17",
-                   "description": "Snow17 is a snow accumulation and melt model that has been used by the National Weather Service since the late 1970s for operational streamflow forecasting.  It is a temperature-index model",
-                   "groups": ["Snowmelt"],
-                   "output_variables": ["ACSNOM", "SNOWH", "SNEQV"]},
-                  {"name": "UEB", "display_name": "Utah Energy Balance (UEB)",
-                   "description": "description",
-                   "groups": ["Snowmelt"],
-                   "output_variables": ["ACSNOM", "SNOWT_AVG", "QRAIN", "SNEQV", "QSNOW", "TRAD", "LH", "FIRA", "HFX"]},
-                  {"name": "CFE-S", "display_name": "CFE-S (Schaake)",
-                   "description": "The Conceptual Functional Equivalent (CFE) model to the National Water Model. The X represents the Xinanjiang function (configuration: surface_partitioning_scheme= Xinanjiang)",
-                   "groups": ["Rainfall Runoff"],
-                   "output_variables": ["sfcheadsubrt", "qBucket", "streamflow", "QRAIN", "SFCRNOFF"]},
-                  {"name": "CFE-X", "display_name": "CFE-X (Xinanjiang)",
-                   "description": "The Conceptual Functional Equivalent (CFE) model to the National Water Model. The S represents the Schaake function (configuration: surface_partitioning_scheme=Schaake)",
-                   "groups": ["Rainfall Runoff"],
-                   "output_variables": ["sfcheadsubrt", "qBucket", "streamflow", "QRAIN", "SFCRNOFF"]},
-                  {"name": "LSTM",
-                   "description": "The Long Short-Term Memory (LSTM) network Module is dependent on a trained deep learning model. The forward pass of this LSTM model nextgen_cuda_lstm.py is heavily based on NeuralHydrology's CudaLSTM",
-                   "groups": ["Glacier", "Snowmelt", "Evapotranspiration", "Soil Moisture", "Rainfall Runoff"]},
-                  {"name": "PET",
-                   "description": "PET handles potential evapotranspiration functions: Aerodynamic method, Combination method, Energy balance method, Penman Monteith method and Priestly Taylor method.",
-                   "groups": ["Evapotranspiration"],
-                   "is_active": False},
-                  {"name": "TopModel",
-                   "description": "A physically based, distributed watershed model that simulates hydrologic fluxes of water.",
-                   "groups": ["Rainfall Runoff"],
-                   "output_variables": ["streamflow", "QRAIN", "SFCRNOFF"]},
-                  {"name": "Sac-SMA",
-                   "description": "A BMI enabled version of the Sacramento Soil Moisture Accounting (Sac-SMA) model.  This version of Sac-SMA allows for multiple hydrological response units (HRUs) to be modeled at once.",
-                   "groups": ["Rainfall Runoff"],
-                   "output_variables": ["qBucket", "streamflow", "SFCRNOFF"]},
-                  {"name": "LASAM", "display_name": "LASAM (Lumped Arid Semi-Arid Model)",
-                   "description": "Lumped Arid/Semi-arid Model (LASAM) for infiltration and surface runoff.  The LASAM simulates infiltration and runoff based on Layered Green & Ampt with redistribution (LGAR) model.).",
-                   "groups": ["Rainfall Runoff"],
-                   "output_variables": ["qBucket", "streamflow", "SOILSAT_TOP", "QRAIN", "SOIL_M", "SFCRNOFF"]},
-                  {"name": "SMP",
-                   "description": "The soil moisture profiles (SMP schemes provide soil moisture distributed over a one-dimensional vertical column and depth to water table. These schemes facilitate coupling among hydrological and thermal models such as (CFE and SFT or LASAM and SFT).",
-                   "groups": ["Soil Moisture"],
-                   "output_variables": ["SOILSAT_TOP", "SOIL_M"]},
-                  {"name": "SFT",
-                   "description": "The soil freeze-thaw model simulates the transport of heat in soil using a one-dimensional vertical column. The model uses a standard diffusion equation discretized using a fully-implicit scheme at the interior and a semi-implicit scheme at the top and bottom boundaries, similar to NOAH-MP. More details are provided below.",
-                   "groups": ["Soil Moisture"],
-                   "output_variables": ["SOILICE", "SOIL_T"]},
-                  {"name": "T-Route",
-                   "description": "Tree-Based Channel Routing -  a dynamic channel routing model, offers a comprehensive solution for river network routing problems. Provides a series lateral inflows for each node in a channel network and computes the resulting streamflows.",
-                   "groups": ["Routing"],
-                   "output_variables": ["inflow", "outflow", "reservoir_assimilated_value", "water_sfc_elev", "nudge", "streamflow", "velocity", ""]}
-                  ]
+        values = [
+            {
+                "name": "Topoflow-Glacier",
+                "description": "A glacier energy balance module as part of TopoFlow, which calculates runoff based on snow/ice melt",
+                "groups": ["Glacier"],
+                "output_variables": ["ACSNOM", "SNOWH", "SNEQV", "QSNOW", "TRAD", "LH", "FIRA", "HFX"],
+                "use_edfs": True
+            },
+            {
+                "name": "Noah-OWP-Modular",
+                "description": "An extended, refactored version of the Noah-MP land surface model",
+                "groups": ["Snowmelt", "Evapotranspiration"],
+                "output_variables": ["ACSNOM", "SNOWT_AVG", "QRAIN", "FSNO", "SNOWH", "SNLIQ", "SNEQV", "QSNOW", "TRAD", "LH", "FIRA", "HFX"],
+                "use_edfs": True
+            },
+            {
+                "name": "Snow-17",
+                "description": "Snow17 is a snow accumulation and melt model that has been used by the National Weather Service since the late 1970s for operational streamflow forecasting.  It is a temperature-index model",
+                "groups": ["Snowmelt"],
+                "output_variables": ["ACSNOM", "SNOWH", "SNEQV"],
+                "use_edfs": True
+            },
+            {
+                "name": "UEB", "display_name": "Utah Energy Balance (UEB)",
+                "description": "description",
+                "groups": ["Snowmelt"],
+                "output_variables": ["ACSNOM", "SNOWT_AVG", "QRAIN", "SNEQV", "QSNOW", "TRAD", "LH", "FIRA", "HFX"],
+                "use_edfs": True
+            },
+            {
+                "name": "CFE-S", "display_name": "CFE-S (Schaake)",
+                "description": "The Conceptual Functional Equivalent (CFE) model to the National Water Model. The X represents the Xinanjiang function (configuration: surface_partitioning_scheme= Xinanjiang)",
+                "groups": ["Rainfall Runoff"],
+                "output_variables": ["sfcheadsubrt", "qBucket", "streamflow", "QRAIN", "SFCRNOFF"],
+                "use_edfs": True
+            },
+            {
+                "name": "CFE-X", "display_name": "CFE-X (Xinanjiang)",
+                "description": "The Conceptual Functional Equivalent (CFE) model to the National Water Model. The S represents the Schaake function (configuration: surface_partitioning_scheme=Schaake)",
+                "groups": ["Rainfall Runoff"],
+                "output_variables": ["sfcheadsubrt", "qBucket", "streamflow", "QRAIN", "SFCRNOFF"],
+                "use_edfs": True
+            },
+            {
+                "name": "LSTM",
+                "description": "The Long Short-Term Memory (LSTM) network Module is dependent on a trained deep learning model. The forward pass of this LSTM model nextgen_cuda_lstm.py is heavily based on NeuralHydrology's CudaLSTM",
+                "groups": ["Glacier", "Snowmelt", "Evapotranspiration", "Soil Moisture", "Rainfall Runoff"],
+                "use_edfs": True
+            },
+            {
+                "name": "PET",
+                "description": "PET handles potential evapotranspiration functions: Aerodynamic method, Combination method, Energy balance method, Penman Monteith method and Priestly Taylor method.",
+                "groups": ["Evapotranspiration"],
+                "is_active": True,
+                "use_edfs": False
+            },
+            {
+                "name": "TopModel",
+                "description": "A physically based, distributed watershed model that simulates hydrologic fluxes of water.",
+                "groups": ["Rainfall Runoff"],
+                "output_variables": ["streamflow", "QRAIN", "SFCRNOFF"],
+                "use_edfs": True
+            },
+            {
+                "name": "Sac-SMA",
+                "description": "A BMI enabled version of the Sacramento Soil Moisture Accounting (Sac-SMA) model.  This version of Sac-SMA allows for multiple hydrological response units (HRUs) to be modeled at once.",
+                "groups": ["Rainfall Runoff"],
+                "output_variables": ["qBucket", "streamflow", "SFCRNOFF"],
+                "use_edfs": True
+            },
+            {
+                "name": "LASAM", "display_name": "LASAM (Lumped Arid Semi-Arid Model)",
+                "description": "Lumped Arid/Semi-arid Model (LASAM) for infiltration and surface runoff.  The LASAM simulates infiltration and runoff based on Layered Green & Ampt with redistribution (LGAR) model.).",
+                "groups": ["Rainfall Runoff"],
+                "output_variables": ["qBucket", "streamflow", "SOILSAT_TOP", "QRAIN", "SOIL_M", "SFCRNOFF"],
+                "use_edfs": True
+            },
+            {
+                "name": "SMP",
+                "description": "The soil moisture profiles (SMP schemes provide soil moisture distributed over a one-dimensional vertical column and depth to water table. These schemes facilitate coupling among hydrological and thermal models such as (CFE and SFT or LASAM and SFT).",
+                "groups": ["Soil Moisture"],
+                "output_variables": ["SOILSAT_TOP", "SOIL_M"],
+                "use_edfs": False
+            },
+            {
+                "name": "SFT",
+                "description": "The soil freeze-thaw model simulates the transport of heat in soil using a one-dimensional vertical column. The model uses a standard diffusion equation discretized using a fully-implicit scheme at the interior and a semi-implicit scheme at the top and bottom boundaries, similar to NOAH-MP. More details are provided below.",
+                "groups": ["Soil Moisture"],
+                "output_variables": ["SOILICE", "SOIL_T"],
+                "use_edfs": False
+            },
+            {
+                "name": "T-Route",
+                "description": "Tree-Based Channel Routing -  a dynamic channel routing model, offers a comprehensive solution for river network routing problems. Provides a series lateral inflows for each node in a channel network and computes the resulting streamflows.",
+                "groups": ["Routing"],
+                "output_variables": ["inflow", "outflow", "reservoir_assimilated_value", "water_sfc_elev", "nudge", "streamflow", "velocity", ""],
+                "use_edfs": False
+            }
+        ]
 
         for v in values:
             module_instance, _ = Module.objects.update_or_create(
-                name=v['name'], defaults={
+                name=v['name'],
+                defaults={
                     "display_name": v.get('display_name', v['name']),
                     "is_active": v.get('is_active', True),
                     "description": v['description'],
+                    "use_edfs": v['use_edfs'],
                     "created_by": self.user
                 }
             )
@@ -286,93 +345,260 @@ class Command(BaseCommand):
             module_instance.output_variables.set(output_variables)
             module_instance.save()
 
+    def define_module_properties(self):
+        if self.DELETE_FLAG:
+            ModuleProperty.objects.all().delete()
+
+        # All modules referenced below must exist in define_modules()
+        cfe_s = Module.objects.get(name="CFE-S")
+        cfe_x = Module.objects.get(name="CFE-X")
+        pet = Module.objects.get(name="PET")
+
+        values = [
+            # CFE Rootzone (boolean)
+            {
+                "module": cfe_s,
+                "name": "aet_rootzone",
+                "display_name": "AET Rootzone",
+                "data_type": DataTypeEnum.BOOLEAN.value,
+                "default_value": "false",
+                "description": "Enable AET Rootzone option."
+            },
+            {
+                "module": cfe_x,
+                "name": "aet_rootzone",
+                "display_name": "AET Rootzone",
+                "data_type": DataTypeEnum.BOOLEAN.value,
+                "default_value": "false",
+                "description": "Enable AET Rootzone option."
+            },
+
+            # PET Method (dropdown)
+            {
+                "module": pet,
+                "name": "method",
+                "display_name": "Method",
+                "data_type": DataTypeEnum.INTEGER.value,
+                "default_value": "1",
+                "description": "Potential evapotranspiration method selection."
+            },
+        ]
+
+        for v in values:
+            ModuleProperty.objects.update_or_create(
+                module=v["module"],
+                name=v["name"],
+                defaults={
+                    "display_name": v["display_name"],
+                    "description": v["description"],
+                    "data_type": v["data_type"],
+                    "default_value": v.get("default_value", ""),
+                    "created_by": self.user,
+                },
+            )
+
+    def define_module_property_choices(self):
+        if self.DELETE_FLAG:
+            ModulePropertyChoice.objects.all().delete()
+
+        # Lookup properties by their natural key (module + name)
+        pet = Module.objects.get(name="PET")
+        pet_method = ModuleProperty.objects.get(module=pet, name="method")
+
+        values = [
+            {
+                "module_property": pet_method,
+                "value_int": 1,
+                "label": "Priestley–Taylor",
+                "sort_order": 1,
+                "description": "Priestley–Taylor method."
+            },
+            {
+                "module_property": pet_method,
+                "value_int": 2,
+                "label": "Penman–Monteith",
+                "sort_order": 2,
+                "description": "Penman–Monteith method."
+            },
+            {
+                "module_property": pet_method,
+                "value_int": 3,
+                "label": "Aerodynamic",
+                "sort_order": 3,
+                "description": "Aerodynamic method."
+            },
+            {
+                "module_property": pet_method,
+                "value_int": 4,
+                "label": "Combination",
+                "sort_order": 4,
+                "description": "Combination method."
+            },
+            {
+                "module_property": pet_method,
+                "value_int": 5,
+                "label": "Energy balance",
+                "sort_order": 5,
+                "description": "Energy balance method."
+            },
+        ]
+
+        for v in values:
+            ModulePropertyChoice.objects.update_or_create(
+                module_property=v["module_property"],
+                value_int=v["value_int"],
+                defaults={
+                    "label": v["label"],
+                    "value_str": None,  # values are all int
+                    "sort_order": v.get("sort_order", 0),
+                    "description": v["description"],
+                    "created_by": self.user,
+                },
+            )
+
     def define_domains(self):
         if self.DELETE_FLAG:
             Domain.objects.all().delete()
 
-        values = [{"name": "Alaska", "description": "Alaska"},
-                  {"name": "Hawaii", "description": "Hawaii"},
-                  {"name": "CONUS", "description": "Continental United Status"},
-                  {"name": "Puerto_Rico", "description": "Puerto Rico, including US Virgin Islands"}
-                  ]
+        values = [
+            {
+                "name": "Alaska",
+                "display_name": "Alaska",
+                "description": "Alaska"
+            },
+            {
+                "name": "Hawaii",
+                "display_name": "Hawaii",
+                "description": "Hawaii"
+            },
+            {
+                "name": "CONUS",
+                "display_name": "CONUS",
+                "description": "Continental United Status"
+            },
+            {
+                "name": "Puerto_Rico",
+                "display_name": "Puerto Rico",
+                "description": "Puerto Rico, including US Virgin Islands"
+            }
+        ]
 
         for v in values:
-            Domain.objects.update_or_create(name=v['name'], defaults={"is_active": v.get('is_active', True),
-                                                                      "description": v['description'],
-                                                                      "created_by": self.user})
+            Domain.objects.update_or_create(
+                name=v['name'],
+                defaults={
+                    "display_name": v['display_name'],
+                    "is_active": v.get('is_active', True),
+                    "description": v['description'],
+                    "created_by": self.user
+                }
+            )
 
     def define_rfc(self):
         if self.DELETE_FLAG:
             Rfc.objects.all().delete()
 
-        values = [{"name": "NWRFC", "description": "Northwest River Forecast Center"},
-                  {"name": "CNRFC", "description": "California/Nevada River Forecast Center"},
-                  {"name": "CBRFC", "description": "Colorado Basin River Forecast Center"},
-                  {"name": "MBRFC", "description": "Missouri Basin River Forecast Center"},
-                  {"name": "ABRFC", "description": "Arkansas Red-Basin River Forecast Center"},
-                  {"name": "WGRFC", "description": "West Gulf River Forecast Center"},
-                  {"name": "NCRFC", "description": "North Central River Forecast Center"},
-                  {"name": "LMRFC", "description": "Lower Mississippi River Forecast Center"},
-                  {"name": "OHRFC", "description": "Ohio River Forecast Center"},
-                  {"name": "SERFC", "description": "Southeast River Forecast Center"},
-                  {"name": "MARFC", "description": "Mid-Atlantic River Forecast Center"},
-                  {"name": "NERFC", "description": "Northeast River Forecast Center"},
-                  {"name": "ARFC", "description": "Alaska River Forecast Center"},
-                  {"name": "APRFC", "description": "Alaska Pacific River Forecast Center"},
-                  {"name": "Canada", "description": "Canada River Forecast Center"}
-                  ]
+        values = [
+            {"name": "NWRFC", "description": "Northwest River Forecast Center"},
+            {"name": "CNRFC", "description": "California/Nevada River Forecast Center"},
+            {"name": "CBRFC", "description": "Colorado Basin River Forecast Center"},
+            {"name": "MBRFC", "description": "Missouri Basin River Forecast Center"},
+            {"name": "ABRFC", "description": "Arkansas Red-Basin River Forecast Center"},
+            {"name": "WGRFC", "description": "West Gulf River Forecast Center"},
+            {"name": "NCRFC", "description": "North Central River Forecast Center"},
+            {"name": "LMRFC", "description": "Lower Mississippi River Forecast Center"},
+            {"name": "OHRFC", "description": "Ohio River Forecast Center"},
+            {"name": "SERFC", "description": "Southeast River Forecast Center"},
+            {"name": "MARFC", "description": "Mid-Atlantic River Forecast Center"},
+            {"name": "NERFC", "description": "Northeast River Forecast Center"},
+            {"name": "ARFC", "description": "Alaska River Forecast Center"},
+            {"name": "APRFC", "description": "Alaska Pacific River Forecast Center"},
+            {"name": "Canada", "description": "Canada River Forecast Center"}
+        ]
 
         for v in values:
-            Rfc.objects.update_or_create(name=v['name'], defaults={"is_active": v.get('is_active', True),
-                                                                   "description": v['description'],
-                                                                   "created_by": self.user})
+            Rfc.objects.update_or_create(
+                name=v['name'],
+                defaults={
+                    "is_active": v.get('is_active', True),
+                    "description": v['description'],
+                    "created_by": self.user
+                }
+            )
 
     def define_forcing_source(self):
         if self.DELETE_FLAG:
             ForcingSource.objects.all().delete()
 
-        values = [{"name": "AORC", "description": "Analysis of Record For Calibration", "is_active": True},
-                  {"name": "NWM Retrospective", "description": "NWM Retrospective", "is_active": True},
-                  ]
+        values = [
+            {
+                "name": "AORC",
+                "display_name": "AORC",
+                "description": "Analysis of Record For Calibration",
+                "is_active": True
+            },
+            {
+                "name": "NWM",
+                "display_name": "NWM Retrospective",
+                "description": "NWM Retrospective",
+                "is_active": True}
+
+        ]
 
         for v in values:
-            ForcingSource.objects.update_or_create(name=v['name'], defaults={"is_active": v.get('is_active', True),
-                                                                             "description": v['description'],
-                                                                             "created_by": self.user})
+            ForcingSource.objects.update_or_create(
+                name=v['name'],
+                defaults={
+                    "display_name": v['display_name'],
+                    "is_active": v.get('is_active', True),
+                    "description": v['description'],
+                    "created_by": self.user
+                }
+            )
 
     def define_observational_source(self):
         if self.DELETE_FLAG:
             ObservationalSource.objects.all().delete()
 
-        values = [{"name": "USGS", "description": "US Geological Society", "is_active": False},
-                  {"name": "USACE", "description": "US Army Corp of Engineers", "is_active": False},
-                  {"name": "BOR", "description": "Bureau of Reclamation", "is_active": False},
-                  {"name": "ENV", "description": "Environmental Canada", "is_active": False},
-                  {"name": "CA DWR", "description": "California Department of Water Resources", "is_active": False},
-                  {"name": "TX DoT", "description": "Texas Department of Transportation", "is_active": False},
-                  {"name": "RFC", "description": "River Forecast Center", "is_active": False},
-                  {"name": "SNOTEL", "description": "Snow Telemetry", "is_active": False},
-                  {"name": "Historical", "description": "NGWPC Enterprise Data Services", "is_active": True},
-                  ]
+        values = [
+            {"name": "USGS", "description": "US Geological Society", "is_active": False},
+            {"name": "USACE", "description": "US Army Corp of Engineers", "is_active": False},
+            {"name": "BOR", "description": "Bureau of Reclamation", "is_active": False},
+            {"name": "ENV", "description": "Environmental Canada", "is_active": False},
+            {"name": "CA DWR", "description": "California Department of Water Resources", "is_active": False},
+            {"name": "TX DoT", "description": "Texas Department of Transportation", "is_active": False},
+            {"name": "RFC", "description": "River Forecast Center", "is_active": False},
+            {"name": "SNOTEL", "description": "Snow Telemetry", "is_active": False},
+            {"name": "Historical", "description": "NGWPC Enterprise Data Services", "is_active": True},
+        ]
 
         for v in values:
-            ObservationalSource.objects.update_or_create(name=v['name'],
-                                                         defaults={"is_active": v.get('is_active', True),
-                                                                   "description": v['description'],
-                                                                   "created_by": self.user})
+            ObservationalSource.objects.update_or_create(
+                name=v['name'],
+                defaults={
+                    "is_active": v.get('is_active', True),
+                    "description": v['description'],
+                    "created_by": self.user
+                }
+            )
 
     def define_geopackage_source(self):
         if self.DELETE_FLAG:
             GeopackageSource.objects.all().delete()
 
-        values = [{"name": "Hydrofabric", "description": "NGWPC Enterprise Data Services", "is_active": True},
-                  ]
+        values = [
+            {"name": "Hydrofabric", "description": "NGWPC Enterprise Data Services", "is_active": True},
+        ]
 
         for v in values:
-            GeopackageSource.objects.update_or_create(name=v['name'],
-                                                      defaults={"is_active": v.get('is_active', True),
-                                                                "description": v['description'],
-                                                                "created_by": self.user})
+            GeopackageSource.objects.update_or_create(
+                name=v['name'],
+                defaults={
+                    "is_active": v.get('is_active', True),
+                    "description": v['description'],
+                    "created_by": self.user
+                }
+            )
 
     def define_forecast_configuration(self):
         if self.DELETE_FLAG:
@@ -392,6 +618,7 @@ class Command(BaseCommand):
                 "domain": conus_domain,
                 "cycle_start": 0, "cycle_end": 23, "cycle_freq": 1, "fcst_win": -3, "fcst_timestep": 1,
                 "availability_lag": 6,
+                "supports_hindcast": False,
                 "is_active": True
             },
             {
@@ -400,6 +627,7 @@ class Command(BaseCommand):
                 "domain": conus_domain,
                 "cycle_start": 0, "cycle_end": 23, "cycle_freq": 1, "fcst_win": -28, "fcst_timestep": 1,
                 "availability_lag": 6,
+                "supports_hindcast": False,
                 "is_active": True
             },
             {
@@ -408,6 +636,7 @@ class Command(BaseCommand):
                 "domain": conus_domain,
                 "cycle_start": 0, "cycle_end": 23, "cycle_freq": 1, "fcst_win": 18, "fcst_timestep": 1,
                 "availability_lag": 6,
+                "supports_hindcast": True,
                 "is_active": True
             },
             {
@@ -416,38 +645,43 @@ class Command(BaseCommand):
                 "domain": conus_domain,
                 "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 240, "fcst_timestep": 1,
                 "availability_lag": 6,
+                "supports_hindcast": True,
                 "is_active": True
             },
             {
                 "name": "Long Range MEM1", "internal_name": "long_range_mem1", "order": 5,
                 "data_sources": "tbd",
                 "domain": conus_domain,
-                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 720, "fcst_timestep": 6,
+                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 720, "fcst_timestep": 1,
                 "availability_lag": 12,
+                "supports_hindcast": True,
                 "is_active": True
             },
             {
                 "name": "Long Range MEM2", "internal_name": "long_range_mem2", "order": 6,
                 "data_sources": "tbd",
                 "domain": conus_domain,
-                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 720, "fcst_timestep": 6,
+                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 720, "fcst_timestep": 1,
                 "availability_lag": 12,
+                "supports_hindcast": True,
                 "is_active": True
             },
             {
                 "name": "Long Range MEM3", "internal_name": "long_range_mem3", "order": 7,
                 "data_sources": "tbd",
                 "domain": conus_domain,
-                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 720, "fcst_timestep": 6,
+                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 720, "fcst_timestep": 1,
                 "availability_lag": 12,
+                "supports_hindcast": True,
                 "is_active": True
             },
             {
                 "name": "Long Range MEM4", "internal_name": "long_range_mem4", "order": 8,
                 "data_sources": "tbd",
                 "domain": conus_domain,
-                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 720, "fcst_timestep": 6,
+                "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 720, "fcst_timestep": 1,
                 "availability_lag": 12,
+                "supports_hindcast": True,
                 "is_active": True
             },
             {
@@ -456,6 +690,7 @@ class Command(BaseCommand):
                 "domain": alaska_domain,
                 "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 15, "fcst_timestep": 1,
                 "availability_lag": 6,
+                "supports_hindcast": True,
                 "is_active": True
             },
             {
@@ -464,15 +699,17 @@ class Command(BaseCommand):
                 "domain": alaska_domain,
                 "cycle_start": 3, "cycle_end": 21, "cycle_freq": 6, "fcst_win": 45, "fcst_timestep": 1,
                 "availability_lag": 6,
-                "is_active": True
+                "supports_hindcast": True,
+                "is_active": False
             },
             {
                 "name": "Short Range Hawaii", "internal_name": "short_range_hawaii", "order": 1,
                 "data_sources": "tbd",
                 "domain": hawaii_domain,
-                "cycle_start": 0, "cycle_end": 23, "cycle_freq": 1, "fcst_win": 48, "fcst_timestep": 0.25,
+                "cycle_start": 0, "cycle_end": 23, "cycle_freq": 6, "fcst_win": 48, "fcst_timestep": 1,
                 "availability_lag": 6,
-                "is_active": False
+                "supports_hindcast": True,
+                "is_active": True
             },
             {
                 "name": "Analysis and Assimilation (AnA) Puerto Rico", "internal_name": "standard_ana_puertorico", "order": 1,
@@ -480,6 +717,7 @@ class Command(BaseCommand):
                 "domain": puerto_rico_domain,
                 "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": -3, "fcst_timestep": 1,
                 "availability_lag": 6,
+                "supports_hindcast": False,
                 "is_active": True
             },
             {
@@ -488,6 +726,7 @@ class Command(BaseCommand):
                 "domain": puerto_rico_domain,
                 "cycle_start": 6, "cycle_end": 18, "cycle_freq": 12, "fcst_win": 48, "fcst_timestep": 1,
                 "availability_lag": 6,
+                "supports_hindcast": True,
                 "is_active": True
             },
             {
@@ -496,6 +735,7 @@ class Command(BaseCommand):
                 "domain": conus_domain,
                 "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 240, "fcst_timestep": 1,
                 "availability_lag": 6,
+                "supports_hindcast": True,
                 "is_active": False
             },
             {
@@ -504,6 +744,7 @@ class Command(BaseCommand):
                 "domain": conus_domain,
                 "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 240, "fcst_timestep": 1,
                 "availability_lag": 6,
+                "supports_hindcast": True,
                 "is_active": False
             },
             {
@@ -512,6 +753,7 @@ class Command(BaseCommand):
                 "domain": conus_domain,
                 "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 240, "fcst_timestep": 1,
                 "availability_lag": 6,
+                "supports_hindcast": True,
                 "is_active": False
             },
             {
@@ -520,6 +762,7 @@ class Command(BaseCommand):
                 "domain": conus_domain,
                 "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 240, "fcst_timestep": 1,
                 "availability_lag": 6,
+                "supports_hindcast": True,
                 "is_active": False
             },
             {
@@ -528,6 +771,7 @@ class Command(BaseCommand):
                 "domain": conus_domain,
                 "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 240, "fcst_timestep": 1,
                 "availability_lag": 6,
+                "supports_hindcast": True,
                 "is_active": False
             },
             {
@@ -536,6 +780,7 @@ class Command(BaseCommand):
                 "domain": conus_domain,
                 "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 240, "fcst_timestep": 1,
                 "availability_lag": 6,
+                "supports_hindcast": True,
                 "is_active": False
             },
             {
@@ -544,6 +789,7 @@ class Command(BaseCommand):
                 "domain": alaska_domain,
                 "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 240, "fcst_timestep": 1,
                 "availability_lag": 6,
+                "supports_hindcast": True,
                 "is_active": True
             },
             {
@@ -552,6 +798,7 @@ class Command(BaseCommand):
                 "domain": alaska_domain,
                 "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 240, "fcst_timestep": 1,
                 "availability_lag": 6,
+                "supports_hindcast": True,
                 "is_active": False
             },
             {
@@ -560,6 +807,7 @@ class Command(BaseCommand):
                 "domain": alaska_domain,
                 "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 240, "fcst_timestep": 1,
                 "availability_lag": 6,
+                "supports_hindcast": True,
                 "is_active": False
             },
             {
@@ -568,6 +816,7 @@ class Command(BaseCommand):
                 "domain": alaska_domain,
                 "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 240, "fcst_timestep": 1,
                 "availability_lag": 6,
+                "supports_hindcast": True,
                 "is_active": False
             },
             {
@@ -576,6 +825,7 @@ class Command(BaseCommand):
                 "domain": alaska_domain,
                 "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 240, "fcst_timestep": 1,
                 "availability_lag": 6,
+                "supports_hindcast": True,
                 "is_active": False
             },
             {
@@ -584,6 +834,7 @@ class Command(BaseCommand):
                 "domain": alaska_domain,
                 "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 240, "fcst_timestep": 1,
                 "availability_lag": 6,
+                "supports_hindcast": True,
                 "is_active": False
             },
             {
@@ -592,6 +843,7 @@ class Command(BaseCommand):
                 "domain": alaska_domain,
                 "cycle_start": 0, "cycle_end": 18, "cycle_freq": 6, "fcst_win": 240, "fcst_timestep": 1,
                 "availability_lag": 6,
+                "supports_hindcast": True,
                 "is_active": False
             },
             {
@@ -600,144 +852,232 @@ class Command(BaseCommand):
                 "domain": conus_domain,
                 "cycle_start": 0, "cycle_end": 23, "cycle_freq": 1, "fcst_win": 48, "fcst_timestep": 1,
                 "availability_lag": 6,
+                "supports_hindcast": True,
                 "is_active": False
             },
         ]
 
         for v in values:
-            ForecastConfiguration.objects.update_or_create(name=v['name'],
-                                                           defaults={"is_active": v.get('is_active', True),
-                                                                     "internal_name": v['internal_name'],
-                                                                     "order": v.get('order', None),
-                                                                     "data_sources": v['data_sources'],
-                                                                     "domain": v['domain'],
-                                                                     "availability_lag": v['availability_lag'],
-                                                                     "cycle_start": v['cycle_start'],
-                                                                     "cycle_end": v['cycle_end'],
-                                                                     "cycle_freq": v['cycle_freq'],
-                                                                     "fcst_win": v['fcst_win'],
-                                                                     "fcst_timestep": v['fcst_timestep'],
-                                                                     "created_by": self.user})
+            ForecastConfiguration.objects.update_or_create(
+                name=v['name'],
+                defaults={
+                    "is_active": v.get('is_active', True),
+                    "supports_hindcast": v['supports_hindcast'],
+                    "internal_name": v['internal_name'],
+                    "order": v.get('order', None),
+                    "data_sources": v['data_sources'],
+                    "domain": v['domain'],
+                    "availability_lag": v['availability_lag'],
+                    "cycle_start": v['cycle_start'],
+                    "cycle_end": v['cycle_end'],
+                    "cycle_freq": v['cycle_freq'],
+                    "fcst_win": v['fcst_win'],
+                    "fcst_timestep": v['fcst_timestep'],
+                    "created_by": self.user
+                }
+            )
 
     def define_optimization(self):
         if self.DELETE_FLAG:
             Optimization.objects.all().delete()
             OptimizationInput.objects.all().delete()
 
-        values = [{"name": "DDS", "description": "Dynamically Dimensioned Search",
-                   "inputs": [{"name": "r", "description": "Sample region size", "data_type": DataTypeEnum.DOUBLE, "default_value": 0.2, "min": 0.2,
-                               "max": 0.2}]},
-                  {"name": "PSO", "description": "Particle Swarm Optimization",
-                   "inputs": [{"name": "swarm_size", "description": "Swarm size", "data_type": DataTypeEnum.INTEGER, "default_value": 2, "min": 2},
-                              {"name": "c1", "description": "Acceleration coefficient c1", "data_type": DataTypeEnum.DOUBLE, "default_value": 2.0,
-                               "min": 1.0, "max": 3.0},
-                              {"name": "c2", "description": "Acceleration coefficient c2 ", "data_type": DataTypeEnum.DOUBLE, "default_value": 2.0,
-                               "min": 1.0, "max": 3.0},
-                              {"name": "w", "description": "Inertia weight", "data_type": DataTypeEnum.DOUBLE, "default_value": 0.7, "min": 0.0,
-                               "max": 1.0}]},
-                  {"name": "GWO", "description": "Grey Wolf Optimization",
-                   "inputs": [{"name": "swarm_size", "description": "Swarm size", "data_type": DataTypeEnum.INTEGER, "default_value": 4, "min": 4}]},
-                  ]
+        values = [
+            {
+                "name": "DDS", "description": "Dynamically Dimensioned Search",
+                "inputs": [
+                    {
+                        "name": "r", "description": "Sample region size", "data_type": DataTypeEnum.DOUBLE, "default_value": 0.2,
+                        "min": 0.2, "max": 0.2
+                    }
+                ]
+            },
+            {
+                "name": "PSO", "description": "Particle Swarm Optimization",
+                "inputs": [
+                    {
+                        "name": "swarm_size", "description": "Swarm size", "data_type": DataTypeEnum.INTEGER, "default_value": 2,
+                        "min": 2},
+                    {
+                        "name": "c1", "description": "Acceleration coefficient c1", "data_type": DataTypeEnum.DOUBLE, "default_value": 2.0,
+                        "min": 1.0, "max": 3.0
+                    },
+                    {
+                        "name": "c2", "description": "Acceleration coefficient c2 ", "data_type": DataTypeEnum.DOUBLE, "default_value": 2.0,
+                        "min": 1.0, "max": 3.0
+                    },
+                    {
+                        "name": "w", "description": "Inertia weight", "data_type": DataTypeEnum.DOUBLE, "default_value": 0.7,
+                        "min": 0.0, "max": 1.0
+                    }
+                ]
+            },
+            {
+                "name": "GWO", "description": "Grey Wolf Optimization",
+                "inputs": [
+                    {"name": "swarm_size", "description": "Swarm size", "data_type": DataTypeEnum.INTEGER, "default_value": 4,
+                     "min": 4}
+                ]
+            },
+        ]
 
         # stop_criteria_name and stop_criteria_data_type are not used at this time.  Setting to these values for now, but we never look at it
         for v in values:
-            optimization, created = Optimization.objects.update_or_create(name=v['name'],
-                                                                          defaults={"is_active": v.get('is_active', True),
-                                                                                    "description": v['description'],
-                                                                                    "stop_criteria_name": "iterations",
-                                                                                    "stop_criteria_data_type": DataTypeEnum.INTEGER.value,
-                                                                                    "created_by": self.user})
+            optimization, created = Optimization.objects.update_or_create(
+                name=v['name'],
+                defaults={
+                    "is_active": v.get('is_active', True),
+                    "description": v['description'],
+                    "stop_criteria_name": "iterations",
+                    "stop_criteria_data_type": DataTypeEnum.INTEGER.value,
+                    "created_by": self.user
+                }
+            )
 
             for i in v['inputs']:
-                OptimizationInput.objects.update_or_create(name=i['name'], optimization=optimization,
-                                                           defaults={"is_active": i.get('is_active', True),
-                                                                     "description": i['description'],
-                                                                     "data_type": i['data_type'].value,
-                                                                     "default_value": i['default_value'],
-                                                                     "min": i.get('min', None),
-                                                                     "max": i.get('max', None),
-                                                                     "created_by": self.user})
+                OptimizationInput.objects.update_or_create(
+                    name=i['name'], optimization=optimization,
+                    defaults={
+                        "is_active": i.get('is_active', True),
+                        "description": i['description'],
+                        "data_type": i['data_type'].value,
+                        "default_value": i['default_value'],
+                        "min": i.get('min', None),
+                        "max": i.get('max', None),
+                        "created_by": self.user
+                    }
+                )
 
     def define_metric(self):
         if self.DELETE_FLAG:
             Metric.objects.all().delete()
 
-        values = [{"name": "Corr",
-                   "display_name": "Pearson Correlation (Corr)"},
-                  {"name": "MAE",
-                   "display_name": "Mean Absolute Error (MAE)"},
-                  {"name": "RMSE",
-                   "display_name": "Root Mean Square Error (RMSE)"},
-                  {"name": "RSR",
-                   "display_name": "Ratio of RMSE to standard deviation of observation (RSR)"},
-                  {"name": "PBIAS",
-                   "display_name": "Percent Bias (PBIAS)"},
-                  {"name": "KGE",
-                   "display_name": "Kling-Gupta Efficiency (KGE)"},
-                  {"name": "NSE",
-                   "display_name": "Nash-Sutcliffe-Efficiency (NSE)"},
-                  {"name": "NSELog",
-                   "display_name": "Logarithmic of NSE (NSELog)"},
-                  {"name": "NNSE",
-                   "display_name": "Normalized NSE (NNSE)"},
-                  {"name": "POD",
-                   "display_name": "Probability of Detection (POD)",
-                   "categorical": True},
-                  {"name": "CSI",
-                   "display_name": "Critical Success Index (CSI)",
-                   "categorical": True},
-                  {"name": "FAR",
-                   "display_name": "False Alarm Ratio (FAR)",
-                   "categorical": True},
-                  {"name": "HSEG_FDC",
-                   "display_name": "Percent bias of high flow segment of flow duration curve (HSEG_FDC)"},
-                  {"name": "LSEG_FDC",
-                   "display_name": "Percent bias of low flow segment of flow duration curve (LSEG_FDC)"},
-                  {"name": "PKBIAS",
-                   "display_name": "Event Absolute Peak Flow Bias (PKBIAS)",
-                   "event_based": True},
-                  {"name": "PKTE",
-                   "display_name": "Event Peak Flow Timing Error (PKTE)",
-                   "event_based": True},
-                  {"name": "EVBIAS",
-                   "display_name": "Event Volume Bias (EVBIAS)",
-                   "event_based": True},
-                  {"name": "FBIAS",
-                   "display_name": "Frequency Bias (FBIAS)",
-                   "categorical": True, "objective_function": False},
-                  {"name": "MSEG_FDC",
-                   "display_name": "Percent bias of middle flow segment of flow duration curve (MSEG_FDC)",
-                   "objective_function": False},
-                  {"name": "NSEWt",
-                   "display_name": "Weighted NSE and NSELog (NSEWt)",
-                   "objective_function": False},
-                  ]
+        values = [
+            {
+                "name": "Corr",
+                "display_name": "Pearson Correlation (Corr)"
+            },
+            {
+                "name": "MAE",
+                "display_name": "Mean Absolute Error (MAE)"
+            },
+            {
+                "name": "RMSE",
+                "display_name": "Root Mean Square Error (RMSE)"
+            },
+            {
+                "name": "RSR",
+                "display_name": "Ratio of RMSE to standard deviation of observation (RSR)"
+            },
+            {
+                "name": "PBIAS",
+                "display_name": "Percent Bias (PBIAS)"
+            },
+            {
+                "name": "KGE",
+                "display_name": "Kling-Gupta Efficiency (KGE)"
+            },
+            {
+                "name": "NSE",
+                "display_name": "Nash-Sutcliffe-Efficiency (NSE)"
+            },
+            {
+                "name": "NSELog",
+                "display_name": "Logarithmic of NSE (NSELog)"
+            },
+            {
+                "name": "NNSE",
+                "display_name": "Normalized NSE (NNSE)"
+            },
+            {
+                "name": "POD",
+                "display_name": "Probability of Detection (POD)",
+                "categorical": True
+            },
+            {
+                "name": "CSI",
+                "display_name": "Critical Success Index (CSI)",
+                "categorical": True
+            },
+            {
+                "name": "FAR",
+                "display_name": "False Alarm Ratio (FAR)",
+                "categorical": True
+            },
+            {
+                "name": "HSEG_FDC",
+                "display_name": "Percent bias of high flow segment of flow duration curve (HSEG_FDC)"
+            },
+            {
+                "name": "LSEG_FDC",
+                "display_name": "Percent bias of low flow segment of flow duration curve (LSEG_FDC)"
+            },
+            {
+                "name": "PKBIAS",
+                "display_name": "Event Absolute Peak Flow Bias (PKBIAS)",
+                "event_based": True
+            },
+            {
+                "name": "PKTE",
+                "display_name": "Event Peak Flow Timing Error (PKTE)",
+                "event_based": True
+            },
+            {
+                "name": "EVBIAS",
+                "display_name": "Event Volume Bias (EVBIAS)",
+                "event_based": True
+            },
+            {
+                "name": "FBIAS",
+                "display_name": "Frequency Bias (FBIAS)",
+                "categorical": True, "objective_function": False
+            },
+            {
+                "name": "MSEG_FDC",
+                "display_name": "Percent bias of middle flow segment of flow duration curve (MSEG_FDC)",
+                "objective_function": False
+            },
+            {
+                "name": "NSEWt",
+                "display_name": "Weighted NSE and NSELog (NSEWt)",
+                "objective_function": False
+            },
+        ]
 
         for v in values:
-            Metric.objects.update_or_create(name=v['name'], defaults={"is_active": v.get('is_active', True),
-                                                                      "display_name": v['display_name'],
-                                                                      "categorical": v.get('categorical', False),
-                                                                      "event_based": v.get('event_based', False),
-                                                                      "objective_function": v.get('objective_function', True),
-                                                                      "created_by": self.user})
+            Metric.objects.update_or_create(
+                name=v['name'],
+                defaults={
+                    "is_active": v.get('is_active', True),
+                    "display_name": v['display_name'],
+                    "categorical": v.get('categorical', False),
+                    "event_based": v.get('event_based', False),
+                    "objective_function": v.get('objective_function', True),
+                    "created_by": self.user
+                }
+            )
 
     def define_status(self):
         if self.DELETE_FLAG:
             Status.objects.all().delete()
 
-        values = [{"name": "Saved"},
-                  {"name": "Ready"},
-                  {"name": "Submitted"},
-                  {"name": "Running"},
-                  {"name": "Done"},
-                  {"name": "Cancelled"},
-                  {"name": "Failed"},
-                  {"name": "Resumed"},
-                  {"name": "Server error"}
-                  ]
+        values = [
+            {"name": "Saved"},
+            {"name": "Ready"},
+            {"name": "Submitted"},
+            {"name": "Running"},
+            {"name": "Done"},
+            {"name": "Cancelled"},
+            {"name": "Failed"},
+            {"name": "Resumed"},
+            {"name": "Server error"}
+        ]
 
         for v in values:
-            Status.objects.update_or_create(name=v['name'], defaults={"created_by": self.user})
+            Status.objects.update_or_create(
+                name=v['name'],
+                defaults={"created_by": self.user}
+            )
 
     def define_plot_definitions(self):
 
@@ -896,13 +1236,18 @@ class Command(BaseCommand):
         ]
 
         for v in values:
-            PlotDefinition.objects.update_or_create(name=v['name'], defaults={"display_name": v['display_name'],
-                                                                              "is_active": v.get('is_active', True),
-                                                                              "description": v['description'],
-                                                                              "location": v['location'],
-                                                                              "valid_optimizations": v.get('valid_optimizations'),
-                                                                              "job_type": v['job_type'],
-                                                                              "filename_mask": v['filename_mask'],
-                                                                              "timeseries_available": v.get('timeseries_available', False),
-                                                                              "lstm_flag": v.get('lstm_flag', False),
-                                                                              "created_by": self.user})
+            PlotDefinition.objects.update_or_create(
+                name=v['name'],
+                defaults={
+                    "display_name": v['display_name'],
+                    "is_active": v.get('is_active', True),
+                    "description": v['description'],
+                    "location": v['location'],
+                    "valid_optimizations": v.get('valid_optimizations'),
+                    "job_type": v['job_type'],
+                    "filename_mask": v['filename_mask'],
+                    "timeseries_available": v.get('timeseries_available', False),
+                    "lstm_flag": v.get('lstm_flag', False),
+                    "created_by": self.user
+                }
+            )

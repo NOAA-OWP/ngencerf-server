@@ -32,7 +32,7 @@ class ForcingSourceEnum(AbstractEnum):
     Enum for Forcing Sources
     """
     AORC = 'AORC'
-    NWM_RETROSPECTIVE = 'NWM Retrospective'
+    NWM_RETROSPECTIVE = 'NWM'
 
     @classmethod
     def get_model(cls) -> Type[ForcingSource]:
@@ -80,7 +80,12 @@ class GeopackageSourceEnum(AbstractEnum):
 
 class ForecastConfigEnum(AbstractEnum):
     """
-    Enum for Forecast Cycles,
+    Enum representing all active forecast configurations.
+
+    Backed by the ForecastConfiguration table. This enum exposes the full
+    set of active configurations and serves as the base dataset.
+
+    See HindcastConfigEnum for the filtered subset that supports hindcast.
     """
 
     @classmethod
@@ -91,6 +96,27 @@ class ForecastConfigEnum(AbstractEnum):
     def get_filter(cls) -> dict[str, Any]:
         # Apply the filter to return only active elements
         return {'is_active': True}
+
+
+class HindcastConfigEnum(AbstractEnum):
+    """
+    Enum representing forecast configurations that support hindcast.
+
+    Backed by the ForecastConfiguration table, but filtered to include only
+    rows where supports_hindcast=True. This is a constrained view of
+    ForecastConfigEnum for hindcast-specific workflows.
+    """
+
+    @classmethod
+    def get_model(cls) -> Type[ForecastConfiguration]:
+        return ForecastConfiguration
+
+    @classmethod
+    def get_filter(cls) -> dict[str, Any]:
+        return {
+            "is_active": True,
+            "supports_hindcast": True,
+        }
 
 
 class DomainEnum(AbstractEnum):
@@ -189,6 +215,7 @@ class PlotDefinitionsEnum(AbstractEnum):
 
 class DataTypeEnum(AbstractEnum):
     DOUBLE = 'double'
+    FLOAT = 'float'
     INTEGER = 'integer'
     BOOLEAN = 'boolean'
     STRING = 'string'
@@ -217,23 +244,13 @@ class ValidationType(AbstractEnum):
 
 
 class LogCategory(AbstractEnum):
+    GENERAL = 'general'
     CALIBRATION = 'calibration'
     VALIDATION = 'validation'
     FORECAST = 'forecast'
+    HINDCAST = 'hindcast'
     COLD_START = 'cold start'
     VERIFICATION = 'verification'
-    GLOBAL = 'global'
-
-
-class LogName(AbstractEnum):
-    NGEN_STDOUT = 'ngen stdout'
-    NGEN_CAL_STDOUT = 'ngen-cal stdout'
-    FORECAST_STDOUT = 'forecast stdout'
-    COLD_START_STDOUT = 'cold start stdout'
-    VERIFICATION = 'verification'
-    VERIFICATION_STDOUT = 'verification stdout'
-    NGEN = 'ngen'
-    MSWM = 'mswm'
 
 
 # Used for both ValidationMetrics and NWMRetrospectiveMetrics

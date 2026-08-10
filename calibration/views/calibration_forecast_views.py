@@ -2,33 +2,37 @@ import json
 import logging
 import os
 import shutil
+from datetime import timedelta
 
+from datetimerange import DateTimeRange
 from django.db import transaction
 from drf_spectacular.utils import OpenApiParameter, extend_schema, OpenApiResponse
 from rest_framework.decorators import api_view
 from rest_framework.request import Request
 from rest_framework.response import Response
 
-from calibration.enums import ForecastConfigEnum, StatusEnum, LogName
-from calibration.models import ForecastRun, ColdStartRun
+from calibration.enums import ForecastConfigEnum, StatusEnum, HindcastConfigEnum
+from calibration.models import ColdStartRun
 from calibration.run_util.run_common import submit_job
 from calibration.util.calibration_validators import ErrorResponseSerializer, LoadForecastTabResponseSerializer, \
-    ForecastRunSerializer, CreateAndRunForecastResponseSerializer, DeleteForecastRunResponseSerializer, CalibrationRunSerializer, \
-    ForecastRunDataResponseSerializer
-from calibration.util.ngen_locations import get_forecast_dir, get_forecast_output_file, get_cold_start_output_file, \
-    get_cold_start_stdout_file, get_forecast_stdout_file, get_cold_start_ngen_stdout_file, get_forecast_ngen_stdout_file, \
-    get_cold_start_mswm_log_file, get_forecast_mswm_log_file, get_cold_start_ngen_log_file, get_forecast_ngen_log_file
+    ForecastRunIdSerializer, CreateAndRunForecastResponseSerializer, DeleteForecastRunResponseSerializer, ForecastRunDataResponseSerializer, \
+    LoadForecastTabRequestSerializer, HindcastRunIdSerializer, CreateAndRunHindcastResponseSerializer, \
+    DeleteHindcastRunResponseSerializer, GetColdStartJobsForConfigurationResponseSerializer, \
+    HindcastConfigurationSerializer
+from calibration.util.ngen_locations import get_forecast_dir, get_cold_start_output_file, \
+    get_hindcast_dir, get_hindcast_output_file, get_forecast_output_file_path, get_observational_file_for_hindcast
 from calibration.views.calibration_secondary_data_views import read_csv_as_json
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import handle_exceptions, validate_response, validate_request, get_forecast_run, create_forecast_run_internal, \
     ResponseError, get_user_email, get_elapsed_str, readonly_transaction, get_calibration_run, truncate_large_fields, \
-    CerfException
+    create_hindcast_run_internal, get_hindcast_run
+from calibration.views.data_services import get_observational_data_from_data_services, get_observational_date_range_from_data_services
 
 logger = logging.getLogger(__name__)
 
 
 @extend_schema(
-    request=CalibrationRunSerializer,
+    request=LoadForecastTabRequestSerializer,
     responses={
         200: LoadForecastTabResponseSerializer,
         400: OpenApiResponse(
@@ -49,7 +53,11 @@ logger = logging.getLogger(__name__)
 @handle_exceptions
 def load_forecast_tab(request: Request) -> Response:
     """
-    Load data for the forecast tab, including forecast cycles with associated data sources and time ranges.
+    Load data for the forecast tab, including forecast cycles with associated
+    data sources and time ranges.
+
+    If hindcast_only is True, only return configurations that are valid
+    for hindcast. Otherwise, return all forecast configurations for the domain.
 
     Runs inside a read-only transaction since no writes are performed.
 
@@ -59,24 +67,37 @@ def load_forecast_tab(request: Request) -> Response:
     data = request.data if request.method == 'POST' else request.query_params.dict()
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
 
-    validator, error_return = validate_request(CalibrationRunSerializer, data)
+    validator, error_return = validate_request(LoadForecastTabRequestSerializer, data)
     if error_return:
         return error_return
 
     calibration_run_id = validator.get('calibration_run_id')
+    hindcast_only = validator.get('hindcast_only', False)
 
     calibration_run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=[StatusEnum.DONE])
     if error_return:
         return error_return
+    assert calibration_run is not None
+
+    enum_class = HindcastConfigEnum if hindcast_only else ForecastConfigEnum
 
     with readonly_transaction():
-        configuration_values = ForecastConfigEnum.get_choices_with_fields(
-            fields=['name', 'data_sources',
-                    'cycle_start', 'cycle_end', 'cycle_freq', 'fcst_win', 'availability_lag',
-                    'order'  # included ONLY so we can sort
-                    ],
-            extra_filter={'domain': calibration_run.gage.domain}
+        configuration_values = enum_class.get_choices_with_fields(
+            fields=[
+                'name',
+                'data_sources',
+                'cycle_start',
+                'cycle_end',
+                'cycle_freq',
+                'fcst_win',
+                'availability_lag',
+                'order'  # included ONLY so we can sort
+            ],
+            extra_filter={
+                'domain': calibration_run.gage.domain,
+            },
         )
+
     # Sort with NULLs at bottom
     configuration_values.sort(
         key=lambda x: (x['order'] is None, x['order'])
@@ -88,22 +109,25 @@ def load_forecast_tab(request: Request) -> Response:
 
     response = {'forecast_configuration_values': configuration_values}
 
-    response_validator, error_response = validate_response(LoadForecastTabResponseSerializer,
-                                                           response,
-                                                           fields_to_truncate=['forecast_configuration_values'],
-                                                           max_length=5
-                                                           )
+    response_validator, error_response = validate_response(
+        LoadForecastTabResponseSerializer,
+        response,
+        fields_to_truncate=['forecast_configuration_values'],
+        max_length=5
+    )
     if error_response:
         return error_response
-    logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - '
-                 f'{json.dumps(truncate_large_fields(response_validator.data, fields_to_truncate=["forecast_configuration_values"], max_length=5))}'
-                 )
+
+    logger.debug(
+        f'{get_caller_name()}() request from {get_user_email(request)} - '
+        f'{json.dumps(truncate_large_fields(response_validator.data, fields_to_truncate=["forecast_configuration_values"], max_length=5))}'
+    )
 
     return Response(response_validator.data)
 
 
 @extend_schema(
-    request=ForecastRunSerializer,
+    request=ForecastRunIdSerializer,
     responses={
         200: CreateAndRunForecastResponseSerializer,
         400: OpenApiResponse(
@@ -121,15 +145,15 @@ def load_forecast_tab(request: Request) -> Response:
 @handle_exceptions
 def clone_and_run_forecast_job(request: Request) -> Response:
     """
-    Clone an existing forecast job, creating a new calibration run with identical parameters.
+    Clone an existing forecast job, creating a new forecast run with identical parameters.
 
     :param request: The HTTP request object.
-    :return: A Response object with the cloned calibration run data.
+    :return: A Response object with the cloned forecast run data.
     """
     data = request.data if request.method == 'POST' else request.query_params.dict()
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
 
-    validator, error_return = validate_request(ForecastRunSerializer, data)
+    validator, error_return = validate_request(ForecastRunIdSerializer, data)
     if error_return:
         return error_return
 
@@ -138,8 +162,14 @@ def clone_and_run_forecast_job(request: Request) -> Response:
     run, error_return = get_forecast_run(forecast_run_id, request.user, run_status=list(StatusEnum))
     if error_return:
         return error_return
+    assert run is not None
 
-    new_forecast_run = create_forecast_run_internal(run.calibration_run, run.cold_start_run, run.configuration, run.cycle_date)
+    new_forecast_run = create_forecast_run_internal(
+        run.calibration_run,
+        run.cold_start_run,
+        run.configuration,
+        run.cycle_date
+    )
     submit_job(new_forecast_run)
 
     response = {
@@ -153,13 +183,80 @@ def clone_and_run_forecast_job(request: Request) -> Response:
     if error_response:
         return error_response
     logger.debug(
-        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
+        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - '
+        f'{json.dumps(response_validator.data)}')
 
     return Response(response_validator.data)
 
 
 @extend_schema(
-    request=ForecastRunSerializer,
+    request=HindcastRunIdSerializer,
+    responses={
+        200: CreateAndRunHindcastResponseSerializer,
+        400: OpenApiResponse(
+            response=ErrorResponseSerializer,
+            description="Validation error or parsing error"
+        ),
+        500: OpenApiResponse(
+            response=ErrorResponseSerializer,
+            description="Internal server error"
+        )
+    },
+    description="Clone and submit a hindcast job"
+)
+@api_view(['POST', 'GET'])
+@handle_exceptions
+def clone_and_run_hindcast_job(request: Request) -> Response:
+    """
+    Clone an existing hindcast job, creating a new hindcast run with identical parameters.
+
+    :param request: The HTTP request object.
+    :return: A Response object with the cloned hindcast run data.
+    """
+    data = request.data if request.method == 'POST' else request.query_params.dict()
+    logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
+
+    validator, error_return = validate_request(HindcastRunIdSerializer, data)
+    if error_return:
+        return error_return
+
+    hindcast_run_id = validator.get('hindcast_run_id')
+
+    run, error_return = get_hindcast_run(hindcast_run_id, request.user, run_status=list(StatusEnum))
+    if error_return:
+        return error_return
+    assert run is not None
+
+    new_hindcast_run = create_hindcast_run_internal(
+        run.calibration_run,
+        run.cold_start_run,
+        run.configuration,
+        run.cycle_date,
+        run.interval_cycle,
+        run.num_iterations,
+        run.created_new_cold_start
+    )
+    submit_job(new_hindcast_run)
+
+    response = {
+        'message': f'Hindcast Job {new_hindcast_run.id} cloned from Job {run.id} and submitted for Calibration Job {new_hindcast_run.calibration_run.id}',
+        'calibration_run_id': new_hindcast_run.calibration_run.id,
+        'hindcast_run_id': new_hindcast_run.id,
+        'submit_date': new_hindcast_run.submit_date
+    }
+
+    response_validator, error_response = validate_response(CreateAndRunHindcastResponseSerializer, response)
+    if error_response:
+        return error_response
+    logger.debug(
+        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - '
+        f'{json.dumps(response_validator.data)}')
+
+    return Response(response_validator.data)
+
+
+@extend_schema(
+    request=ForecastRunIdSerializer,
     responses={
         200: ForecastRunDataResponseSerializer,
         400: OpenApiResponse(
@@ -171,7 +268,7 @@ def clone_and_run_forecast_job(request: Request) -> Response:
             description="Internal server error"
         )
     },
-    description="Delete a forecast job"
+    description="Return the forecast timeseries data"
 )
 @api_view(['POST', 'GET'])
 @handle_exceptions
@@ -180,12 +277,12 @@ def get_forecast_timeseries_data(request: Request) -> Response:
     Load results for a forecast job (and related cold start job).
 
     :param request: HTTP request containing forecast_run_id
-    :return: JSON response with forecast cycle values.
+    :return: JSON response with forecast timeseries values.
     """
     data = request.data if request.method == 'POST' else request.query_params.dict()
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
 
-    validator, error_return = validate_request(ForecastRunSerializer, data)
+    validator, error_return = validate_request(ForecastRunIdSerializer, data)
     if error_return:
         return error_return
 
@@ -194,9 +291,10 @@ def get_forecast_timeseries_data(request: Request) -> Response:
     run, error_return = get_forecast_run(forecast_run_id, request.user, run_status=list(StatusEnum))
     if error_return:
         return error_return
+    assert run is not None
 
     # Read the output data from forecast (and possibly cold start)
-    forecast_output = get_forecast_output_file(run)
+    forecast_output = get_forecast_output_file_path(run)
     if not os.path.exists(forecast_output):
         raise FileNotFoundError(f"File not found: {forecast_output}")
 
@@ -251,7 +349,166 @@ def get_forecast_timeseries_data(request: Request) -> Response:
 
 
 @extend_schema(
-    request=ForecastRunSerializer,
+    request=HindcastRunIdSerializer,
+    responses={
+        200: ForecastRunDataResponseSerializer,
+        400: OpenApiResponse(
+            response=ErrorResponseSerializer,
+            description="Validation error or parsing error"
+        ),
+        500: OpenApiResponse(
+            response=ErrorResponseSerializer,
+            description="Internal server error"
+        )
+    },
+    description="Return the hindcast timeseries data for all iterations"
+)
+@api_view(['POST', 'GET'])
+@handle_exceptions
+def get_hindcast_timeseries_data(request: Request) -> Response:
+    """
+    Load results for a hindcast job for all iterations.
+
+    Rows with the same time are grouped together. Each iteration value is stored
+    under its own key such as hindcast_0, hindcast_1, hindcast_2, etc.
+
+    Observed streamflow is also included under observed_flow.
+
+    :param request: HTTP request containing hindcast_run_id
+    :return: JSON response with hindcast timeseries values for all iterations.
+    """
+    data = request.data if request.method == 'POST' else request.query_params.dict()
+    logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
+
+    validator, error_return = validate_request(HindcastRunIdSerializer, data)
+    if error_return:
+        return error_return
+
+    hindcast_run_id = validator.get('hindcast_run_id')
+
+    run, error_return = get_hindcast_run(hindcast_run_id, request.user, run_status=list(StatusEnum))
+    if error_return:
+        return error_return
+    assert run is not None
+
+    iterations = _get_hindcast_iterations(run.interval_cycle, run.num_iterations)
+
+    timeseries_by_time: dict[str, dict[str, object]] = {}
+
+    # Build the full hindcast output window in UTC.
+    time_start = run.cycle_date
+    time_end = run.cycle_date + timedelta(
+        hours=run.interval_cycle * (run.num_iterations - 1) + run.configuration.fcst_win
+    )
+
+    # Fetch observed data for the same UTC window used by the hindcast output.
+    date_time_range = DateTimeRange(time_start, time_end)
+
+    # Verify that Data Services has observations for the requested hindcast window.
+    available_date_range = get_observational_date_range_from_data_services(run.calibration_run)
+
+    available_start = available_date_range.start_datetime
+    available_end = available_date_range.end_datetime
+    requested_start = date_time_range.start_datetime
+    requested_end = date_time_range.end_datetime
+
+    # These should always be set if Data Services behaved correctly
+    assert available_start is not None and available_end is not None
+    assert requested_start is not None and requested_end is not None
+
+    observations_available = (
+            available_start <= requested_start
+            and requested_end <= available_end
+    )
+
+    if not observations_available:
+        logger.warning(
+            "Observed streamflow is not available for the full hindcast window. "
+            f"Requested: {requested_start} to {requested_end}. "
+            f"Available: {available_start} to {available_end}."
+        )
+    else:
+        obs_path = get_observational_file_for_hindcast(run)
+
+        # Fetch observed streamflow only when Data Services has the full requested range.
+        obs_csv = get_observational_data_from_data_services(run.calibration_run, date_time_range)
+
+        with open(obs_path, "w", encoding="utf-8", newline="") as f:
+            f.write(obs_csv)
+
+        # Add observed streamflow to the shared time-indexed response.
+        observed_data = read_csv_as_json(obs_path, keys=["Time", "observed_flow"])
+
+        for row in observed_data:
+            time_value = row["Time"]
+
+            if time_value not in timeseries_by_time:
+                timeseries_by_time[time_value] = {"time": time_value}
+
+            timeseries_by_time[time_value]["observed_flow"] = row["observed_flow"]
+
+    # Add each hindcast iteration to the shared time-indexed response.
+    for iteration in iterations:
+        hindcast_output = get_hindcast_output_file(run, iteration)
+        if not os.path.exists(hindcast_output):
+            raise FileNotFoundError(f"File not found: {hindcast_output}")
+
+        # Explicitly enforce the exact keys we want instead of inheriting CSV header
+        hindcast_data = read_csv_as_json(hindcast_output, keys=["Time", "sim_flow"])
+        iteration_key = f"hindcast_{iteration}"
+
+        for row in hindcast_data:
+            time_value = row["Time"]
+
+            if time_value not in timeseries_by_time:
+                timeseries_by_time[time_value] = {"time": time_value}
+
+            timeseries_by_time[time_value][iteration_key] = row["sim_flow"]
+
+    timeseries_data = list(timeseries_by_time.values())
+    # Ensure strict chronological ordering by timestamp
+    timeseries_data.sort(key=lambda x: x["time"])
+
+    response = {
+        'hindcast_run_id': hindcast_run_id,
+        'timeseries_data': timeseries_data,
+    }
+
+    response_validator, error_response = validate_response(
+        ForecastRunDataResponseSerializer,
+        response,
+        fields_to_truncate=['timeseries_data'],
+        max_length=10
+    )
+    if error_response:
+        return error_response
+
+    logger.debug(
+        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - '
+        f'{json.dumps(truncate_large_fields(response_validator.data, fields_to_truncate=["timeseries_data"], max_length=10))}'
+    )
+
+    return Response(response_validator.data)
+
+
+def _get_hindcast_iterations(interval_cycle: int, num_iterations: int) -> list[int]:
+    """
+    Generate the list of hindcast iteration values.
+
+    Each iteration advances by `interval_cycle`, starting at 0.
+
+    Example:
+        interval_cycle=3, num_iterations=4 -> [0, 3, 6, 9]
+
+    :param interval_cycle: Step size between hindcast iterations.
+    :param num_iterations: Number of iterations to generate.
+    :return: List of hindcast iteration values.
+    """
+    return [i * interval_cycle for i in range(num_iterations)]
+
+
+@extend_schema(
+    request=ForecastRunIdSerializer,
     responses={
         200: DeleteForecastRunResponseSerializer,
         400: OpenApiResponse(
@@ -278,7 +535,7 @@ def delete_forecast_job(request: Request) -> Response:
     data = request.data if request.method == 'POST' else request.query_params.dict()
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
 
-    validator, error_return = validate_request(ForecastRunSerializer, data)
+    validator, error_return = validate_request(ForecastRunIdSerializer, data)
     if error_return:
         return error_return
 
@@ -287,6 +544,7 @@ def delete_forecast_job(request: Request) -> Response:
     run, error_return = get_forecast_run(forecast_run_id, request.user, run_status=list(StatusEnum))
     if error_return:
         return error_return
+    assert run is not None
 
     if run.status in [StatusEnum.RUNNING.db_instance, StatusEnum.SUBMITTED.db_instance]:
         return ResponseError(f'Forecast Job {run.id} is running.  Cannot delete a running job')
@@ -324,45 +582,165 @@ def delete_forecast_job(request: Request) -> Response:
     return Response(response_validator.data)
 
 
-def get_forecast_log(forecast_run: ForecastRun, log_name: LogName) -> str:
+@extend_schema(
+    request=HindcastRunIdSerializer,
+    responses={
+        200: DeleteHindcastRunResponseSerializer,
+        400: OpenApiResponse(
+            response=ErrorResponseSerializer,
+            description="Validation error or parsing error"
+        ),
+        500: OpenApiResponse(
+            response=ErrorResponseSerializer,
+            description="Internal server error"
+        )
+    },
+    description="Delete a hindcast job"
+)
+@api_view(['POST', 'GET'])
+@handle_exceptions
+def delete_hindcast_job(request: Request) -> Response:
     """
-    Fetches the appropriate log file for a specific forecast run.
+    Delete a hindcast job
 
-    - Supports logs like `ngen.stdout` and `forecast.stdout`.
-
-    :param forecast_run: The ForecastRun object for which the log is retrieved.
-    :param log_name: The LogName enum specifying the log type.
-    :return: The path to the log file.
+    :param request: The HTTP request object.
+    :return: A Response object with the deletion confirmation.
     """
-    if log_name == LogName.FORECAST_STDOUT:
-        return get_forecast_stdout_file(forecast_run)
-    elif log_name == LogName.NGEN_STDOUT:
-        return get_forecast_ngen_stdout_file(forecast_run)
-    elif log_name == LogName.MSWM:
-        return get_forecast_mswm_log_file(forecast_run)
-    elif log_name == LogName.NGEN:
-        return get_forecast_ngen_log_file(forecast_run)
+    data = request.data if request.method == 'POST' else request.query_params.dict()
+    logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
 
-    raise CerfException(f'Invalid log_name: {log_name}')
+    validator, error_return = validate_request(HindcastRunIdSerializer, data)
+    if error_return:
+        return error_return
+
+    hindcast_run_id = validator.get('hindcast_run_id')
+
+    run, error_return = get_hindcast_run(hindcast_run_id, request.user, run_status=list(StatusEnum))
+    if error_return:
+        return error_return
+    assert run is not None
+
+    if run.status in [StatusEnum.RUNNING.db_instance, StatusEnum.SUBMITTED.db_instance]:
+        return ResponseError(f'Hindcast Job {run.id} is running.  Cannot delete a running job')
+
+    run_id = run.id
+    hindcast_dir = get_hindcast_dir(run)  # Save before delete
+
+    run.delete()
+
+    logger.info(f"Deleting directory {hindcast_dir}")
+    shutil.rmtree(hindcast_dir, ignore_errors=True)
+
+    shutil.rmtree(get_hindcast_dir(run), ignore_errors=True)
+
+    message = f"Hindcast Job {run_id} has been deleted"
+
+    response = {'message': message, 'hindcast_run_id': run_id}
+
+    response_validator, error_response = validate_response(DeleteHindcastRunResponseSerializer, response)
+    if error_response:
+        return error_response
+    logger.debug(
+        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
+
+    return Response(response_validator.data)
 
 
-def get_cold_start_log(cold_start_run: ColdStartRun, log_name: LogName) -> str:
+@extend_schema(
+    request=HindcastConfigurationSerializer,
+    responses={
+        200: GetColdStartJobsForConfigurationResponseSerializer,
+        400: OpenApiResponse(
+            response=ErrorResponseSerializer,
+            description="Validation error or parsing error"
+        ),
+        500: OpenApiResponse(
+            response=ErrorResponseSerializer,
+            description="Internal server error"
+        )
+    },
+    description="Return a list of cold start jobs that are valid for a configuration"
+)
+@api_view(['POST', 'GET'])
+@handle_exceptions
+def get_cold_start_jobs_for_configuration(request: Request) -> Response:
     """
-    Fetches the appropriate log file for a specific cold start run.
+    Get a list of cold start jobs that are valid to use with a given configuration
 
-    - Supports logs like `ngen.stdout` and `cold_start.stdout`.
-
-    :param cold_start_run: The ColdStartRun object for which the log is retrieved.
-    :param log_name: The LogName enum specifying the log type.
-    :return: The path to the log file.
+    :param request: The HTTP request object.
+    :return: A Response object with a list of jobs.
     """
-    if log_name == LogName.COLD_START_STDOUT:
-        return get_cold_start_stdout_file(cold_start_run)
-    elif log_name == LogName.NGEN_STDOUT:
-        return get_cold_start_ngen_stdout_file(cold_start_run)
-    elif log_name == LogName.MSWM:
-        return get_cold_start_mswm_log_file(cold_start_run)
-    elif log_name == LogName.NGEN:
-        return get_cold_start_ngen_log_file(cold_start_run)
+    data = request.data if request.method == 'POST' else request.query_params.dict()
+    logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
 
-    raise CerfException(f'Invalid log_name: {log_name}')
+    validator, error_return = validate_request(HindcastConfigurationSerializer, data)
+    if error_return:
+        return error_return
+
+    calibration_run_id = validator.get('calibration_run_id')
+    configuration_name = validator.get('configuration_name')
+
+    calibration_run, error_return = get_calibration_run(
+        calibration_run_id, request.user, run_status=[StatusEnum.DONE]
+    )
+    if error_return:
+        return error_return
+    assert calibration_run is not None
+
+    configuration = ForecastConfigEnum.get_instance(configuration_name)
+
+    if not configuration.supports_hindcast:
+        return ResponseError(f"Configuration '{configuration_name}' does not support hindcast")
+
+    cycle_freq = configuration.cycle_freq
+
+    # Get all cold starts which belong to this user and are DONE.
+    candidate_runs = (
+        ColdStartRun.objects
+        .select_related('status', 'calibration_run', 'calibration_run__owner')
+        .filter(
+            calibration_run=calibration_run,
+            status=StatusEnum.DONE.db_instance
+        )
+        .order_by('-cold_start_date')
+    )
+
+    cold_start_jobs = []
+    for run in candidate_runs:
+        cold_start_date = run.cold_start_date
+
+        # The cold_start_date should always be on an exact hour.
+        if (
+                cold_start_date.minute != 0
+                or cold_start_date.second != 0
+                or cold_start_date.microsecond != 0
+        ):
+            continue
+
+        # Keep only hours that align with the configuration cycle frequency.
+        if cold_start_date.hour % cycle_freq != 0:
+            continue
+
+        cold_start_jobs.append({
+            'cold_start_run_id': run.id,
+            'cold_start_status': run.status.name,  # if run.status else None,
+            'cold_start_date': run.cold_start_date,
+            'cold_start_cycle_date': run.cycle_date,
+            'cold_start_submit_date': run.submit_date,
+        })
+
+    response = {'cold_start_jobs': cold_start_jobs}
+
+    response_validator, error_response = validate_response(
+        GetColdStartJobsForConfigurationResponseSerializer,
+        response
+    )
+    if error_response:
+        return error_response
+
+    logger.debug(
+        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - '
+        f'{json.dumps(response_validator.data)}'
+    )
+
+    return Response(response_validator.data)

@@ -3,7 +3,6 @@ import json
 import logging
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import MAXYEAR, MINYEAR, datetime, timezone
 from typing import Literal
 from urllib.parse import urlparse
@@ -18,19 +17,19 @@ from rest_framework.decorators import api_view
 from rest_framework.request import Request
 from rest_framework.response import Response
 
-from calibration.enums import StatusEnum
+from calibration.enums import StatusEnum, ForcingSourceEnum
 from calibration.enums_vanilla import JobType
 from calibration.models import CalibrationFormulation, CalibrationParameter, CalibrationRun
 from calibration.util import cloud_util
 from calibration.util.caching import get_cached_module_by_name, have_LSTM, get_cached_modules_by_id
-from calibration.util.calibration_validators import CalibrationRunSerializer, SaveTuningRequestSerializer, LoadTuningResponseSerializer, \
-    GenericResponseSerializer, ErrorResponseSerializer, UploadUserParameterFile, UserParameterFileUploadResponse
-from calibration.util.ngen_locations import get_observational_file_for_job, get_forcing_dir_for_job
+from calibration.util.calibration_validators import CalibrationRunIdSerializer, SaveTuningRequestSerializer, LoadTuningResponseSerializer, \
+    ErrorResponseSerializer, UploadUserParameterFile, UserParameterFileUploadResponse, \
+    ValidateParametersResponseSerializer, SaveTuningResponseSerializer
 from calibration.views import ngen_cal_input
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import get_calibration_run, ResponseError, handle_exceptions, validate_response, CerfException, validate_request, \
-    get_valid_path, format_datetime, get_user_email, get_elapsed_str, readonly_transaction
-from calibration.views.data_services import should_use_bmi_forcing
+    format_datetime, get_user_email, get_elapsed_str, readonly_transaction, ErrorReport
+from calibration.views.data_services import get_observational_date_range_from_data_services
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +38,7 @@ MAX_TIME = datetime(MINYEAR, 1, 1, 0, 0, 0).replace(tzinfo=timezone.utc)
 
 
 @extend_schema(
-    request=CalibrationRunSerializer,
+    request=CalibrationRunIdSerializer,
     responses={
         200: LoadTuningResponseSerializer,
         400: OpenApiResponse(
@@ -73,7 +72,7 @@ def load_tuning_tab(request: Request) -> Response:
     data = request.data if request.method == 'POST' else request.query_params.dict()
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
 
-    validator, error_return = validate_request(CalibrationRunSerializer, data)
+    validator, error_return = validate_request(CalibrationRunIdSerializer, data)
     if error_return:
         return error_return
 
@@ -84,6 +83,7 @@ def load_tuning_tab(request: Request) -> Response:
         run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=list(StatusEnum))
         if error_return:
             return error_return
+        assert run is not None
 
         # Compute time range without persisting
         time_range = compute_time_range(run)
@@ -246,54 +246,35 @@ def compute_time_range(run: CalibrationRun) -> dict[str, datetime]:
         logger.info("Time range is already set")
         return {'start_time': run.time_range_start, 'end_time': run.time_range_end}
 
-    observation_path = get_valid_path(
-        run.observational_eds_file_path,
-        lambda: get_observational_file_for_job(run)
-    )
-    forcing_path = get_valid_path(
-        run.forcing_eds_dir_path,
-        lambda: get_forcing_dir_for_job(run)
-    )
-
-    use_bmi = should_use_bmi_forcing(run)
-
-    # Explicitly log the resolved paths
-    logger.info(
-        f"get_time_range: observation_path={observation_path}, "
-        f"forcing_path={forcing_path},"
-        f"use_bmi_forcing={use_bmi}"
-    )
-
-    # Observation data is always required
-    if not observation_path:
-        return {}
-
-    # TODO More cleanup when we are exclusively using bmi forcing
-    # For CSV forcing, forcing_path is also required
-    if not use_bmi and not forcing_path:
+    if not run.gage:
+        logger.info("Skipping time range computation because run has no gage")
         return {}
 
     # If both paths are available, calculate intersection and update run
     daterange_intersection_start = time.perf_counter()
 
-    daterange = get_date_range_intersection(
-        observation_path,
-        None if use_bmi else forcing_path
+    daterange = get_date_range_intersection(run)
+
+    logger.info(
+        f"Date range intersection completed in "
+        f"{time.perf_counter() - daterange_intersection_start:.2f}s"
     )
 
-    logger.info(f"Date range intersection completed in "
-                f"{time.perf_counter() - daterange_intersection_start:.2f}s")
-
     if daterange:
+        start_time = daterange.start_datetime
+        end_time = daterange.end_datetime
+
+        assert start_time is not None and end_time is not None
+
         return {
-            'start_time': daterange.start_datetime,
-            'end_time': daterange.end_datetime
+            'start_time': start_time,
+            'end_time': end_time
         }
 
     return {}
 
 
-def persist_time_range(run: CalibrationRun, time_range: dict[str, datetime]) -> None:
+def persist_time_range(run: CalibrationRun, time_range: dict[str, datetime | None]) -> None:
     """
     Persist the computed time range to the database if values are provided.
 
@@ -341,7 +322,7 @@ def get_times(run: CalibrationRun) -> tuple[dict[str, datetime], dict[str, datet
 @extend_schema(
     request=SaveTuningRequestSerializer,
     responses={
-        200: GenericResponseSerializer,
+        200: SaveTuningResponseSerializer,
         400: OpenApiResponse(
             response=ErrorResponseSerializer,
             description="Validation error or parsing error"
@@ -375,6 +356,30 @@ def save_tuning_tab(request: Request) -> Response:
     run, error_return = get_calibration_run(calibration_run_id, request.user)
     if error_return:
         return error_return
+    assert run is not None
+
+    # Require at least one module selected for this job (i.e., at least one formulation exists)
+    has_any_modules = CalibrationFormulation.objects.filter(calibration_run=run).exists()
+    if not has_any_modules:
+        return ResponseError("You must select at least one module before selecting tuning parameters")
+
+    # --- Validate parameter selection rules ---
+    module_names_for_job = set(
+        CalibrationFormulation.objects
+        .filter(calibration_run=run)
+        .values_list("module__name", flat=True)
+    )
+
+    selected_module_names = {p["module"] for p in (parameters or []) if p.get("module")}
+
+    parameter_rule_report = ErrorReport()
+    validate_parameter_rules(
+        module_names_for_job=module_names_for_job,
+        selected_module_names=selected_module_names,
+        have_LSTM_flag=have_LSTM(run),
+        has_any_params=bool(selected_module_names),
+        error_object=parameter_rule_report,
+    )
 
     if have_LSTM(run) and parameters:
         return ResponseError('You cannot specify parameters when using LSTM')
@@ -389,7 +394,7 @@ def save_tuning_tab(request: Request) -> Response:
         return ResponseError('Parameters cannot be specified without a gage')
 
     # The UI already does the parameter validation, so we don't have to bother sending the warnings
-    parameter_errors, _ = validate_parameters(run, parameters)
+    parameter_errors, _ = validate_parameter_values(run, parameters)
     if parameter_errors:
         return ResponseError(parameter_errors)
 
@@ -402,7 +407,12 @@ def save_tuning_tab(request: Request) -> Response:
 
     response = {'message': f'Calibration Job {run.id} updated', 'calibration_run_id': run.id, 'status': run.status.name}
 
-    response_validator, error_response = validate_response(GenericResponseSerializer, response)
+    if parameter_rule_report.has_warnings():
+        response["parameter_warnings"] = parameter_rule_report.warnings
+    if parameter_rule_report.has_errors():
+        response["parameter_errors"] = parameter_rule_report.errors
+
+    response_validator, error_response = validate_response(SaveTuningResponseSerializer, response)
     if error_response:
         return error_response
     logger.debug(
@@ -444,6 +454,7 @@ def upload_user_parameters(request: Request) -> Response:
     run, error_return = get_calibration_run(calibration_run_id, request.user)
     if error_return:
         return error_return
+    assert run is not None
 
     files = request.FILES.getlist('user_parameter_file')
     if not files:
@@ -632,6 +643,89 @@ def upload_user_parameters(request: Request) -> Response:
     return Response(response_validator.data)
 
 
+@extend_schema(
+    request=CalibrationRunIdSerializer,
+    responses={
+        200: ValidateParametersResponseSerializer,
+        400: OpenApiResponse(
+            response=ErrorResponseSerializer,
+            description="Validation error or parsing error"
+        ),
+        500: OpenApiResponse(
+            response=ErrorResponseSerializer,
+            description="Internal server error"
+        )
+    },
+    description="Validate the tuning parameter selection rules"
+)
+@api_view(['POST'])
+@handle_exceptions
+def validate_parameters(request: Request) -> Response:
+    """
+    Validate the selected tuning parameters for a calibration run.
+
+    Applies parameter selection rules (e.g., LSTM/Topoflow requirements) and returns any
+    warnings/errors in the same style as validate_formulation_tab.
+
+    :param request: Django REST Framework request with calibration_run_id.
+    :return: Response containing optional parameter_warnings and parameter_errors lists.
+    """
+    data = request.data if request.method == 'POST' else request.query_params.dict()
+    logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
+
+    validator, error_return = validate_request(CalibrationRunIdSerializer, data)
+    if error_return:
+        return error_return
+
+    calibration_run_id = validator.get('calibration_run_id')
+
+    run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=list(StatusEnum))
+    if error_return:
+        return error_return
+    assert run is not None
+
+    # --- Gather what validate_parameter_selection_rules needs ---
+    module_names_for_job = set(
+        CalibrationFormulation.objects
+        .filter(calibration_run=run)
+        .values_list("module__name", flat=True)
+    )
+
+    selected_module_names = set(
+        CalibrationParameter.objects
+        .filter(calibration_formulation__calibration_run=run, user_selected_for_tuning=True)
+        .values_list("calibration_formulation__module__name", flat=True)
+        .distinct()
+    )
+
+    error_object = ErrorReport()
+
+    validate_parameter_rules(
+        module_names_for_job=module_names_for_job,
+        selected_module_names=selected_module_names,
+        have_LSTM_flag=have_LSTM(run),
+        has_any_params=bool(selected_module_names),
+        error_object=error_object,
+    )
+
+    response: dict[str, object] = {}
+    if error_object.has_warnings():
+        response["parameter_warnings"] = error_object.warnings
+    if error_object.has_errors():
+        response["parameter_errors"] = error_object.errors
+
+    response_validator, error_response = validate_response(ValidateParametersResponseSerializer, response)
+    if error_response:
+        return error_response
+
+    logger.debug(
+        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - '
+        f'{json.dumps(response_validator.data)}'
+    )
+
+    return Response(response_validator.data)
+
+
 def validate_simulation_within_range(
         data_start: datetime,
         data_end: datetime,
@@ -694,7 +788,8 @@ def validate_time_range_against_data(
     return None
 
 
-def validate_and_save_times(run: CalibrationRun, calibration_times: dict[str, datetime], validation_times: dict[str, datetime]) -> str | None:
+def validate_and_save_times(run: CalibrationRun, calibration_times: dict[str, datetime] | None,
+                            validation_times: dict[str, datetime] | None) -> str | None:
     """
     Validates calibration and validation time ranges, ensuring they fall within the allowable data range.
     If valid, updates the `CalibrationRun` instance with the provided times.
@@ -761,7 +856,7 @@ def validate_and_save_times(run: CalibrationRun, calibration_times: dict[str, da
     full_evaluation_end_date: datetime | None = None
 
     # Define the expanded evaluation range from the minimum and maximum evaluation start/end times
-    if validation_evaluation_range and calibration_evaluation_range:
+    if validation_evaluation_range is not None and calibration_evaluation_range is not None:
         full_evaluation_start_date, full_evaluation_end_date = get_full_evaluation_date_range_from_ranges(
             calibration_evaluation_range,
             validation_evaluation_range
@@ -864,7 +959,7 @@ def validate_time_range(
         start_time: datetime | None,
         end_time: datetime | None,
         field_name: str
-) -> tuple[str | None, tuple[datetime | None, datetime | None] | None]:
+) -> tuple[str | None, tuple[datetime, datetime] | None]:
     """
     Validates a given time range, ensuring that both start and end times are provided and that the start time
     is not later than the end time.
@@ -880,23 +975,26 @@ def validate_time_range(
 
     # Check if start time is earlier than or equal to end time
     if start_time > end_time:
-        return (f'{field_name.capitalize()} must have a start time earlier than or equal to the end time - '
-                f'{format_datetime(start_time)} > {format_datetime(end_time)}'), None
+        return (
+            f'{field_name.capitalize()} must have a start time earlier than or equal to the end time - '
+            f'{format_datetime(start_time)} > {format_datetime(end_time)}'
+        ), None
 
     # If all validations pass, return the valid range
     return None, (start_time, end_time)
 
 
-def validate_parameters(run: CalibrationRun, parameters: list[dict[str, str | float]]) -> tuple[list[str], list[str]]:
+def validate_parameter_values(run: CalibrationRun, parameters: list[dict[str, str | float]]) -> tuple[list[str], list[str]]:
     """
-    Validates each provided parameter against existing calibration parameters for a specific calibration run.
-    Returns a tuple: (errors, warnings)
-    - Errors: invalid parameter names or modules
-    - Warnings: initial values outside of [minimum, maximum]
+    Validate user-specified parameter values against the parameters available for this run.
 
-    :param run: The calibration run being validated.
-    :param parameters: A list of dictionaries containing parameter details.
-    :return: Tuple containing two lists — error messages and warning messages.
+    Returns (errors, warnings):
+      - errors: invalid module names or invalid parameter names for a valid module
+      - warnings: initial_value outside [minimum, maximum] when all three values are provided
+
+    :param run: CalibrationRun being validated.
+    :param parameters: List of parameter dicts (expects keys: module, name, minimum, maximum, initial_value).
+    :return: (error_messages, warning_messages)
     """
     if not parameters:
         return [], []
@@ -925,7 +1023,13 @@ def validate_parameters(run: CalibrationRun, parameters: list[dict[str, str | fl
     # Validate each provided parameter
     for p in parameters:
         module_name = p['module']
-        key = (module_name, p['name'])
+        param_name = p['name']
+
+        if not isinstance(module_name, str) or not isinstance(param_name, str):
+            continue
+
+        key = (module_name, param_name)
+
         if key not in parameter_lookup:
             # Check if module is valid
             if get_cached_module_by_name(module_name):
@@ -933,15 +1037,19 @@ def validate_parameters(run: CalibrationRun, parameters: list[dict[str, str | fl
             else:
                 invalid_modules.append(key)
         else:
-            min_val = p.get('minimum')
-            max_val = p.get('maximum')
-            initial = p.get('initial_value')
+            min_val_raw = p.get('minimum')
+            max_val_raw = p.get('maximum')
+            initial_raw = p.get('initial_value')
 
-            # Only check range if all values are provided
-            if min_val is not None and max_val is not None and initial is not None:
+            if min_val_raw is not None and max_val_raw is not None and initial_raw is not None:
+                min_val = float(min_val_raw)
+                max_val = float(max_val_raw)
+                initial = float(initial_raw)
+
+                # Only check range if all values are provided
                 if not (min_val <= initial <= max_val):
                     msg = (
-                        f"Initial value {initial} for parameter '{p['name']}' in module '{module_name}' "
+                        f"Initial value {initial} for parameter '{param_name}' in module '{module_name}' "
                         f"is outside the range [{min_val}, {max_val}]"
                     )
                     logger.warning(msg)
@@ -1009,12 +1117,21 @@ def save_parameters(run: CalibrationRun, parameters: list[dict[str, str | float]
         for p in existing_parameters
     }
 
-    selected_for_tuning = {(p['module'], p['name']) for p in parameters}
+    selected_for_tuning = {
+        (p['module'], p['name'])
+        for p in parameters
+    }
     parameters_to_update = []
 
     # Update existing parameters
     for p in parameters:
-        key = (p['module'], p['name'])
+        module_name = p['module']
+        param_name = p['name']
+
+        if not isinstance(module_name, str) or not isinstance(param_name, str):
+            continue
+
+        key = (module_name, param_name)
         existing = parameter_lookup.get(key)
         if not existing:
             continue  # Ignore unknown parameters
@@ -1075,6 +1192,7 @@ def _as_local_path(path: str) -> str:
     return path
 
 
+# TODO This is only used to read Forcing iles from S3.  We can get rid of this once we use BMI forcing.  We can also get rid of localize_to_path
 def get_csv_daterange(path: str) -> DateTimeRange:
     """
     Reads a CSV file (local or cloud) that is assumed to be sorted by date/time and efficiently determines
@@ -1132,61 +1250,101 @@ def get_csv_daterange(path: str) -> DateTimeRange:
         raise CerfException(f"Error reading file {path}: {e}")
 
 
-def get_forcing_date_range(forcing_dir_path: str) -> DateTimeRange | None:
-    """
-    Computes the encompassing date range for all valid CSV files in a given directory.
-    Supports both local paths and cloud URLs.
-
-    :param forcing_dir_path: Directory path or cloud URL containing forcing data files.
-    :return: DateTimeRange covering all CSV files, or None if no files found.
-    """
-    csv_files = cloud_util.list_files(forcing_dir_path, pattern="*.csv")
-    if not csv_files:
-        return None
-
-    # Use ThreadPoolExecutor for parallel processing
-    with ThreadPoolExecutor(max_workers=min(32, (os.cpu_count() or 1) + 4)) as executor:
-        ranges = list(executor.map(get_csv_daterange, csv_files))
-
-    # Combine all individual ranges into a single encompassing range
-    timerange = None
-    for r in ranges:
-        timerange = timerange.encompass(r) if timerange else r
-    return timerange
-
-
-def get_observation_date_range(observational_filepath: str) -> DateTimeRange:
-    """
-    Calculates the date range for a single observational data file.
-    Supports both local paths and cloud URLs.
-
-    :param observational_filepath: File path or cloud URL to the observational data.
-    :return: DateTimeRange based on the file's min and max timestamps.
-    """
-    return get_csv_daterange(observational_filepath)
-
-
-def get_date_range_intersection(observational_file_path: str, forcing_dir_path: str = None) -> DateTimeRange | None:
+def get_date_range_intersection(run: CalibrationRun) -> DateTimeRange | None:
     """
     Calculates the intersection of date ranges between observational and forcing data.
     Supports both local paths and cloud URLs.
 
-    :param observational_file_path: File path or cloud URL to the observational data.
-    :param forcing_dir_path: Directory path or cloud URL containing forcing data.
+    :param run Calibration Run
     :return: DateTimeRange representing the overlapping period, or None if no overlap.
     """
     # Calculate the date range for the observational data
-    obs_range = get_observation_date_range(observational_file_path)
+    obs_range = get_observational_date_range_from_data_services(run)
     logger.debug(f"obs_range: {obs_range}")
 
-    # Calculate the date range for the forcing data
-    forcing_range = get_forcing_date_range(forcing_dir_path) if forcing_dir_path else settings.FORCING_BMI_DATE_RANGE
+    # Use fixed date range for the forcing data
+    forcing_range = (settings.FORCING_AORC_BMI_DATE_RANGE
+                     if run.forcing_source == ForcingSourceEnum.AORC.db_instance
+                     else settings.FORCING_NWM_RETROSPECTIVE_BMI_DATE_RANGE)
     logger.debug(f"forcing_range: {forcing_range}")
 
     # Compute the intersection of the two ranges
     if obs_range and forcing_range:
-        start_time = max(obs_range.start_datetime, forcing_range.start_datetime)
-        end_time = min(obs_range.end_datetime, forcing_range.end_datetime)
+        obs_start = obs_range.start_datetime
+        obs_end = obs_range.end_datetime
+        forcing_start = forcing_range.start_datetime
+        forcing_end = forcing_range.end_datetime
+
+        assert obs_start is not None and obs_end is not None
+        assert forcing_start is not None and forcing_end is not None
+
+        start_time = max(obs_start, forcing_start)
+        end_time = min(obs_end, forcing_end)
+
         if start_time <= end_time:
             return DateTimeRange(start_time, end_time)
+
     return None
+
+
+def validate_parameter_rules(
+        *,
+        module_names_for_job: set[str],
+        selected_module_names: set[str],
+        have_LSTM_flag: bool,
+        has_any_params: bool,
+        error_object: ErrorReport
+) -> None:
+    """
+    Enforce parameter selection rules based on the modules included in the job.
+
+    Rules:
+      - If LSTM is present: no parameters may be selected.
+      - If Topoflow-Glacier is present: at least one Topoflow-Glacier parameter must be selected.
+        If any other non-Topoflow modules are present: at least one non-Topoflow parameter must also be selected.
+      - Otherwise: at least one parameter must be selected.
+
+    :param module_names_for_job: Module names included in the job.
+    :param selected_module_names: Module names with >= 1 selected parameter.
+    :param have_LSTM_flag: True if the job includes LSTM.
+    :param has_any_params: True if any parameters are selected.
+    :param error_object: ErrorReport to receive warnings/errors.
+    :return: None.
+    """
+    TOPOFLOW = "Topoflow-Glacier"
+
+    has_topoflow = TOPOFLOW in module_names_for_job
+    has_non_topoflow_modules = any(name != TOPOFLOW for name in module_names_for_job)
+
+    # Parameter selection rules:
+    # - If LSTM is present: MUST have zero selected parameters.
+    # - If Topoflow-Glacier is in the job: must select >=1 Topoflow-Glacier parameter.
+    #   If any other modules are also in the job: must also select >=1 non-Topoflow-Glacier parameter.
+    # - Otherwise (no LSTM, no Topoflow-Glacier): must select >=1 parameter overall.
+    if have_LSTM_flag:
+        if has_any_params:
+            error_object.add_warning("LSTM jobs must not specify any calibration parameters")
+        return
+
+    # No params selected at all.
+    if not has_any_params:
+        if has_topoflow:
+            if has_non_topoflow_modules:
+                error_object.add_warning(
+                    "At least one Topoflow-Glacier parameter and at least one non-Topoflow-Glacier parameter must be specified"
+                )
+            else:
+                error_object.add_warning("At least one Topoflow-Glacier parameter must be specified")
+        else:
+            error_object.add_warning("At least one parameter must be specified")
+        return
+
+    # Parameters selected — ensure they cover required module categories
+    has_topoflow_param = TOPOFLOW in selected_module_names
+    has_non_topoflow_param = any(name != TOPOFLOW for name in selected_module_names)
+
+    if has_topoflow and not has_topoflow_param:
+        error_object.add_warning("At least one Topoflow-Glacier parameter must be specified")
+
+    if has_topoflow and has_non_topoflow_modules and not has_non_topoflow_param:
+        error_object.add_warning("At least one non-Topoflow-Glacier parameter must be specified")

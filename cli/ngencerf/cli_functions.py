@@ -21,6 +21,27 @@ from ngencerf.cli_util import check_http_error
 
 API_BASE = "http://localhost:8000"
 
+def _get_bundled_cli_git_info() -> dict:
+    """
+    Return CLI git info bundled into the PyInstaller executable.
+    """
+    base_path = getattr(sys, "_MEIPASS", os.path.dirname(__file__))
+    git_info_path = os.path.join(base_path, "ngencerf", "git_info.json")
+
+    try:
+        with open(git_info_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        return {
+            "ngencerf-cli": {
+                "release": "unknown",
+                "build_date": "unknown",
+                "commit_hash": "unknown",
+                "commit_date": "unknown",
+                "author": "unknown",
+                "message": f"Unable to read embedded CLI git info: {e}",
+            }
+        }
 
 def post_with_spinner_and_retry(message: str, endpoint: str, **kwargs) -> tuple[requests.Response | dict | None, bool]:
     """
@@ -210,6 +231,13 @@ def about(output_path: str | None = None) -> int:
     )
     if not success or not response_json:
         return 1
+
+    cli_git_info = _get_bundled_cli_git_info()
+
+    if "git_info" not in response_json or not isinstance(response_json["git_info"], dict):
+        response_json["git_info"] = {}
+
+    response_json["git_info"].update(cli_git_info)
 
     with open(final_path, "w", encoding="utf-8") as f:
         json.dump(response_json, f, indent=2)

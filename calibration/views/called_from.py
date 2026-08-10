@@ -17,7 +17,7 @@ def get_project_root() -> str:
 
     The result is cached.
     """
-    current_dir = os.path.dirname(os.path.abspath(__file__))  # Start from this file's directory
+    current_dir: str = os.path.dirname(os.path.abspath(__file__))  # Start from this file's directory
 
     while current_dir != os.path.dirname(current_dir):  # Traverse up until the root
         if "manage.py" in os.listdir(current_dir):

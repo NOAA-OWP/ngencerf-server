@@ -13,9 +13,10 @@ from calibration.enums import StatusEnum, ValidationType
 from calibration.enums_vanilla import ScriptEnum
 from calibration.models import CalibrationRun, ValidationRun, ForecastRun, ColdStartRun, VerificationRun
 from calibration.models.base_run import BaseRun
+from calibration.models.hindcast_run import HindcastRun
 from calibration.run_util.run_common import set_job_status, job_registry, get_job_registry_key, run_generic_job_end_callback, \
     finalize_calibration_after_callback, finalize_validation_after_callback, finalize_forecast_after_callback, finalize_cold_start_after_callback, \
-    finalize_verification_after_callback
+    finalize_verification_after_callback, finalize_hindcast_after_callback
 from calibration.views.common import get_job_description
 from cerfServer.settings import NGEN_CAL_VENV, NGEN_ENVIRONMENT, NgenEnvironmentEnum
 
@@ -56,6 +57,9 @@ def run_job_local(run: BaseRun, cmd_line_args: dict[str, str], stdout_file: str,
     elif isinstance(run, ForecastRun):
         script_cmd = ScriptEnum.FORECAST
         callback_function = run_forecast_job_callback_local
+    elif isinstance(run, HindcastRun):
+        script_cmd = ScriptEnum.HINDCAST
+        callback_function = run_hindcast_job_callback_local
     elif isinstance(run, VerificationRun):
         script_cmd = ScriptEnum.VERIFICATION
         callback_function = run_verification_job_callback_local
@@ -174,6 +178,13 @@ run_cold_start_job_callback_local = functools.partial(
 # - Executes `finalize_forecast` to finalize the forecast job and mark it as DONE.
 run_forecast_job_callback_local = functools.partial(
     run_generic_job_end_callback, check_if_failed=check_local_for_failure, finalize_func=finalize_forecast_after_callback
+)
+
+# Handles the completion of a hindcast job in the local environment.
+# - Uses `check_local_status` to validate the job's exit code.
+# - Executes `finalize_hindcast` to finalize the hindcast job and mark it as DONE.
+run_hindcast_job_callback_local = functools.partial(
+    run_generic_job_end_callback, check_if_failed=check_local_for_failure, finalize_func=finalize_hindcast_after_callback
 )
 
 

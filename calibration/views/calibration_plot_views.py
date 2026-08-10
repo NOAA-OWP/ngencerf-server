@@ -16,28 +16,28 @@ from rest_framework.response import Response
 
 from calibration.enums import StatusEnum, PlotDefinitionsEnum, ValidationType, ValidationMetricPeriod, GetValidationJobsScope
 from calibration.enums_vanilla import JobType
-from calibration.models import CalibrationRun, ValidationRun, ForecastRun, ValidationMetrics, NWMRetrospectiveMetrics
+from calibration.models import CalibrationRun, ValidationRun, ValidationMetrics, NWMRetrospectiveMetrics
 from calibration.util.caching import get_filtered_plot_definitions
 from calibration.util.calibration_validators import EmptySerializer, GetPlotNamesResponseSerializer, \
     GetPlotNamesForComparisonResponseSerializer, ErrorResponseSerializer, GetPlotRequestSerializer, \
     GetPlotResponseSerializer, GetPlotsForComparisonRequestSerializer, GetPlotsForComparisonResponseSerializer, \
-    CalibrationOrValidationRunSerializer
+    CalibrationOrValidationRunIdSerializer
 from calibration.util.ngen_locations import get_output_calibration_run_dir, get_output_validation_plot_dir, get_output_iteration_file, \
     get_output_last_iteration_file, get_output_best_iteration_file, get_observational_file_for_job, get_cost_hist_file, \
     NWM_RETROSPECTIVE_DIR, get_output_valid_control_file, get_output_valid_best_file, get_output_validation_iteration_plot_dir, \
-    get_output_valid_iteration_file, get_forecast_output_dir
+    get_output_valid_iteration_file, get_precipitation_timeseries_data_filepath
 from calibration.views.calibration_evaluation_views import get_iterations_for_calibration_job
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import get_calibration_run, handle_exceptions, validate_response, validate_request, CerfException, \
     ResponseError, truncate_large_fields, get_validation_run, get_job_description, \
-     png_to_base64_url,     process_worker_dirs, get_user_email, get_elapsed_str
+    png_to_base64_url, process_worker_dirs, get_user_email, get_elapsed_str
 from calibration.views.get_jobs_views import get_validation_jobs_internal
 
 logger = logging.getLogger(__name__)
 
 
 @extend_schema(
-    request=CalibrationOrValidationRunSerializer,
+    request=CalibrationOrValidationRunIdSerializer,
     responses={
         200: GetPlotNamesResponseSerializer,
         400: OpenApiResponse(
@@ -63,13 +63,13 @@ def get_plot_names(request: Request) -> Response:
     data = request.data if request.method == 'POST' else request.query_params.dict()
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
 
-    validator, error_return = validate_request(CalibrationOrValidationRunSerializer, data)
+    validator, error_return = validate_request(CalibrationOrValidationRunIdSerializer, data)
     if error_return:
         return error_return
 
     calibration_run_id = validator.get('calibration_run_id')
     validation_run_id = validator.get('validation_run_id')
-   
+
     # Determine job type and retrieve the appropriate run instance
     if calibration_run_id:
         run_func = get_calibration_run
@@ -91,7 +91,8 @@ def get_plot_names(request: Request) -> Response:
     fields = ['name', 'display_name', 'description', 'timeseries_available']
     plot_names = []
 
-    filtered_plot_definitions = get_filtered_plot_definitions(run)
+    filtered_plot_definitions: list[dict[str, Any]] = get_filtered_plot_definitions(run)
+
     for plot in filtered_plot_definitions:
         try:
             plot_file_path = plot_exists(run, plot)
@@ -202,11 +203,15 @@ def get_plot_names_for_comparison(request: Request) -> Response:
 @handle_exceptions
 def get_plot(request: Request) -> Response:
     """
-    Retrieves a specific plot for a calibration run, validation run, or forecast run, returning the plot file location and optional data with pagination support.
+    Retrieves a specific plot for a calibration run or validation run, returning
+    the plot file location and optional data with pagination support.
 
-    If a calibration_run_id is given, then we can retrieve plots for the calibration run or the validation best run.
-    If a validation_run_id is given, then we can retrieve plots for that specific validation run as well as the calibration run.
-    
+    If a calibration_run_id is given, plots can be retrieved for the calibration
+    run or validation-output artifacts associated with that calibration run.
+
+    If a validation_run_id is given, plots can be retrieved for that specific
+    validation run as well as its associated calibration run.
+
     :param request: The request containing plot name and options.
     :return: A JSON response with plot details, or an error if the plot is not found.
     :raises ResponseError: If the plot cannot be found or an error occurs.
@@ -260,14 +265,16 @@ def get_plot(request: Request) -> Response:
     calibration_run = run if calibration_run_id else run.calibration_run
 
     # Fetch plot definition if needed for force_include_plot, include_data, or when plot_url is missing
-    plot_definition = None
+    plot_definition: dict[str, Any] | None = None
     if force_include_plot or not plot_url or include_data:
         plot_definition = get_filtered_plot_definitions(run, plot_name=plot_name, first_match=True)
-        if not plot_definition:
+        if plot_definition is None:
             return ResponseError(f"Invalid plot type '{plot_name}' requested for {run_type} {run.id}.")
 
     # Process plot_url if it doesn't exist in the cache or if force_include_plot is True
     if force_include_plot or not plot_url:
+        assert plot_definition is not None
+
         try:
             plot_file_path = plot_exists(run, plot_definition)
         except Exception as e:
@@ -288,6 +295,8 @@ def get_plot(request: Request) -> Response:
     plot_data = None
     pagination_metadata = None
     if include_data:
+        assert plot_definition is not None
+
         # Retrieve data and total_count from get_plot_data
         plot_result = get_plot_data(run, plot_definition, start, limit)
         plot_data = plot_result.get('data', [])
@@ -319,8 +328,6 @@ def get_plot(request: Request) -> Response:
 
     if validation_run_id:
         response['validation_run_id'] = validation_run_id
-    # if forecast_run_id:
-    #     response['forecast_run_id'] = forecast_run_id
     if include_data:
         response['plot_data'] = plot_data
         if pagination_metadata:
@@ -397,7 +404,7 @@ def get_plots_for_comparison(request: Request) -> Response:
         if plot['job_type'] == JobType.COMPARISON.value and plot['name'].lower() == plot_name.lower():
             plot_definition = plot
             break
-    if not plot_definition:
+    if plot_definition is None:
         response['errors'].append({
             'calibration_run_id': calibration_run_ids[0],
             'message': 'Invalid plot type ' + plot_name + ' requested'
@@ -414,13 +421,17 @@ def get_plots_for_comparison(request: Request) -> Response:
                 # For Calibration Metrics, we don't need the best run - just pass the Calibration Job ID 
                 # directly into get_bar_chart_metrics and then filter to get data for the best run only
                 for calibration_run_id in calibration_run_ids:
+
                     run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=[StatusEnum.RUNNING, StatusEnum.DONE])
                     if error_return:
                         response['errors'].append({
-                            'calibration_run_id': run.id,
+                            'calibration_run_id': calibration_run_id,
                             'message': error_return.data.get('message')
                         })
-                    elif run.gage.gage_id != gage_id:
+                        continue
+
+                    assert run is not None
+                    if run.gage.gage_id != gage_id:
                         # Gage IDs don't match
                         response['errors'].append({
                             'calibration_run_id': run.id,
@@ -464,10 +475,13 @@ def get_plots_for_comparison(request: Request) -> Response:
                     run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=[StatusEnum.RUNNING, StatusEnum.DONE])
                     if error_return:
                         response['errors'].append({
-                            'calibration_run_id': run.id,
+                            'calibration_run_id': calibration_run_id,
                             'message': error_return.data.get('message')
                         })
-                    elif run.gage.gage_id != gage_id:
+                        continue
+
+                    assert run is not None
+                    if run.gage.gage_id != gage_id:
                         # Gage IDs don't match
                         response['errors'].append({
                             'calibration_run_id': run.id,
@@ -499,7 +513,7 @@ def get_plots_for_comparison(request: Request) -> Response:
                             if plot_data:
                                 response['plots'].append({
                                     'calibration_run_id': run.id,
-                                    'validation_run_id': best_run.id if best_run else 0,
+                                    'validation_run_id': best_run.id,
                                     'plot_name': plot_name,
                                     'plot_data': replace_nan_and_inf_with_none(plot_data),
                                     'pagination_metadata': {
@@ -528,24 +542,19 @@ def get_plots_for_comparison(request: Request) -> Response:
     return Response(response_validator.data)
 
 
-def determine_plot_location(run: CalibrationRun | ValidationRun | ForecastRun, plot_definition: dict[str, Any]) -> str:
+def determine_plot_location(run: CalibrationRun | ValidationRun, plot_definition: dict[str, Any]) -> str:
     """
-    Determines the file location of the plot based on the plot definition's attributes.
+    Determines the file location of the plot based on the plot definition.
 
-    :param run: The run object, which could be either a calibration, validation, or forecast run.
-    :param plot_definition: Dictionary containing the plot's attributes, such as its location type.
+    :param run: The run object, either a calibration or validation run.
+    :param plot_definition: Dictionary containing plot attributes such as location.
     :return: The file path where the plot is expected to be located.
-    :raises CerfException: If the plot's location type is unknown, the required directory cannot be found,
-                           or an invalid run type is provided for a specific plot type.
+    :raises CerfException: If the plot location is unknown or invalid for the run type.
     """
     calibration_run = run if isinstance(run, CalibrationRun) else run.calibration_run
     match plot_definition['location']:
         case 'plot_valid':
-            # Ensure that 'plot_valid' is not used for a ForecastRun
-            if isinstance(run, ForecastRun):
-                raise CerfException("Plot type is not valid for ForecastRun.")
-
-            # Validation plots can be retrieved with either a CalibrationRun or a non-VALID_ITERATION ValidationRun
+            # Validation plots can be retrieved using either a CalibrationRun or a non-VALID_ITERATION ValidationRun
             if isinstance(run, CalibrationRun) or run.validation_type != ValidationType.VALID_ITERATION.value:
                 return get_output_validation_plot_dir(calibration_run)
             return get_output_validation_iteration_plot_dir(
@@ -558,14 +567,7 @@ def determine_plot_location(run: CalibrationRun | ValidationRun | ForecastRun, p
         case 'plot_iteration':
             # TODO Need to return the worker name
             worker_dir = find_worker_with_non_empty_plot_iteration(calibration_run)
-            if worker_dir is None:
-                raise CerfException(f'Plots could not be found for {get_job_description(run)}')
             return os.path.join(worker_dir, 'Plot_Iteration')
-
-        case 'forecast_output':
-            if not isinstance(run, ForecastRun):
-                raise CerfException('A ForecastRun id is required for forecast plots')
-            return get_forecast_output_dir(run)
 
         case _:
             raise CerfException(f"Unknown location '{plot_definition['location']}' in PlotDefinitions")
@@ -584,14 +586,6 @@ def get_plot_data(run: CalibrationRun | ValidationRun, plot_definition: dict[str
     """
     plot_enum = PlotDefinitionsEnum(plot_definition['name'])
 
-    # Initialize calibration_run to None
-    calibration_run = None
-
-    # Ensure ForecastRun only processes FORECAST_HYDROGRAPH
-    # if isinstance(run, ForecastRun):
-    #     if plot_enum != PlotDefinitionsEnum.FORECAST_HYDROGRAPH:
-    #         raise CerfException(f"Invalid plot type '{plot_enum}' requested for ForecastRun {run.id}.")
-    # else:
     if not isinstance(run, (CalibrationRun, ValidationRun)):
         raise CerfException(f"Invalid plot type '{plot_enum}' requested for {type(run).__name__} {run.id}.")
     calibration_run = run.calibration_run if isinstance(run, ValidationRun) else run
@@ -599,23 +593,9 @@ def get_plot_data(run: CalibrationRun | ValidationRun, plot_definition: dict[str
     worker_dir = None  # Cache worker directory to avoid multiple lookups
 
     match plot_enum:
-        # case PlotDefinitionsEnum.FORECAST_HYDROGRAPH:
-        #     # Ensure only ForecastRun can access this plot type
-        #     if not isinstance(run, ForecastRun):
-        #         raise CerfException(f"'{plot_enum}' is only valid for ForecastRun.")
-
-        #     # Read the forecast output data from file and paginate the result
-        #     forecast_output = get_forecast_output_file(run)
-        #     if not os.path.exists(forecast_output):
-        #         raise FileNotFoundError(f"File not found: {forecast_output}")
-        #     data, total_count = count_and_read_file_in_chunks(forecast_output, start, limit)
-        #     return {'data': data, 'total_count': total_count}
-
         case PlotDefinitionsEnum.OBJECTIVE_FUNCTION_EVOLUTION:
             # Only get iterations for a specific worker
             worker_dir = find_worker_with_non_empty_plot_iteration(calibration_run)
-            if worker_dir is None:
-                raise CerfException(f'No plot directory found for {get_job_description(run)}')
             worker_name = get_worker_name_from_directory(worker_dir)
             iterations = get_iterations_for_calibration_job(calibration_run, worker_name=worker_name)
             total_count = len(iterations)
@@ -626,37 +606,50 @@ def get_plot_data(run: CalibrationRun | ValidationRun, plot_definition: dict[str
 
         case PlotDefinitionsEnum.HYDROGRAPH_EVOLUTION | PlotDefinitionsEnum.SCATTERPLOT_STREAMFLOW:
             # Merge multiple hydrograph-related files and paginate the result
-            worker_dir = worker_dir or find_worker_with_non_empty_plot_iteration(calibration_run)
+            worker_dir = find_worker_with_non_empty_plot_iteration(calibration_run)
+
             file_paths = [
                 get_observational_file_for_job(calibration_run),  # Observation
                 get_output_iteration_file(calibration_run, 0, worker_dir),  # Iteration
                 get_output_last_iteration_file(calibration_run, worker_dir),  # Last Iteration
-                get_output_best_iteration_file(calibration_run, worker_dir)  # Best Iteration
+                get_output_best_iteration_file(calibration_run, worker_dir),  # Best Iteration
+                get_precipitation_timeseries_data_filepath(calibration_run),
             ]
-            column_names = ["Observation", "Control Run", "Last Run", "Best Run"]
+
+            column_names = ["Observation", "Control Run", "Last Run", "Best Run", "Precipitation"]
             # Get paginated data and total count
-            data, total_count = load_and_merge_hydrograph_files_with_pagination_and_count(file_paths, column_names, start, limit)
+            data, total_count = load_and_merge_hydrograph_files_with_pagination_and_count(
+                file_paths,
+                column_names,
+                start,
+                limit,
+                time_start=calibration_run.calibration_start_period,
+                time_end=calibration_run.calibration_end_period,
+            )
             return {'data': data, 'total_count': total_count}
 
         case PlotDefinitionsEnum.METRIC_EVOLUTION:
             # Only get iterations for a specific worker
             worker_dir = find_worker_with_non_empty_plot_iteration(calibration_run)
-            if worker_dir is None:
-                raise CerfException(f'No plot directory found for {get_job_description(run)}')
             worker_name = get_worker_name_from_directory(worker_dir)
             iterations = get_iterations_for_calibration_job(calibration_run, worker_name=worker_name)
             total_count = len(iterations)
 
-            data = [{'iteration': iteration.iteration_num,
-                     'metrics': [{'name': metric.metric.name, 'value': metric.metric_value} for metric in iteration.iterationmetric_set.all()]}
-                    for iteration in iterations[start:start + limit]]
+            data = [
+                {
+                    'iteration': iteration.iteration_num,
+                    'metrics': [
+                        {'name': metric.metric.name, 'value': metric.metric_value}
+                        for metric in iteration.iterationmetric_set.all()
+                    ]
+                }
+                for iteration in iterations[start:start + limit]
+            ]
             return {'data': data, 'total_count': total_count}
 
         case PlotDefinitionsEnum.PARAMETER_EVOLUTION:
             # Only get iterations for a specific worker
             worker_dir = find_worker_with_non_empty_plot_iteration(calibration_run)
-            if worker_dir is None:
-                raise CerfException(f'No plot directory found for {get_job_description(run)}')
             worker_name = get_worker_name_from_directory(worker_dir)
             iterations = get_iterations_for_calibration_job(calibration_run, worker_name=worker_name)
             total_count = len(iterations)
@@ -670,8 +663,6 @@ def get_plot_data(run: CalibrationRun | ValidationRun, plot_definition: dict[str
         case PlotDefinitionsEnum.METRICS_VS_OBJECTIVE_FUNCTION:
             # Only get iterations for a specific worker
             worker_dir = find_worker_with_non_empty_plot_iteration(calibration_run)
-            if worker_dir is None:
-                raise CerfException(f'No plot directory found for {get_job_description(run)}')
             worker_name = get_worker_name_from_directory(worker_dir)
             iterations = get_iterations_for_calibration_job(calibration_run, worker_name=worker_name)
             total_count = len(iterations)
@@ -692,16 +683,20 @@ def get_plot_data(run: CalibrationRun | ValidationRun, plot_definition: dict[str
 
         case PlotDefinitionsEnum.COST_HISTORY:
             # Read cost history data from a file and paginate the result
-            forecast_output = get_cost_hist_file(calibration_run)
-            if not os.path.exists(forecast_output):
-                logger.error(f"File not found: {forecast_output}")
-                raise FileNotFoundError(f"File not found: {forecast_output}")
-            data, total_count = count_and_read_file_in_chunks(forecast_output, start, limit)
+            cost_history_file = get_cost_hist_file(calibration_run)
+            if not os.path.exists(cost_history_file):
+                logger.error(f"File not found: {cost_history_file}")
+                raise FileNotFoundError(f"File not found: {cost_history_file}")
+            data, total_count = count_and_read_file_in_chunks(cost_history_file, start, limit)
 
             return {'data': data, 'total_count': total_count}
 
         case PlotDefinitionsEnum.BAR_CHART_METRICS:
-            combined_data_by_run = get_bar_chart_metrics([calibration_run.id], [run] if isinstance(run, ValidationRun) else [])
+            validation_ids: list[int] = [run.id] if isinstance(run, ValidationRun) else []
+            combined_data_by_run = get_bar_chart_metrics(
+                [calibration_run.id],
+                validation_ids
+            )
             combined_data = combined_data_by_run.get(calibration_run.id, [])
 
             total_count = len(combined_data)
@@ -715,15 +710,17 @@ def get_plot_data(run: CalibrationRun | ValidationRun, plot_definition: dict[str
             # 2. NWM retrospective data file
             # 3. Valid Control hydrograph data file
             # 4. Valid Best hydrograph data file
-            # 5. (Optional) Hydrograph data file for a specific iteration if this is a ValidationRun of type "VALID_ITERATION"
+            # 5. Precipitation data
+            # 6. (Optional) Hydrograph data file for a specific iteration if this is a ValidationRun of type "VALID_ITERATION"
 
             file_paths = [
                 get_observational_file_for_job(calibration_run),  # Observation
                 os.path.join(NWM_RETROSPECTIVE_DIR, f'{calibration_run.gage.gage_id}.csv'),  # NWM Retro
                 get_output_valid_control_file(calibration_run),  # Valid Control
-                get_output_valid_best_file(calibration_run)  # Valid Best
+                get_output_valid_best_file(calibration_run),  # Valid Best
+                get_precipitation_timeseries_data_filepath(calibration_run)
             ]
-            column_names = ["Observation", "NWM Retro", "Valid Control", "Valid Best"]
+            column_names = ["Observation", "NWM Retro", "Valid Control", "Valid Best", "Precipitation"]
 
             if isinstance(run, ValidationRun) and run.validation_type == ValidationType.VALID_ITERATION.value:
                 # Add hydrograph data for the specific iteration
@@ -731,7 +728,14 @@ def get_plot_data(run: CalibrationRun | ValidationRun, plot_definition: dict[str
                 column_names.append(run.worker_name)  # Append corresponding column name
 
             # Combine and paginate data from the hydrograph files
-            data, total_count = load_and_merge_hydrograph_files_with_pagination_and_count(file_paths, column_names, start, limit)
+            data, total_count = load_and_merge_hydrograph_files_with_pagination_and_count(
+                file_paths,
+                column_names,
+                start,
+                limit,
+                time_start=calibration_run.validation_start_period,
+                time_end=calibration_run.validation_end_period
+            )
             return {'data': data, 'total_count': total_count}
 
         case PlotDefinitionsEnum.STREAMFLOW_VALIDATION_PRECIPITATION:
@@ -744,39 +748,69 @@ def get_plot_data(run: CalibrationRun | ValidationRun, plot_definition: dict[str
 
 
 def load_and_merge_hydrograph_files_with_pagination_and_count(
-        file_paths: list[str], column_names: list[str], start: int, limit: int, key_col: str = "time"
+        file_paths: list[str],
+        column_names: list[str],
+        start: int,
+        limit: int,
+        key_col: str = "time",
+        time_start: Any | None = None,
+        time_end: Any | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """
-    Loads multiple hydrograph-related CSV files, merges them, and returns paginated results.
+    Loads multiple hydrograph-related CSV files, merges them, optionally filters by a time range,
+    and returns paginated results.
 
     :param file_paths: List of file paths to the hydrograph-related data files.
     :param column_names: Column names to rename the value columns for clarity.
     :param start: Starting index for pagination (0-based).
     :param limit: Maximum number of rows to return.
     :param key_col: The key column to merge on (default: "time").
+    :param time_start: Optional inclusive lower bound for the time column.
+    :param time_end: Optional inclusive upper bound for the time column.
     :return: A tuple containing paginated data and the total row count.
     """
     logger.info(f'Merging files: {file_paths}')
     try:
-        # Step 1: Merge all the provided files into a single DataFrame
+        # Step 1: Merge all input files into a single DataFrame
         merged_df = load_files_and_merge(file_paths, column_names, key_col=key_col)
 
-        # Step 2: Calculate the total number of rows in the merged DataFrame
+        # Step 2: Validate expected key column exists
+        if key_col not in merged_df.columns:
+            raise CerfException(f"Expected key column '{key_col}' not found in merged hydrograph data.")
+
+        # Step 3: Apply optional time range filtering
+        if time_start is not None:
+            start_ts = pd.to_datetime(time_start, errors="coerce", utc=True)
+            if pd.isna(start_ts):
+                raise CerfException(f"Invalid time_start value: {time_start}")
+            merged_df = merged_df[merged_df[key_col] >= start_ts]
+
+        if time_end is not None:
+            end_ts = pd.to_datetime(time_end, errors="coerce", utc=True)
+            if pd.isna(end_ts):
+                raise CerfException(f"Invalid time_end value: {time_end}")
+            merged_df = merged_df[merged_df[key_col] <= end_ts]
+
+        # Step 4: Reset index after filtering to maintain consistent pagination
+        merged_df = merged_df.reset_index(drop=True)
+
+        # Step 5: Compute total row count after filtering
         total_count = len(merged_df)
 
-        # Step 3: Extract a paginated subset of the merged DataFrame
+        # Step 6: Slice the DataFrame for pagination
         paginated_data = cast(
             list[dict[str, Any]],
             merged_df.iloc[start:start + limit].to_dict(orient="records")
         )
 
-        # Step 4: Convert all Timestamp objects in the key column to ISO 8601 strings
+        # Step 7: Convert timestamps to ISO 8601 strings for JSON compatibility
         for row in paginated_data:
             if key_col in row and isinstance(row[key_col], pd.Timestamp):
                 row[key_col] = row[key_col].isoformat()
 
         # Return the paginated data and total row count
         return paginated_data, total_count
+
     except Exception as e:
         # Log the error and raise a custom exception if any issues occur during processing
         logger.error(f"Error processing hydrograph files: {e}")
@@ -802,9 +836,16 @@ def load_files_and_merge(file_paths: list[str], column_names: list[str], key_col
                 logger.info(f"Reading file: {file_path}")
                 # Read file and automatically detect value column
                 df = pd.read_csv(file_path, nrows=1)  # Read only the header to determine column names
-                value_col = next((col for col in df.columns if col.lower() not in ["time", "datetime", "date", "timestamp", "value_date"]), None)
+                value_col: str | None = next(
+                    (
+                        col for col in df.columns
+                        if isinstance(col, str)
+                           and col.lower() not in ["time", "datetime", "date", "timestamp", "value_date"]
+                    ),
+                    None
+                )
 
-                if not value_col:
+                if value_col is None:
                     raise ValueError(f"No valid data column found in file {file_path}")
 
                 df = read_and_prepare_hydrograph_files(file_path, column_mapping={value_col: col_name})
@@ -825,18 +866,21 @@ def load_files_and_merge(file_paths: list[str], column_names: list[str], key_col
     merged_df = dataframes[0]  # Start with the first DataFrame
     for df in dataframes[1:]:
         try:
-            # Perform an inner merge to include only rows with matching key column values
-            merged_df = merged_df.merge(df, on=key_col, how="inner")
+            # Perform an outer merge to preserve rows that exist in only some files
+            merged_df = merged_df.merge(df, on=key_col, how="outer")
         except Exception as e:
             # Log and raise an error if merging fails
             logger.error(f"Error merging DataFrames: {e}")
             raise CerfException(f"Error merging DataFrames: {e}")
 
-    # Step 4: Check for empty merged DataFrame
+    # Step 4: Sort by the key column so timestamps remain in chronological order
+    merged_df = merged_df.sort_values(by=key_col).reset_index(drop=True)
+
+    # Step 5: Check for empty merged DataFrame
     if merged_df.empty:
         logger.warning("Merged DataFrame is empty after merging. Check key column values.")
 
-    # Step 5: Log the final structure of the merged DataFrame for debugging
+    # Step 6: Log the final structure of the merged DataFrame for debugging
     logger.debug(f"Merged DataFrame columns: {merged_df.columns.tolist()}, shape: {merged_df.shape}")
 
     return merged_df
@@ -858,11 +902,15 @@ def read_and_prepare_hydrograph_files(file_path: str, column_mapping: dict[str, 
     logger.debug(f"Loaded file: {file_path}, Columns: {df.columns.tolist()}, Shape: {df.shape}")
 
     # Step 2: Detect the timestamp column dynamically
-    timestamp_col = next(
-        (col for col in df.columns if col.lower() in ["datetime", "time", "date", "timestamp", "value_date"]),
+    timestamp_col: str | None = next(
+        (
+            col for col in df.columns
+            if isinstance(col, str)
+               and col.lower() in ["datetime", "time", "date", "timestamp", "value_date"]
+        ),
         None
     )
-    if not timestamp_col:
+    if timestamp_col is None:
         # This is not an error, unless the file is expected to have timestamp information and does not
         logger.info(f"No timestamp column found in file {file_path}. Columns: {df.columns.tolist()}")
         raise ValueError(f"No timestamp column found in file {file_path}. Columns: {df.columns.tolist()}")
@@ -870,8 +918,9 @@ def read_and_prepare_hydrograph_files(file_path: str, column_mapping: dict[str, 
     # Step 3: Rename the detected timestamp column to a standard name
     df = df.rename(columns={timestamp_col: "time"})
 
-    # Step 4: Convert the "time" column to datetime format and drop invalid rows
-    df["time"] = pd.to_datetime(df["time"], errors="coerce")
+    # Step 4: Convert the "time" column to datetime format
+    df["time"] = pd.to_datetime(df["time"], errors="coerce", utc=True)
+
     invalid_rows = df[df["time"].isna()]
     if not invalid_rows.empty:
         logger.warning(f"Invalid timestamps found in file {file_path}:\n{invalid_rows}")
@@ -882,16 +931,20 @@ def read_and_prepare_hydrograph_files(file_path: str, column_mapping: dict[str, 
     # Step 5: Rename value columns based on the provided mapping
     df = df.rename(columns=column_mapping)
 
-    # Step 6: Log the final DataFrame structure
+    # Step 6: Keep only the key column and renamed value columns
+    renamed_value_columns = list(column_mapping.values())
+    df = df[["time", *renamed_value_columns]]
+
+    # Step 7: Log the final DataFrame structure
     logger.debug(f"Processed file: {file_path}, Final Columns: {df.columns.tolist()}, Final Shape: {df.shape}")
 
     return df
 
 
 def count_and_read_file_in_chunks(
-    file_path: str,
-    start: int | None = None,
-    limit: int | None = None
+        file_path: str,
+        start: int | None = None,
+        limit: int | None = None
 ) -> tuple[list[dict[str, Any]], int]:
     """
     Counts the total number of rows (excluding the header) in a file and retrieves
@@ -904,65 +957,87 @@ def count_and_read_file_in_chunks(
     :raises CerfException: If the file cannot be read due to an error.
     """
     try:
-        # Read only the header to get column names
+        # Read header columns
         with open(file_path, 'r') as file:
-            header = next(file).strip().split(",")
-        # Count total rows efficiently (excluding header)
+            first_line = next(file, None)
+            if first_line is None:
+                return [], 0
+            header_cols = first_line.strip().split(",")
+
+        # Count total raw data rows
         with open(file_path, 'r') as file:
-            total_count = sum(1 for _ in file) - 1  # Subtract 1 for header
+            next(file, None)  # skip header
+            total_count = sum(1 for _ in file)
         # If no pagination, read entire file
         if start is None and limit is None:
             df = pd.read_csv(file_path)
         else:
             # Normalize start
-            start = start or 0
-            if start >= total_count:
+            start_i: int = 0 if start is None else start
+
+            if start_i >= total_count:
                 return [], total_count  # Nothing to return
+
             df = pd.read_csv(
                 file_path,
-                skiprows=list(range(1, start + 1)),
+                skiprows=list(range(1, start_i + 1)),
                 nrows=limit,
-                names=header,
+                names=header_cols,
                 header=0
             )
         # Convert "time" column to datetime format if present
         if "time" in df.columns:
-            df["time"] = pd.to_datetime(df["time"], errors="coerce")
-            df = df.dropna(subset=["time"])  # Drop rows with invalid timestamps
+            df["time"] = pd.to_datetime(df["time"], errors="coerce", utc=True)
+            invalid_time_count = df["time"].isna().sum()
+            if invalid_time_count:
+                logger.warning(f"Dropping {invalid_time_count} rows with invalid time values from {file_path}")
+                df = df.dropna(subset=["time"])
         # Convert DataFrame to a list of dictionaries
         data = cast(list[dict[str, Any]], df.to_dict(orient="records"))
         return data, total_count
+
     except Exception as e:
         logger.error(f"Error reading file: {e}")
         raise CerfException(f"Failed to read file: {file_path}")
 
 
 @lru_cache()
-def find_worker_with_non_empty_plot_iteration(calibration_run: CalibrationRun) -> str | None:
+def find_worker_with_non_empty_plot_iteration(calibration_run: CalibrationRun) -> str:
     """
-    Uses process_worker_dirs to find the worker directory that has a non-empty 'Plot_Iteration' subdirectory.
+    Uses process_worker_dirs to find the worker directory that has a non-empty
+    'Plot_Iteration' subdirectory.
 
     :param calibration_run: The calibration run object.
-    :return: The path of the worker directory with a non-empty 'Plot_Iteration' directory, or None if not found
+    :return: The path of the worker directory with a non-empty 'Plot_Iteration' directory.
+    :raises CerfException: If no worker directory with a non-empty 'Plot_Iteration' directory is found.
     """
-    found_worker_dir = None
+    found_worker_dir: str | None = None
 
     # Custom function to check worker directories
-    def check_worker(worker_dir: str, _run: CalibrationRun):
+    def check_worker(worker_dir: str, _run: CalibrationRun) -> bool:
         nonlocal found_worker_dir
-        plot_iteration_dir = os.path.join(worker_dir, 'Plot_Iteration')
+        plot_iteration_dir = os.path.join(worker_dir, "Plot_Iteration")
 
         # Check if 'Plot_Iteration' exists and is non-empty
         if os.path.isdir(plot_iteration_dir) and any(os.scandir(plot_iteration_dir)):
             found_worker_dir = worker_dir
+            return True  # stop searching
+
+        return False  # keep searching
 
     # Call process_worker_dirs to iterate through the worker directories
     process_worker_dirs(calibration_run, check_worker)
 
+    if found_worker_dir is None:
+        raise CerfException(f'Plots could not be found for {get_job_description(calibration_run)}')
+
     return found_worker_dir
 
 
-def get_bar_chart_metrics(calibration_run_ids: list[int], validation_run_ids: list[int] = []) -> dict[int, list[dict[str, Any]]]:
+def get_bar_chart_metrics(
+        calibration_run_ids: list[int],
+        validation_run_ids: list[int] | None = None
+) -> dict[int, list[dict[str, Any]]]:
     """
     Retrieves ValidationMetrics and NWMRetrospectiveMetrics for a list of calibration_run_ids 
     (and optional validation_run_ids) and organizes the results by calibration_run_id.
@@ -983,6 +1058,8 @@ def get_bar_chart_metrics(calibration_run_ids: list[int], validation_run_ids: li
     :param validation_run_ids: List of ValidationRun IDs to query.
     :return: A dictionary where each key is a calibration_run_id and the value is a list of result dictionaries.
     """
+    validation_ids: list[int] = validation_run_ids or []
+
     valid_periods = ValidationMetricPeriod.get_names()
     valid_run_types = ValidationType.get_names()
 
@@ -994,11 +1071,11 @@ def get_bar_chart_metrics(calibration_run_ids: list[int], validation_run_ids: li
     )
 
     validation_metrics_qs_alt = None
-    if len(validation_run_ids) > 0:
+    if validation_ids:
         # Query ValidationMetrics (for alt iteration) and concatenate with previous query
         validation_metrics_qs_alt = ValidationMetrics.objects.select_related('metric', 'validation_run').filter(
             validation_run__calibration_run_id__in=calibration_run_ids,
-            validation_run_id__in=validation_run_ids,
+            validation_run_id__in=validation_ids,
             period__in=valid_periods
         ).exclude(run_type__in=valid_run_types)
 
@@ -1064,27 +1141,29 @@ def get_bar_chart_metrics(calibration_run_ids: list[int], validation_run_ids: li
 @lru_cache()
 def get_worker_name_from_directory(worker_dir: str) -> str:
     """
-    Extracts the worker name from a given worker directory string.
+    Extracts the worker name from a worker directory path.
 
-    This function assumes that the worker directory string contains a pattern of the form
-    'ngen_<worker_name>_worker'. It does not check for a missing match; if the pattern
-    is not found, an AttributeError will be raised.
+    The directory name is expected to contain a pattern of the form
+    'ngen_<worker_name>_worker'.
 
     :param worker_dir: The full path of the worker directory.
     :return: The extracted worker name.
+    :raises CerfException: If the directory name does not match the expected pattern.
     """
     pattern = r'ngen_([^_]+)_worker'
     dir_name = os.path.basename(worker_dir)
     match = re.search(pattern, dir_name)
     # This will raise an AttributeError if the pattern is not found.
+    if match is None:
+        raise CerfException(f"Could not extract worker name from directory: {dir_name}")
     return match.group(1)
 
 
-def plot_exists(run: CalibrationRun | ValidationRun | ForecastRun, plot_definition: dict[str, Any]) -> str | None:
+def plot_exists(run: CalibrationRun | ValidationRun, plot_definition: dict[str, Any]) -> str | None:
     """
     Determines whether the plot file exists. Returns the full path if it exists, else None.
 
-    :param run: The job instance (CalibrationRun, ValidationRun, or ForecastRun).
+    :param run: The job instance (CalibrationRun or ValidationRun).
     :param plot_definition: Dictionary containing the plot definition, including filename_mask and location.
     :return: Full path to the plot file if it exists, otherwise None.
     """

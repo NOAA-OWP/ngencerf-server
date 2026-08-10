@@ -52,16 +52,13 @@ def get_git_info_internal() -> dict[str, dict[str, str]]:
 
     # For each image, copy its git_info.json into the shared directory.
 
-    # Get both ngen and cal-mgr git_info files from nwm-cal-mgr container
+    # Get ngen-bmi-forcing, ngen and cal-mgr git_info files from nwm-cal-mgr container
     image_name = 'nwm-cal-mgr'
     container_name = f'{image_name}_temp_container'
-    container_file_name = os.path.join(settings.REPO_ROOT, 'ngen_git_info.json')
-    local_file_name = os.path.join(git_info_directory, 'ngen_git_info.json')
-    copy_file_from_image(image_name, container_name, container_file_name, local_file_name)
-
-    container_file_name = os.path.join(settings.REPO_ROOT, 'nwm-cal-mgr_git_info.json')
-    local_file_name = os.path.join(git_info_directory, 'nwm-cal-mgr_git_info.json')
-    copy_file_from_image(image_name, container_name, container_file_name, local_file_name)
+    for git_info_file in ('ngen-bmi-forcing_git_info.json', 'ngen_git_info.json', 'nwm-cal-mgr_git_info.json'):
+        container_file_name = os.path.join(settings.REPO_ROOT, git_info_file)
+        local_file_name = os.path.join(git_info_directory, git_info_file)
+        copy_file_from_image(image_name, container_name, container_file_name, local_file_name)
 
     image_name = 'nwm-fcst-mgr'
     container_name = f'{image_name}_temp_container'
@@ -69,15 +66,15 @@ def get_git_info_internal() -> dict[str, dict[str, str]]:
     local_file_name = os.path.join(git_info_directory, f"{image_name}_git_info.json")
     copy_file_from_image(image_name, container_name, container_file_name, local_file_name)
 
-    image_name = 'ngen-bmi-forcing'
+    image_name = 'nwm-verf'
     container_name = f'{image_name}_temp_container'
     container_file_name = os.path.join(settings.REPO_ROOT, f"{image_name}_git_info.json")
     local_file_name = os.path.join(git_info_directory, f"{image_name}_git_info.json")
     copy_file_from_image(image_name, container_name, container_file_name, local_file_name)
 
     if settings.NGEN_ENVIRONMENT == NgenEnvironmentEnum.PARALLEL_WORKS:
-        image_name = 'ngencerf-ngencerf-ui'
-        container_name = f'{image_name}_temp_container'
+        image_name = f'ghcr.io/ngwpc/ngencerf-ui:{settings.NGENCERF_UI_TAG}'
+        container_name = 'ngencerf-ui_temp_container'
         container_file_name = "/var/www/ngencerf/nuxt-app/ngencerf-ui_git_info.json"
         local_file_name = os.path.join(git_info_directory, "ngencerf-ui_git_info.json")  # ← FIX HERE
         # This will always be from docker

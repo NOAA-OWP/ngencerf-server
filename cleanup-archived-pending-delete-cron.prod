@@ -1,0 +1,40 @@
+# Sample cron job for cleaning up quarantined archived ngencerf job directories (production)
+#
+# NOTE: This file is a **sample only**. It is NOT installed directly.
+# The production deployment script writes the actual cron entry to:
+#
+#     /etc/cron.d/ngencerf-cleanup-archived-pending-delete
+#
+# Because the real job lives in /etc/cron.d, the cron line must follow
+# the /etc/cron.d format:
+#
+#     <schedule> <user> <command>
+#
+# The cleanup script is:
+#     /ngencerf-app/ngencerf-server/cleanup_archived_pending_delete.py
+#
+# This script is used to delete quarantined directories created by the
+# archive_jobs endpoint after a successful S3 archive.
+#
+# Archive behavior:
+#   - job data is copied to S3 and verified
+#   - the original active EFS directory is renamed to a quarantine path
+#   - the endpoint immediately tries to delete the quarantined directory
+#   - if NFS/EFS open-file behavior prevents full deletion (for example due to
+#     lingering '.nfs*' files), the quarantined directory is left in place
+#   - this cron job retries deletion of those quarantined directories later
+#
+# Quarantined directories are identified by names containing:
+#
+#     .__archived_pending_delete__.
+#
+# Behavior of the installed cron job:
+#   - runs every 15 minutes
+#   - scans under:
+#         /ngencerf-app/data/ngen-cal-data/ngen-cal-work/run_calib
+#   - retries deletion of quarantined directories using bounded retries
+#   - does not require Django or database access
+#
+# The cron command only runs if the cleanup script exists.
+
+*/15 * * * * root [ -f /ngencerf-app/ngencerf-server/cleanup_archived_pending_delete.py ] && /usr/bin/python3 -u /ngencerf-app/ngencerf-server/cleanup_archived_pending_delete.py /ngencerf-app/data/ngen-cal-data/ngen-cal-work/run_calib >> /ngencerf-app/logs/ngencerf-server/cleanup_archived_pending_delete_$(date +\%Y\%m\%d).log 2>&1
