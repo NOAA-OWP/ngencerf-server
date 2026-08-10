@@ -569,7 +569,7 @@ class Command(BaseCommand):
             {"name": "TX DoT", "description": "Texas Department of Transportation", "is_active": False},
             {"name": "RFC", "description": "River Forecast Center", "is_active": False},
             {"name": "SNOTEL", "description": "Snow Telemetry", "is_active": False},
-            {"name": "Historical", "description": "NGWPC Enterprise Data Services", "is_active": True},
+            {"name": "Historical", "description": "NOAA-OWP Enterprise Data Services", "is_active": True},
         ]
 
         for v in values:
@@ -587,7 +587,7 @@ class Command(BaseCommand):
             GeopackageSource.objects.all().delete()
 
         values = [
-            {"name": "Hydrofabric", "description": "NGWPC Enterprise Data Services", "is_active": True},
+            {"name": "Hydrofabric", "description": "NOAA-OWP Enterprise Data Services", "is_active": True},
         ]
 
         for v in values:

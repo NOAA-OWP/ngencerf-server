@@ -44,3 +44,7 @@ data_source_mapping.xml
 dataSources.xml
 
 *.sha
+
+# IDE Directories
+.idea
+.vscode

@@ -3,16 +3,12 @@ name: CI/CD Pipeline
 on:
   pull_request:
     branches:
-      - ngwpc-candidate
-      - ngwpc-release
       - main
       - nwm-main
       - development
       - release-candidate
   push:
     branches:
-      - ngwpc-candidate
-      - ngwpc-release
       - main
       - nwm-main
       - development
@@ -129,7 +125,7 @@ jobs:
           # base image metadata for Dockerfile labels
           BASE_INSPECT=$(skopeo inspect --override-os linux --override-arch amd64 "docker://${BASE_NAME}")
           BASE_DIGEST=$(echo "$BASE_INSPECT" | jq -r '.Digest // "unknown"')
-          BASE_REVISION=$(echo "$BASE_INSPECT" | jq -r '.Labels["org.opencontainers.image.revision"] // .Labels["io.ngwpc.image.base.revision"] // "unknown"')
+          BASE_REVISION=$(echo "$BASE_INSPECT" | jq -r '.Labels["org.opencontainers.image.revision"] // .Labels["io.noaa-owp.image.base.revision"] // "unknown"')
 
           # resolve each source repo's ref (branch/tag/SHA) to its commit SHA for revision labels
           resolve_sha() {
@@ -143,11 +139,11 @@ jobs:
             echo "${sha:-unknown}"
           }
 
-          DATA_ASSIMILATION_REVISION=$(resolve_sha "https://github.com/${{ inputs.DATA_ASSIMILATION_ORG || 'NGWPC' }}/nwm-data-assimilation.git" "${{ inputs.DATA_ASSIMILATION_REF || 'development' }}")
-          EWTS_REVISION=$(resolve_sha "https://github.com/${{ inputs.EWTS_ORG || 'NGWPC' }}/nwm-ewts.git" "${{ inputs.EWTS_REF || 'development' }}")
-          MSW_MGR_REVISION=$(resolve_sha "https://github.com/${{ inputs.MSW_MGR_ORG || 'NGWPC' }}/nwm-msw-mgr.git" "${{ inputs.MSW_MGR_REF || 'development' }}")
-          NGEN_REVISION=$(resolve_sha "https://github.com/${{ inputs.NGEN_ORG || 'NGWPC' }}/ngen.git" "${{ inputs.NGEN_REF || 'development' }}")
-          NGEN_FORCING_REVISION=$(resolve_sha "https://github.com/${{ inputs.NGEN_FORCING_ORG || 'NGWPC' }}/ngen-forcing.git" "${{ inputs.NGEN_FORCING_REF || 'development' }}")
+          DATA_ASSIMILATION_REVISION=$(resolve_sha "https://github.com/${{ inputs.DATA_ASSIMILATION_ORG || 'NOAA-OWP' }}/nwm-data-assimilation.git" "${{ inputs.DATA_ASSIMILATION_REF || 'development' }}")
+          EWTS_REVISION=$(resolve_sha "https://github.com/${{ inputs.EWTS_ORG || 'NOAA-OWP' }}/nwm-ewts.git" "${{ inputs.EWTS_REF || 'development' }}")
+          MSW_MGR_REVISION=$(resolve_sha "https://github.com/${{ inputs.MSW_MGR_ORG || 'NOAA-OWP' }}/nwm-msw-mgr.git" "${{ inputs.MSW_MGR_REF || 'development' }}")
+          NGEN_REVISION=$(resolve_sha "https://github.com/${{ inputs.NGEN_ORG || 'NOAA-OWP' }}/ngen.git" "${{ inputs.NGEN_REF || 'development' }}")
+          NGEN_FORCING_REVISION=$(resolve_sha "https://github.com/${{ inputs.NGEN_FORCING_ORG || 'NOAA-OWP' }}/ngen-forcing.git" "${{ inputs.NGEN_FORCING_REF || 'development' }}")
 
           # logic for the tags:
           # test_image_tag (commit short sha): used for the initial build and test
@@ -249,19 +245,19 @@ jobs:
           push: true
           tags: ${{ needs.setup.outputs.image_base }}:${{ needs.setup.outputs.test_image_tag }}${{ matrix.tag_suffix }}
           build-args: |
-            NGEN_ORG=${{ inputs.NGEN_ORG || 'NGWPC' }}
+            NGEN_ORG=${{ inputs.NGEN_ORG || 'NOAA-OWP' }}
             NGEN_REF=${{ inputs.NGEN_REF || 'development' }}
             NGEN_REVISION=${{ needs.setup.outputs.ngen_revision }}
-            MSW_MGR_ORG=${{ inputs.MSW_MGR_ORG || 'NGWPC' }}
+            MSW_MGR_ORG=${{ inputs.MSW_MGR_ORG || 'NOAA-OWP' }}
             MSW_MGR_REF=${{ inputs.MSW_MGR_REF || 'development' }}
             MSW_MGR_REVISION=${{ needs.setup.outputs.msw_mgr_revision }}
-            DATA_ASSIMILATION_ORG=${{ inputs.DATA_ASSIMILATION_ORG || 'NGWPC' }}
+            DATA_ASSIMILATION_ORG=${{ inputs.DATA_ASSIMILATION_ORG || 'NOAA-OWP' }}
             DATA_ASSIMILATION_REF=${{ inputs.DATA_ASSIMILATION_REF || 'development' }}
             DATA_ASSIMILATION_REVISION=${{ needs.setup.outputs.data_assimilation_revision }}
-            NGEN_FORCING_ORG=${{ inputs.NGEN_FORCING_ORG || 'NGWPC' }}
+            NGEN_FORCING_ORG=${{ inputs.NGEN_FORCING_ORG || 'NOAA-OWP' }}
             NGEN_FORCING_REF=${{ inputs.NGEN_FORCING_REF || 'development' }}
             NGEN_FORCING_REVISION=${{ needs.setup.outputs.ngen_forcing_revision }}
-            EWTS_ORG=${{ inputs.EWTS_ORG || 'NGWPC' }}
+            EWTS_ORG=${{ inputs.EWTS_ORG || 'NOAA-OWP' }}
             EWTS_REF=${{ inputs.EWTS_REF || 'development' }}
             EWTS_REVISION=${{ needs.setup.outputs.ewts_revision }}
             BASE_NAME=${{ needs.setup.outputs.base_name }}

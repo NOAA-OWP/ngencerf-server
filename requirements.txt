@@ -38,8 +38,8 @@ pandas~=2.3.3
 
 
 # There is also a dependancy on these 2 entries
-# git+https://github.com/NGWPC/nwm-msw-mgr.git@development
-# git+https://github.com/NGWPC/data-assimilation-engine.git@development
+# git+https://github.com/NOAA-OWP/nwm-msw-mgr.git@development
+# git+https://github.com/NOAA-OWP/data-assimilation-engine.git@development
 # These dependancies are installed separately in runCerf.sh in order to ensure that we get the latest code
 
 

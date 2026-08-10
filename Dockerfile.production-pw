@@ -9,8 +9,8 @@
 ############################################################################
 
 # Ownership / branding overrides
-ARG GH_ORG=NGWPC
-ARG IMAGE_NAMESPACE=ngwpc
+ARG GH_ORG=NOAA-OWP
+ARG IMAGE_NAMESPACE=noaa-owp
 
 # External repository sources (org and ref/branch overrides)
 ARG DATA_ASSIMILATION_ORG=${GH_ORG}

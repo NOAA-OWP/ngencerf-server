@@ -81,7 +81,7 @@ class CalibrationConfig(AppConfig):
         print_db_info()
         logger.info('')
 
-        logger.info(f'NGWPC Enterprise Data Server url: {settings.ENTERPRISE_DATA_URL}\n')
+        logger.info(f'NOAA-OWP Enterprise Data Server url: {settings.ENTERPRISE_DATA_URL}\n')
         logger.info(f'NGEN_CAL_MOUNT_POINT: {settings.NGEN_CAL_MOUNT_POINT}')
         logger.info(f'NGEN_STATIC_DIR: {settings.NGEN_STATIC_DIR}')
         logger.info(f'NGENCERF_ARCHIVE_S3_PATH: {settings.NGENCERF_ARCHIVE_S3_PATH}')

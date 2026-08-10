@@ -73,7 +73,7 @@ def get_git_info_internal() -> dict[str, dict[str, str]]:
     copy_file_from_image(image_name, container_name, container_file_name, local_file_name)
 
     if settings.NGEN_ENVIRONMENT == NgenEnvironmentEnum.PARALLEL_WORKS:
-        image_name = f'ghcr.io/ngwpc/ngencerf-ui:{settings.NGENCERF_UI_TAG}'
+        image_name = f'ghcr.io/noaa-owp/ngencerf-ui:{settings.NGENCERF_UI_TAG}'
         container_name = 'ngencerf-ui_temp_container'
         container_file_name = "/var/www/ngencerf/nuxt-app/ngencerf-ui_git_info.json"
         local_file_name = os.path.join(git_info_directory, "ngencerf-ui_git_info.json")  # ← FIX HERE

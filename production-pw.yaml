@@ -30,7 +30,7 @@ services:
         - NGEN_REF=${NGEN_REF:-development}
         - NGEN_FORCING_REF=${NGEN_FORCING_REF:-development}
         - CACHE_BUST=${CACHE_BUST:-1}
-    image: ghcr.io/ngwpc/ngencerf-server:${NGENCERF_SERVER_TAG:-latest}
+    image: ghcr.io/noaa-owp/ngencerf-server:${NGENCERF_SERVER_TAG:-latest}
     pull_policy: always
     ports:
       - "8000:8000"

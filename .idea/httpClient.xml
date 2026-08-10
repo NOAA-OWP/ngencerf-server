@@ -1,6 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<project version="4">
-  <component name="HttpClientEndpointsTabState">
-    <option name="requestToText" value="&lt;CachedHttpClientTabRequests&gt;&#10;  &lt;entry key=&quot;f5e9c51d6c3fc50d057f66f41d672f28ed2a9aa9&quot; value=&quot;###&amp;#10;POST http://localhost:8000/calibration/get_footer/&quot; /&gt;&#10;&lt;/CachedHttpClientTabRequests&gt;" />
-  </component>
-</project>

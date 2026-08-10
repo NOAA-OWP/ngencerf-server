@@ -59,6 +59,10 @@ sudo ln -s ~/ngwpc/data /ngencerf/data
 
 
 # Access to AWS
+
+> [!CAUTION]
+> The referenced confluence is not available
+
 This needs to be done if you are running on AWS Workspace
 
 Some endpoints require access to AWS and therefore you must update your credentials.
@@ -126,38 +130,38 @@ aws s3 cp s3://ngwpc-dev/rte-test-data/esmf/ /ngencerf/data/ngen-static-files/fo
 ```
 
 In addition, copy the directory `module_parameter_files` and all its contents from 
-https://github.com/NGWPC/nwm-msw-mgr/tree/development/src/mswm/module_parameter_files to the `/ngencerf/data/ngen-static-files` directory.
+https://github.com/NOAA-OWP/nwm-msw-mgr/tree/development/src/mswm/module_parameter_files to the `/ngencerf/data/ngen-static-files` directory.
 
 ```
 cd /ngencerf/data/ngen-static-files (for PW, use /ngencerf-app/data/ngen-cal-data/ngen-static-files)
 rm -rf module_parameter_files
-git clone --depth 1 --filter=blob:none --sparse -b development https://github.com/NGWPC/nwm-msw-mgr.git tmp-nwm-msw-mgr && \
+git clone --depth 1 --filter=blob:none --sparse -b development https://github.com/NOAA-OWP/nwm-msw-mgr.git tmp-nwm-msw-mgr && \
 cd tmp-nwm-msw-mgr && \
 git sparse-checkout set src/mswm/module_parameter_files && \
 mv src/mswm/module_parameter_files ../ && \
 cd .. && rm -rf tmp-nwm-msw-mgr
 ```
 
-Copy the directory `https://github.com/NGWPC/ngen-forcing/tree/development/NextGen_Forcings_Engine_BMI/BMI_NextGen_Configs/config_templates` 
+Copy the directory `https://github.com/NOAA-OWP/ngen-forcing/tree/development/NextGen_Forcings_Engine_BMI/BMI_NextGen_Configs/config_templates` 
 and all its contents to the `/ngencerf/data/ngen-static-files` directory as `bmi_forcing_templates`
 
 ```
 cd /ngencerf/data/ngen-static-files (for PW, use /ngencerf-app/data/ngen-cal-data/ngen-static-files)
 rm -rf bmi_forcing_templates
-git clone --depth 1 --filter=blob:none --sparse -b development https://github.com/NGWPC/ngen-forcing.git tmp-ngen-forcing && \
+git clone --depth 1 --filter=blob:none --sparse -b development https://github.com/NOAA-OWP/ngen-forcing.git tmp-ngen-forcing && \
 cd tmp-ngen-forcing && \
 git sparse-checkout set NextGen_Forcings_Engine_BMI/BMI_NextGen_Configs/config_templates && \
 mv NextGen_Forcings_Engine_BMI/BMI_NextGen_Configs/config_templates ../bmi_forcing_templates && \
 cd .. && rm -rf tmp-ngen-forcing
 ```
 
-From the directory `https://github.com/NGWPC/nwm-verf/tree/development/data/inputs`, 
+From the directory `https://github.com/NOAA-OWP/nwm-verf/tree/development/data/inputs`, 
 copy only the *.parquet files to the `/ngencerf/data/ngen-static-files/verfication_data` directory
 
 ```
 cd /ngencerf/data/ngen-static-files (for PW, use /ngencerf-app/data/ngen-cal-data/ngen-static-files)
 rm -rf verification_data
-git clone --depth 1 --filter=blob:none --sparse -b development https://github.com/NGWPC/nwm-verf.git tmp-ngen-verf && \
+git clone --depth 1 --filter=blob:none --sparse -b development https://github.com/NOAA-OWP/nwm-verf.git tmp-ngen-verf && \
 cd tmp-ngen-verf && \
 git sparse-checkout set data/inputs && \
 mkdir -p ../verification_data && \
@@ -273,6 +277,9 @@ The error messages that you get from the import are intended to let you know whi
 
 The metadata section is totally ignored on import and can be used to add your own comments, as long as it is in Json format.
 
+> [!CAUTION]
+> This Confluence site is unavailable
+
 See [NgenCERF Command Line Interface (CLI)](https://confluence.nextgenwaterprediction.com/pages/viewpage.action?pageId=20056845)
 
 # Runtime environments
@@ -298,14 +305,17 @@ which is `/ngen-app`.
 2. DOCKER - ngen and cal-mgr are installed in a docker container.  This is the easiest for running locally.
 Follow these steps to pull the latest docker containers. 
 
+> [!CAUTION]
+> This Confluence link in unavailable
+
    1. If you don't have Docker installed, follow the instructions here: https://confluence.nextgenwaterprediction.com/display/NGWPC/AWS+Ubuntu+22.04+LTS+Workspace+for+Docker#AWSUbuntu22.04LTSWorkspaceforDocker-InstallDocker
    2. Follow the instructions here to 'Manage Docker as a non-root user': https://docs.docker.com/engine/install/linux-postinstall/#manage-docker-as-a-non-root-user
    3. (Use your AWS credentials to login)
    ```
 
-   docker pull ghcr.io/ngwpc/nwm-cal-mgr:latest && docker tag ghcr.io/ngwpc/nwm-cal-mgr nwm-cal-mgr
-   docker pull ghcr.io/ngwpc/nwm-fcst-mgr:latest && docker tag ghcr.io/ngwpc/nwm-fcst-mgr:latest nwm-fcst-mgr
-   docker pull ghcr.io/ngwpc/ngen-bmi-forcing:latest && docker tag ghcr.io/ngwpc/ngen-bmi-forcing:latest ngen-bmi-forcing
+   docker pull ghcr.io/NOAA-OWP/nwm-cal-mgr:latest && docker tag ghcr.io/noaa-owp/nwm-cal-mgr nwm-cal-mgr
+   docker pull ghcr.io/noaa-owp/nwm-fcst-mgr:latest && docker tag ghcr.io/noaa-owp/nwm-fcst-mgr:latest nwm-fcst-mgr
+   docker pull ghcr.io/noaa-owp/ngen-bmi-forcing:latest && docker tag ghcr.io/noaa-owp/ngen-bmi-forcing:latest ngen-bmi-forcing
    ```
 
    **Note:** If you are developing and have updates to the repos that you want to include, use one of the following from the appropriate repo directory:
@@ -375,6 +385,9 @@ peter.a.kronenberg@U-12SMBYD5450YI:~$ tree /ngencerf -L 4 -n -A
 
 # Installing ngen and nwm-cal-mgr
 **Note:** This process is not recommended.  Run ngen and nwm-cal-mgr in a docker container as described in Runtime Environments
+
+> [!CAUTION]
+> This Conluence URL is unavailable
 
 Follow the instructions at https://confluence.nextgenwaterprediction.com/display/NGWPC/Build+ngen-cal+and+ngen+from+GitLab. 
 

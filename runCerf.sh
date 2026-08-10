@@ -1,10 +1,9 @@
 #! /bin/bash
 
-MSWM_REPO="https://github.com/NGWPC/nwm-msw-mgr.git"
-DATA_ASSIM_REPO="https://github.com/NGWPC/nwm-data-assimilation.git"
+MSWM_REPO="https://github.com/NOAA-OWP/nwm-msw-mgr.git"
+DATA_ASSIM_REPO="https://github.com/NOAA-OWP/nwm-data-assimilation.git"
 
 # Branches/tags for git repos
-#MSWM_BRANCH='jwade_NGWPC-7589_add_aet_rootzone'
 MSWM_BRANCH='development'
 DATA_ASSIMILATION_BRANCH='development'
 NGEN_FORCING_TAG='development'
@@ -773,7 +772,7 @@ if [ "$IN_DOCKER" = true ]; then
     cp -a "$PREBUILT_DIR"/. "$TARGET_DIR"/
 
 else
-    NGEN_FORCING_URL="https://github.com/NGWPC/ngen-forcing.git"
+    NGEN_FORCING_URL="https://github.com/NOAA-OWP/ngen-forcing.git"
 
     echo "Not running in Docker: cloning bmi_forcing_templates from ${NGEN_FORCING_URL}, branch: ${NGEN_FORCING_TAG}"
 

@@ -2,6 +2,9 @@
 
 ## Requirements
 
+> [!CAUTION]
+> GitLab is not supported by this repository. Anything connected to GitLab and NGWPC are non-functional
+
 To build and run the ngenCERF-server container, you will need the following software installed and running on your system:
 - Docker Engine
 - Docker Compose 
@@ -10,7 +13,7 @@ You will also need files with the following credentials:
 - AWS S3 credentials: saved to ./.aws_credentials
 - NGWPC gitlab Personal Access Token (PAT): saved to ~/.gitlab_token.
 
-This Docker container pulls images from the NGWPC official Docker registry, so you will need to be logged into that registry. Using your gitlab credentials, login to the registry using the following command:
+This Docker container pulls images from the NOAA-OWP official Docker registry, so you will need to be logged into that registry. Using your gitlab credentials, login to the registry using the following command:
 ```
 $ docker login registry.sh.nextgenwaterprediction.com
 ```
@@ -37,6 +40,9 @@ NGEN_CAL_DATA_PATH=/home/<username>/data/ngen-cal-data/
 ```
 
 ## Running ngenCERF-server
+
+> [!CAUTION]
+> This gitlab instance is unavailable for outside use
 
 It is recommended to use the [ngencerf-docker](https://gitlab.sh.nextgenwaterprediction.com/NGWPC/nwm-ngen/ngencerf-docker/) project to run the full ngenCERF application stack at once. However, if you would like to just run the back-end services in isolation, execute the following command:
 ```
