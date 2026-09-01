@@ -1,6 +1,5 @@
 import logging
 import os
-from typing import Literal
 
 from django.conf import settings
 
@@ -9,7 +8,6 @@ from calibration.enums_vanilla import SecondaryDataEnum
 from calibration.models import CalibrationRun, ValidationRun, ForecastRun, ColdStartRun, VerificationRun
 from calibration.models.hindcast_run import HindcastRun
 from calibration.util.file_util import get_single_file
-from cerfServer.settings import NGEN_ENVIRONMENT
 
 logger = logging.getLogger(__name__)
 
@@ -41,12 +39,6 @@ files = [
 
 
 def check_files():
-    # If we are running locally,then ngen and ngen-cal files must be on our machine
-    if NGEN_ENVIRONMENT == NGEN_ENVIRONMENT.LOCAL:
-        for file in files:
-            if not os.path.isfile(file):
-                logger.warning(f'{file} does not exist')
-
     for directory in static_dirs:
         if not os.path.isdir(directory):
             logger.warning(f'{directory} does not exist')
@@ -232,10 +224,6 @@ def get_calibration_stdout_file(run: CalibrationRun) -> str:
     return os.path.join(get_output_calibration_run_dir(run), 'cal-mgr_calibration_stdout.log')
 
 
-def get_calibration_performance_file(run: CalibrationRun) -> str:
-    return os.path.join(get_output_calibration_run_dir(run), 'cal-mgr_calibration_performance.log')
-
-
 def get_global_best_params_file(run: CalibrationRun) -> str:
     return os.path.join(get_output_calibration_run_dir(run), f"{run.gage.gage_id}_global_best_params.csv")
 
@@ -343,18 +331,6 @@ def get_hindcast_ngen_log_dir(hindcast_run: HindcastRun) -> str:
     return os.path.join(get_hindcast_dir(hindcast_run), 'logs')
 
 
-def get_cold_start_performance_file(cold_start_run: ColdStartRun) -> str:
-    return os.path.join(get_cold_start_dir(cold_start_run), 'cold_start_performance.log')
-
-
-def get_forecast_performance_file(forecast_run: ForecastRun) -> str:
-    return os.path.join(get_forecast_dir(forecast_run), 'forecast_performance.log')
-
-
-def get_hindcast_performance_file(hindcast_run: HindcastRun) -> str:
-    return os.path.join(get_hindcast_dir(hindcast_run), 'forecast_performance.log')
-
-
 def get_forecast_realization_file(forecast_run: ForecastRun) -> str:
     return os.path.join(get_forecast_dir(forecast_run), f'{forecast_run.calibration_run.gage.gage_id}_realization_config_bmi_fcst.json')
 
@@ -364,11 +340,7 @@ def get_cold_start_realization_file(cold_start_run: ColdStartRun) -> str:
 
 
 def get_verification_run_dir(run: VerificationRun) -> str:
-    if run.forecast_run_id is not None:
-        base_dir = get_forecast_dir(run.forecast_run)
-    else:
-        base_dir = get_hindcast_dir(run.hindcast_run)
-
+    base_dir = get_hindcast_dir(run.hindcast_run)
     return os.path.join(base_dir, 'Verification_Run', f'verification_{run.id}')
 
 
@@ -380,26 +352,12 @@ def get_verification_stdout_file(run: VerificationRun) -> str:
     return os.path.join(get_verification_run_dir(run), f'verification_{run.id}_stdout.log')
 
 
-def get_verification_performance_file(run: VerificationRun) -> str:
-    return os.path.join(get_verification_run_dir(run), 'verification_performance.log')
-
-
-def get_validation_performance_file(run: CalibrationRun, worker_name: str, iteration_num: int) -> str:
-    return os.path.join(get_output_validation_run_dir(run), f"cal-mgr_validation_{worker_name}_iter{iteration_num}_performance.log")
-
-
 def get_swe_netcdf_file(run: CalibrationRun) -> str:
     return os.path.join(get_output_validation_run_dir(run), f"{run.gage.gage_id}_swe.nc")
 
 
 def get_soil_moisture_netcdf_file(run: CalibrationRun) -> str:
     return os.path.join(get_output_validation_run_dir(run), f"{run.gage.gage_id}_soil_moisture.nc")
-
-
-def get_validation_special_performance_file(run: CalibrationRun,
-                                            validation_type: Literal[ValidationType.VALID_BEST, ValidationType.VALID_CONTROL]) -> str:
-    validation_type_str = validation_type.value.split('_')[1].lower()
-    return os.path.join(get_output_validation_run_dir(run), f"cal-mgr_validation_{validation_type_str}_performance.log")
 
 
 def get_calibration_git_info_file(run: CalibrationRun) -> str:

@@ -63,10 +63,88 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  PYTHON_VERSION: '3.11'
-  BASE_NAME: rockylinux:8
+  PYTHON_VERSION: '3.12'
+  BASE_NAME: python:3.12-slim-bookworm
 
 jobs:
+  # Build the ngencerf CLI executables. PyInstaller cannot cross-compile, so each
+  # target OS builds on its own runner. Each binary is uploaded as an artifact and
+  # baked into the server image by the build job below (which downloads them into
+  # downloads/ before the docker build). Has no needs, so it starts immediately
+  # alongside setup.
+  build-cli:
+    name: build-cli
+    if: |
+      (github.event_name == 'pull_request') ||
+      (github.event_name == 'push') ||
+      (github.event_name == 'workflow_dispatch')
+    runs-on: ${{ matrix.runner }}
+    # Old-glibc image used only to smoke-test the Linux binary (named here rather than
+    # hardcoded in the step). The Linux binary is made portable by staticx inside
+    # build_cli.sh, so running it on this image proves it loads with no system Python.
+    env:
+      CLI_SMOKE_IMAGE: amazonlinux:2
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            runner: ubuntu-latest
+          # macos-15-intel is a GitHub-hosted Intel (x86_64) runner.
+          # build_cli.sh builds with --target-arch x86_64, and this runner's Python is x86_64,
+          # so the binary runs on both Intel and Apple Silicon Macs via Rosetta 2.
+          # An arm64 runner (macos-14 / macos-15 / macos-latest) would break --target-arch x86_64.
+          - platform: macos
+            runner: macos-15-intel
+          - platform: windows
+            runner: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      # The `matrix` context is NOT available in a step's `shell:` key, so pick the
+      # shell per-OS with `if: runner.os` and literal shell values (bash for
+      # linux/macOS, pwsh for Windows). Do not put matrix.shell back here.
+      - name: Build CLI executable (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: bash cli/build_cli.sh
+      - name: Build CLI executable (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          # build_cli.sh builds the PyInstaller onefile and then wraps it with staticx
+          # into a fully static binary that runs on any glibc (Amazon Linux 2, RHEL 7+)
+          # and musl. staticx needs objcopy (binutils) + patchelf on the host runner.
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq binutils patchelf
+          bash cli/build_cli.sh
+      - name: Smoke-test Linux binary on old glibc
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          # Prove the freshly built binary loads and runs on CLI_SMOKE_IMAGE, an old-glibc
+          # distro with no system Python. `ngencerf version` is local-only (no network).
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}/downloads/latest/linux:/cli:ro" \
+            "$CLI_SMOKE_IMAGE" \
+            /cli/ngencerf version
+      - name: Build CLI executable (PowerShell)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./cli/build_cli.ps1
+      - name: Upload CLI artifact (${{ matrix.platform }})
+        uses: actions/upload-artifact@v7
+        with:
+          name: cli-${{ matrix.platform }}
+          path: downloads/
+          if-no-files-found: error
+          retention-days: 7
+
   # set variables to use in other jobs
   setup:
     name: setup
@@ -74,9 +152,7 @@ jobs:
     outputs:
       org: ${{ steps.vars.outputs.org }}
       image_base: ${{ steps.vars.outputs.image_base }}
-      pr_tag: ${{ steps.vars.outputs.pr_tag }}
       commit_sha: ${{ steps.vars.outputs.commit_sha }}
-      commit_sha_short: ${{ steps.vars.outputs.commit_sha_short }}
       test_image_tag: ${{ steps.vars.outputs.test_image_tag }}
       alias_tag: ${{ steps.vars.outputs.alias_tag }}
       clean_ref: ${{ steps.vars.outputs.clean_ref }}
@@ -95,15 +171,17 @@ jobs:
         run: |
           set -euo pipefail
 
-          # set variables to use with Docker images
+          # ----------------------------------------------------------------
+          # 1. Image identity: GHCR namespace (must be lowercase) + repo name
+          # ----------------------------------------------------------------
           ORG="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
           REPO="$(basename "${GITHUB_REPOSITORY}")"
           IMAGE_BASE="${REGISTRY}/${ORG}/${REPO}"
 
-          # for Docker image tags
-          TIMESTAMP=$(date -u +'%Y%m%d%H%M%SZ')
-
-          # logic to get the real branch name and commit SHA on pull requests
+          # ----------------------------------------------------------------
+          # 2. Real ref + commit SHA. On a pull_request, github.ref points at
+          #    the merge commit, so read the PR head ref/sha instead.
+          # ----------------------------------------------------------------
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
             REAL_REF="${{ github.head_ref }}"
             REAL_SHA="${{ github.event.pull_request.head.sha }}"
@@ -111,30 +189,42 @@ jobs:
             REAL_REF="${{ github.ref_name }}"
             REAL_SHA="${GITHUB_SHA}"
           fi
-
-          # clean ref name and short commit sha
-          CLEAN_REF=$(echo "$REAL_REF" | tr '[:upper:]' '[:lower:]' | sed 's/\//-/g')
+          CLEAN_REF=$(echo "$REAL_REF" | tr '[:upper:]' '[:lower:]' | sed 's/\//-/g')  # tag-safe ref
           SHORT_SHA="${REAL_SHA:0:7}"
 
-          # skopeo is needed to inspect the base image
+          # ----------------------------------------------------------------
+          # 3. Base image metadata for the OCI base.* labels. skopeo reads the
+          #    remote manifest without pulling. base_revision is best-effort:
+          #    base images that publish no revision label (e.g. python:3.12-slim-bookworm)
+          #    stay "unknown"; base_digest still pins the exact base image.
+          # ----------------------------------------------------------------
           if ! command -v skopeo >/dev/null 2>&1; then
             sudo apt-get update -y
             sudo apt-get install -y --no-install-recommends skopeo
           fi
-
-          # base image metadata for Dockerfile labels
           BASE_INSPECT=$(skopeo inspect --override-os linux --override-arch amd64 "docker://${BASE_NAME}")
           BASE_DIGEST=$(echo "$BASE_INSPECT" | jq -r '.Digest // "unknown"')
           BASE_REVISION=$(echo "$BASE_INSPECT" | jq -r '.Labels["org.opencontainers.image.revision"] // .Labels["io.noaa-owp.image.base.revision"] // "unknown"')
 
-          # resolve each source repo's ref (branch/tag/SHA) to its commit SHA for revision labels
+          # ----------------------------------------------------------------
+          # 4. Source-dependency revisions. Resolve each dependency's ref
+          #    (branch/tag/SHA) to the exact commit it points at right now.
+          #    Each SHA is used TWICE downstream:
+          #      - the io.ngwpc.<dep>.revision OCI label (traceability), and
+          #      - the <DEP>_CACHE_BUST build-arg, which forces that exact
+          #        commit to be (re)installed so a cached Docker layer cannot
+          #        leave an older version baked in while the label claims the
+          #        newer one.
+          #    A *_REF override flows straight through here, so a non-default
+          #    ref is honored for both the install and the label.
+          # ----------------------------------------------------------------
           resolve_sha() {
             local url="$1" ref="$2" out sha
-            # a full 40-char SHA can't be looked up via ls-remote; use it directly
+            # a full 40-char SHA is already a commit, not a ref to look up
             if [[ "$ref" =~ ^[0-9a-f]{40}$ ]]; then echo "$ref"; return; fi
-            out=$(git ls-remote "$url" "$ref" "refs/tags/${ref}^{}" 2>/dev/null)
-            # prefer the dereferenced commit (^{}) for annotated tags; else first match
-            sha=$(echo "$out" | grep '\^{}$' | head -n1 | cut -f1)
+            out=$(git ls-remote "$url" "$ref" "refs/tags/${ref}^{}" 2>/dev/null || true)
+            # prefer the dereferenced commit (^{}) for annotated tags; else the first match
+            sha=$(echo "$out" | grep '\^{}$' | head -n1 | cut -f1 || true)
             [ -z "$sha" ] && sha=$(echo "$out" | head -n1 | cut -f1)
             echo "${sha:-unknown}"
           }
@@ -145,28 +235,32 @@ jobs:
           NGEN_REVISION=$(resolve_sha "https://github.com/${{ inputs.NGEN_ORG || 'NOAA-OWP' }}/ngen.git" "${{ inputs.NGEN_REF || 'development' }}")
           NGEN_FORCING_REVISION=$(resolve_sha "https://github.com/${{ inputs.NGEN_FORCING_ORG || 'NOAA-OWP' }}/ngen-forcing.git" "${{ inputs.NGEN_FORCING_REF || 'development' }}")
 
-          # logic for the tags:
-          # test_image_tag (commit short sha): used for the initial build and test
-          # alias_tag: used for final tagging on successful tests
-
-          # test tag is always commit short sha
+          # ----------------------------------------------------------------
+          # 5. Image tags.
+          #    test_image_tag: short SHA, used by the build + test stages.
+          #    alias_tag: the promoted, human-readable tag:
+          #      pull_request          -> pr-<number>-build
+          #      workflow_dispatch tag -> the git tag
+          #      branch push           -> <timestamp>-<branch>
+          # ----------------------------------------------------------------
+          TIMESTAMP=$(date -u +'%Y%m%d%H%M%SZ')
           TEST_TAG="${SHORT_SHA}"
-
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
-            # for pull requests, use pr-<pr number>-build
             ALIAS="pr-${{ github.event.pull_request.number }}-build"
           elif [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "${{ github.ref_type }}" = "tag" ]; then
-            # for manual workflow dispatch on tags, use the git tag
             ALIAS="${CLEAN_REF}"
           else
-            # for pushes to branches, use timestamp-branchname
             ALIAS="${TIMESTAMP}-${CLEAN_REF}"
           fi
 
-          # save outputs
+          # ----------------------------------------------------------------
+          # 6. Publish outputs for the downstream jobs.
+          # ----------------------------------------------------------------
           cat >> "$GITHUB_OUTPUT" <<EOF
           org=${ORG}
           image_base=${IMAGE_BASE}
+          clean_ref=${CLEAN_REF}
+          commit_sha=${REAL_SHA}
           test_image_tag=${TEST_TAG}
           alias_tag=${ALIAS}
           commit_sha=${REAL_SHA}
@@ -220,7 +314,7 @@ jobs:
       (github.event_name == 'push') ||
       (github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
-    needs: setup
+    needs: [setup, build-cli]
     strategy:
       fail-fast: false
       matrix:
@@ -231,35 +325,53 @@ jobs:
             tag_suffix: "-prod"
     steps:
       - uses: actions/checkout@v6
+      # Pull the OS-native CLI binaries built by build-cli into downloads/ so the
+      # image bakes them in (COPY . ...) and the prod collectstatic step can serve
+      # them. The Dockerfiles no longer build the CLI.
+      - name: Download prebuilt CLI binaries
+        uses: actions/download-artifact@v8
+        with:
+          pattern: cli-*
+          merge-multiple: true
+          path: downloads
       - name: Log in to registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build & push (${{ matrix.dockerfile }}) image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ${{ matrix.dockerfile }}
           push: true
           tags: ${{ needs.setup.outputs.image_base }}:${{ needs.setup.outputs.test_image_tag }}${{ matrix.tag_suffix }}
+          # Each *_REVISION is the dependency's resolved commit SHA (used by the
+          # OCI labels). The matching *_CACHE_BUST is the same SHA, which busts
+          # that dependency's install layer so the image always installs the
+          # exact commit the label advertises (no stale/cached version).
           build-args: |
             NGEN_ORG=${{ inputs.NGEN_ORG || 'NOAA-OWP' }}
             NGEN_REF=${{ inputs.NGEN_REF || 'development' }}
             NGEN_REVISION=${{ needs.setup.outputs.ngen_revision }}
             MSW_MGR_ORG=${{ inputs.MSW_MGR_ORG || 'NOAA-OWP' }}
+            NGEN_CACHE_BUST=${{ needs.setup.outputs.ngen_revision }}
             MSW_MGR_REF=${{ inputs.MSW_MGR_REF || 'development' }}
             MSW_MGR_REVISION=${{ needs.setup.outputs.msw_mgr_revision }}
             DATA_ASSIMILATION_ORG=${{ inputs.DATA_ASSIMILATION_ORG || 'NOAA-OWP' }}
+            MSW_MGR_CACHE_BUST=${{ needs.setup.outputs.msw_mgr_revision }}
             DATA_ASSIMILATION_REF=${{ inputs.DATA_ASSIMILATION_REF || 'development' }}
             DATA_ASSIMILATION_REVISION=${{ needs.setup.outputs.data_assimilation_revision }}
             NGEN_FORCING_ORG=${{ inputs.NGEN_FORCING_ORG || 'NOAA-OWP' }}
+            DATA_ASSIMILATION_CACHE_BUST=${{ needs.setup.outputs.data_assimilation_revision }}
             NGEN_FORCING_REF=${{ inputs.NGEN_FORCING_REF || 'development' }}
             NGEN_FORCING_REVISION=${{ needs.setup.outputs.ngen_forcing_revision }}
             EWTS_ORG=${{ inputs.EWTS_ORG || 'NOAA-OWP' }}
+            NGEN_FORCING_CACHE_BUST=${{ needs.setup.outputs.ngen_forcing_revision }}
             EWTS_REF=${{ inputs.EWTS_REF || 'development' }}
             EWTS_REVISION=${{ needs.setup.outputs.ewts_revision }}
+            EWTS_CACHE_BUST=${{ needs.setup.outputs.ewts_revision }}
             BASE_NAME=${{ needs.setup.outputs.base_name }}
             BASE_DIGEST=${{ needs.setup.outputs.base_digest }}
             BASE_REVISION=${{ needs.setup.outputs.base_revision }}

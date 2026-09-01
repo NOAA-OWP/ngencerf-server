@@ -11,7 +11,7 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 
 from calibration.enums import ObservationalSourceEnum, ForcingSourceEnum, DomainEnum, GeopackageSourceEnum
-from calibration.models import Gage, CalibrationRun, CalibrationFormulation
+from calibration.models import Gage, CalibrationRun, CalibrationFormulation, ForcingSource
 from calibration.util.caching import get_cached_gages, get_gage_by_id, update_and_get_cached_gage_status
 from calibration.util.calibration_validators import SaveGageRequestSerializer, GageIdSerializer, SaveGageResponseSerializer, GageSerializer, \
     LoadGageResponseSerializer, ErrorResponseSerializer, UpdateGageStatusRequestSerializer, UpdateGageStatusResponseSerializer, EmptySerializer
@@ -211,25 +211,52 @@ def save_gage_tab(request: Request):
     eds_errors: list[dict] = []
     geopackage_image_url = None
 
-    # Check cache first to confirm the gage exists and is active
-    gage_dict = get_gage_by_id(gage_id)
-    if not gage_dict:
-        raise Gage.DoesNotExist(f"Gage '{gage_id}' does not exist or is not active")
+    gage = None
+    if gage_id is not None:
+        # Check cache first to confirm the gage exists and is active
+        gage_dict = get_gage_by_id(gage_id)
+        if not gage_dict:
+            raise Gage.DoesNotExist(f"Gage '{gage_id}' does not exist or is not active")
 
-    # Fetch the actual DB object to assign to the FK (include domain for Data Services calls)
-    gage = (
-        Gage.objects
-        .select_related("domain")
-        .only("id", "gage_id", "domain")
-        .get(gage_id=gage_id)
+        # Fetch the actual DB object to assign to the FK (include domain for Data Services calls)
+        gage = (
+            Gage.objects
+            .select_related("domain")
+            .only("id", "gage_id", "domain")
+            .get(gage_id=gage_id)
+        )
+
+    forcing_source: ForcingSource | None = (
+        ForcingSourceEnum.get_instance(forcing_source_name)
+        if forcing_source_name
+        else None
     )
 
-    gage_is_new_or_changed = (run.gage is None) or (run.gage != gage)
+    if (
+            gage is not None
+            and forcing_source is not None
+            and forcing_source.name == ForcingSourceEnum.AORC.value
+            and gage.domain.name != DomainEnum.CONUS.value
+    ):
+        return ResponseError("'AORC' is only valid for Domain 'CONUS'")
 
-    if gage_is_new_or_changed:
-        # reset + set gage (non-CLI path)
-        reset_gage_dependent_state_on_change(run, gage, cli=False)
+    # Reset dependent state if the gage changed or was removed.
+    gage_changed = reset_gage_dependent_state_on_change(
+        run,
+        gage,
+        cli=False
+    )
 
+    # Geopackage and Observational were only getting set when the gage changed
+    # Need to always set them to allow the UI to self-correct when old values are set by a clone/CLI import
+    run.geopackage_source = GeopackageSourceEnum.get_instance(geopackage_source_name) if geopackage_source_name else None
+
+    run.observational_source = ObservationalSourceEnum.get_instance(observational_source_name) if observational_source_name else None
+
+    run.forcing_source = forcing_source
+
+    # Only retrieve gage-dependent data when a gage is selected.
+    if gage_changed and gage is not None:
         # Refresh module parameters for existing formulations (if any).
         # Data Services call must be outside a write transaction.
         my_formulations = (
@@ -268,8 +295,6 @@ def save_gage_tab(request: Request):
         else:
             raise CerfException("Invalid geopackage source")
 
-        run.geopackage_source = GeopackageSourceEnum.get_instance(geopackage_source_name) if geopackage_source_name else None
-
         geopackage_path = get_geopackage_file_path(run)
         if geopackage_path:
             catchments = list(get_geometry_from_gpkg(geopackage_path)['catchments'].keys())
@@ -277,17 +302,7 @@ def save_gage_tab(request: Request):
             logger.info(f"Found {run.num_catchments} catchments in {geopackage_path}: {catchments}")
 
         geopackage_image_url = get_geopackage_image_url(geopackage_path)
-
-        run.observational_source = ObservationalSourceEnum.get_instance(observational_source_name) if observational_source_name else None
-
-    forcing_source = (
-        ForcingSourceEnum.get_instance(forcing_source_name)
-        if forcing_source_name
-        else None
-    )
-
-    run.forcing_source = forcing_source
-
+    
     # -------------------------
     # Write phase
     # -------------------------
@@ -399,14 +414,24 @@ def get_geopackage_image_url(geopackage_path: str | None) -> str | None:
         return None
 
 
-def reset_gage_dependent_state_on_change(run: CalibrationRun, new_gage: Gage, *, cli: bool = False) -> bool:
+def reset_gage_dependent_state_on_change(
+        run: CalibrationRun,
+        new_gage: Gage | None,
+        *,
+        cli: bool = False
+) -> bool:
     """
     If the gage changes, clear any fields derived from the prior gage and clear derived times.
+
+    `new_gage` may be None when removing the currently selected gage.
 
     This function performs no DB writes; it only mutates `run` in memory.
     Returns True if the gage changed (or was newly set), else False.
     """
-    gage_changed = (run.gage is None) or (run.gage_id != new_gage.id)
+    # Compare FK values directly so a None gage is handled safely.
+    new_gage_id = new_gage.id if new_gage is not None else None
+    gage_changed = run.gage_id != new_gage_id
+
     if not gage_changed:
         return False
 
@@ -415,10 +440,12 @@ def reset_gage_dependent_state_on_change(run: CalibrationRun, new_gage: Gage, *,
     if geopackage and os.path.exists(geopackage):
         os.remove(geopackage)
 
-    run.forcing_eds_dir_path = None
+    # The catchment count is no longer valid when the gage changes.
+    run.num_catchments = None
 
     clear_times(run, cli=cli)
     run.gage = new_gage
+
     return True
 
 

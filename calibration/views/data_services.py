@@ -24,7 +24,7 @@ default_headers = {
 }
 
 
-def fetch_from_data_services(method: str, url: str, headers: dict = None, payload: dict = None) -> dict | str:
+def fetch_from_data_services(method: str, url: str, headers: dict | None = None, payload: dict | None = None) -> dict | str:
     """
     Issue an HTTP request to Data Services.
 
@@ -224,6 +224,11 @@ def get_observational_date_range_from_data_services(run: CalibrationRun) -> Date
             "Observational info from Data Services returned non-JSON response"
         )
 
+    total_records = observational_info_json.get("total_records")
+
+    if total_records is None or total_records == 0:
+        raise DataServicesException("No observational records are available from Data Services")
+
     dr = observational_info_json.get("date_range") or {}
 
     start_raw = dr.get("start")
@@ -279,13 +284,11 @@ def clear_times(run: CalibrationRun, cli: bool = False):
         run.time_range_start = None
         run.time_range_end = None
         run.calibration_start_period = None
-        run.calibration_end_period = None
-        run.validation_start_period = None
-        run.validation_end_period = None
-        run.calibration_eval_start_period = None
-        run.calibration_eval_end_period = None
-        run.validation_eval_start_period = None
-        run.validation_eval_end_period = None
+        run.warmup_duration = None
+        run.calibration_duration = None
+        run.validation_window_gap = None
+        run.validation_window_after_calibration = True
+        run.validation_duration = None
 
 
 def get_module_metadata_from_data_services(
@@ -303,6 +306,9 @@ def get_module_metadata_from_data_services(
     ----------
     - The input `modules` is the full set of module names for the run.
     - Only modules where Module.use_edfs == True are sent to Data Services.
+    - SFT is handled dynamically: SFT is sent only when LASAM is also included in
+      the run's modules. In that case, SFT is treated as requiring EDFS metadata.
+      Otherwise, SFT is not sent.
     - Module definitions are resolved from the shared Redis-backed module cache (no DB queries).
     - If no modules require EDFS, no HTTP request is made and ({}, []) is returned.
     - Unknown module names that are not present in the cache are ignored.
@@ -333,18 +339,30 @@ def get_module_metadata_from_data_services(
     # -------------------------------------------------------
     cached_modules = get_cached_modules_with_groups()  # {module_name -> Module ORM instance}
 
-    edfs_modules = sorted(
-        name
-        for name in modules
-        if name in cached_modules and getattr(cached_modules[name], "use_edfs", True)
-    )
+    edfs_modules: list[str] = []
+
+    for name in modules:
+        if name not in cached_modules:
+            continue
+
+        module = cached_modules[name]
+
+        # Default behavior comes from the module definition.
+        use_edfs = getattr(module, "use_edfs", True)
+
+        # SFT only requires EDFS metadata when LASAM is also selected.
+        if name == "SFT":
+            use_edfs = "LASAM" in modules
+
+        if use_edfs:
+            edfs_modules.append(name)
+
+    edfs_modules = sorted(edfs_modules)
 
     # If nothing requires EDFS, skip the external call entirely.
     if not edfs_modules:
-        logger.info("No modules with use_edfs=True; skipping Data Services call.")
+        logger.info("No modules require EDFS metadata; skipping Data Services call.")
         return {}, []
-
-    logger.info("Fetching module metadata from Data Services")
 
     # -------------------------------------------------------
     # Resolve gage context (explicit args take precedence)
@@ -410,9 +428,6 @@ def get_module_metadata_from_data_services(
                 "message": f"{module_name} - {err}",
                 "status_code": None,
             })
-
-    # Only translate names for modules that actually have parameters
-    fix_module_metadata(module_metadata)
 
     return module_metadata, eds_errors
 
@@ -504,93 +519,6 @@ def update_parameters(run: CalibrationRun, module_metadata: dict, gage_changed: 
                 # minimize writes on unchanged parameter metadata.
                 if params_to_update:
                     CalibrationParameter.objects.bulk_update(params_to_update, ['initial_value'])
-
-
-translation_map = {
-    ("CFE-S", "soil_params.smcmax"): "maxsmc",
-    ("CFE-S", "soil_params.satdk"): "satdk",
-    ("CFE-S", "soil_params.slop"): "slope",
-    ("CFE-S", "soil_params.b"): "b",
-    ("CFE-S", "K_lf"): "Klf",
-    ("CFE-S", "K_nash"): "Kn",
-    ("CFE-S", "soil_params.satpsi"): "satpsi",
-    ("CFE-S", "soil_params.wltsmc"): "wltsmc",
-
-    ("CFE-X", "soil_params.smcmax"): "maxsmc",
-    ("CFE-X", "soil_params.satdk"): "satdk",
-    ("CFE-X", "soil_params.slop"): "slope",
-    ("CFE-X", "soil_params.b"): "b",
-    ("CFE-X", "K_lf"): "Klf",
-    ("CFE-X", "K_nash"): "Kn",
-    ("CFE-X", "soil_params.satpsi"): "satpsi",
-    ("CFE-X", "soil_params.wltsmc"): "wltsmc",
-
-    ("Noah-OWP-Modular", "MAXSMC"): "SMCMAX",
-    ("Noah-OWP-Modular", "CWPVT"): "CWP",
-    ("Noah-OWP-Modular", "SATDK"): "DKSAT",
-
-    ("LASAM", "theta_e"): "smcmax",
-    ("LASAM", "theta_r"): "smcmin",
-    ("LASAM", "n"): "van_genuchten_n",
-    ("LASAM", "alpha"): "van_genuchten_alpha",
-    ("LASAM", "Ks"): "hydraulic_conductivity",
-    ("LASAM", "field_capacity_psi"): "field_capacity",
-
-    ("SFT", "soil_params.smcmax"): "smcmax",
-    ("SFT", "soil_params.b"): "b",
-    ("SFT", "soil_params.satpsi"): "satpsi",
-    ("SFT", "soil_params.quartz"): "quartz",
-    ("SFT", "soil_temperature"): "soil_temperature_profile",
-
-    ("SMP", "soil_params.smcmax"): "smcmax",
-    ("SMP", "soil_params.b"): "b",
-    ("SMP", "soil_params.satpsi"): "satpsi",
-}
-
-
-def fix_module_metadata(module_metadata):
-    """
-     Normalize module metadata by translating selected parameter names.
-
-    Translation is based on the module name and original parameter name. Modules with
-    EDFS errors are skipped.
-
-    :param module_metadata: Dictionary containing module metadata.
-                     Example structure:
-                     {
-                         "modules": [
-                             {
-                                 "module_name": "module_name",
-                                 "calibratable_parameters": [
-                                     {"name": "full_param_name", "value": 123}
-                                 ]
-                             }
-                         ]
-                     }
-    :return: None. The input dictionary is modified in place.
-    """
-    modules = (module_metadata or {}).get("modules") or []
-    for module in modules:
-        # If EDFS reported an error for this module, do not touch it.
-        if module.get("error"):
-            continue
-
-        module_name = module.get("module_name")
-        if not module_name:
-            continue
-
-        params = module.get("calibratable_parameters") or []
-        for param in params:
-            param_name = param["name"]  # Extract the parameter name
-            if not param_name:
-                continue
-
-            key = (module_name, param_name)  # Create a tuple key
-            mapped = translation_map.get(key)
-            # Check if the key exists in the translation_map
-            if mapped:
-                logger.info(f"Translating {key} to {mapped}")
-                param["name"] = mapped
 
 
 def safe_float(value, label, param_name, module_name):

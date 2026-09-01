@@ -1,3 +1,26 @@
+# This file is currently retained for historical/reference purposes only.
+#
+# Redis is no longer configured from this redis.conf.prod file in AWS deployments.
+# Production Redis now runs as an AWS ElastiCache managed service, with the
+# meaningful infrastructure and runtime settings defined in Terraform.
+#
+# Most directives below are container/process-level settings that do not apply
+# to ElastiCache because AWS manages the Redis process, listener, logging, and
+# persistence behavior. Network access is controlled through private subnets and
+# security groups instead of bind/protected-mode settings.
+#
+# Current Terraform-managed Redis behavior includes:
+#   - port 6379
+#   - TLS in transit
+#   - encryption at rest using the configured KMS key
+#   - subnet/security-group isolation
+#   - managed snapshot retention where enabled
+#   - multi-AZ failover in production
+#
+# If a Redis runtime tunable is needed in ElastiCache, add it through a custom
+# aws_elasticache_parameter_group for the Redis 7 parameter family instead of
+# editing this file.
+
 # -----------------------------
 # Redis PROD configuration
 # -----------------------------

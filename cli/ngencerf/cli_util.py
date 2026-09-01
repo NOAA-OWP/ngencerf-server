@@ -1,10 +1,22 @@
 import ast
 import json
+import sys
+try:
+    # Not available on Windows
+    import termios
+except ImportError:
+    termios = None
 
 
-def check_http_error(http_status: int, response: str, content_type: str | None = None, retry_func=None) -> tuple[dict | None, bool]:
+def check_http_error(
+        http_status: int,
+        response: str,
+        url: str,
+        content_type: str | None = None,
+        retry_func=None
+) -> tuple[dict | None, bool]:
     """
-    Handles HTTP errors, returning the parsed response for 200 status codes,
+    Handles HTTP responses, returning the parsed response for 200 status codes
     and printing appropriate error messages for other status codes.
 
     - For 200 responses: parses and returns JSON if applicable; non-JSON content is treated as success.
@@ -14,19 +26,18 @@ def check_http_error(http_status: int, response: str, content_type: str | None =
 
     :param http_status: The HTTP status code returned by the server.
     :param response: The raw response text from the server.
+    :param url: The URL used for the request.
     :param content_type: Optional content type string for handling non-JSON responses.
-    :param retry_func: Optional callable that performs the original request again after
-        reauthentication succeeds.
-        - Should take no arguments and return a response-like object with:
-            - `status_code` (int)
-            - `text` (str)
-            - `json()` (callable returning parsed JSON)
+    :param retry_func: Optional callable that performs and handles the original request
+        again after reauthentication succeeds.
+        - Should take no arguments and return a tuple of
+          (parsed_response, success_flag).
     :return: A tuple of (parsed_response, success_flag)
              - parsed_response: dict or None
              - success_flag: True if request succeeded or was retried successfully; False otherwise.
     """
     try:
-        # If it's a binary response (e.g., ZIP file), don't try to parse it as JSON
+        # If it's a non-JSON response (e.g., a ZIP file), don't try to parse it as JSON
         if http_status == 200:
             # Non-JSON (e.g., streaming ZIP) is still success
             if content_type and not content_type.startswith("application/json"):
@@ -36,12 +47,15 @@ def check_http_error(http_status: int, response: str, content_type: str | None =
                 response_json = json.loads(response)
                 return response_json, True
             except json.JSONDecodeError:
-                print("Warning: Response is not valid JSON.")
+                print(f"Warning: Response from {url} is not valid JSON.")
                 return None, False
 
         # 401 Unauthorized → attempt refresh or full login, then retry once
         if http_status == 401:
-            print("Unauthorized (401): Access token may have expired. Attempting refresh...")
+            print(
+                f"Unauthorized (401) from {url}: "
+                "Access token may have expired. Attempting refresh..."
+            )
 
             from ngencerf.cli_user import refresh_access_token, perform_full_login
 
@@ -55,15 +69,20 @@ def check_http_error(http_status: int, response: str, content_type: str | None =
                 if perform_full_login():
                     token_fixed = True
 
-            if token_fixed and retry_func:
-                print("Retrying request with new token...")
-                return retry_func()
+            if token_fixed:
+                if retry_func:
+                    print("Retrying request with new token...")
+                    return retry_func()
 
-            return {"detail": "Token fixed, but no retry performed."}, False
+                return {
+                    "detail": "Authentication succeeded, but no retry was performed."
+                }, False
+
+            return {"detail": "Authentication failed."}, False
 
         # Handle 400 Bad Request
         if http_status == 400:
-            print("Server returned HTTP 400 Bad Request.")
+            print(f"Server returned HTTP 400 Bad Request for URL: {url}")
             response_json = json.loads(response)
             response_type = response_json.get("response_type", "")
 
@@ -123,21 +142,29 @@ def check_http_error(http_status: int, response: str, content_type: str | None =
 
             return None, False
 
+        if http_status == 404:
+            print(f"Error: Server returned HTTP 404 Not Found for URL: {url}")
+            print(
+                "Check that the configured server URL is correct and points "
+                "to an ngenCerf server."
+            )
+            return None, False
+
         # Handle all other non-200 status codes
-        try:
-            print(f"Error: Server returned HTTP status code {http_status}. Response:")
-            _pretty_print_json(response)
-        except json.JSONDecodeError:
-            # Fallback for non-JSON responses
-            print(f"Error: Server returned HTTP status code {http_status}. Response:")
-            lines = response.strip().splitlines()
-            print("\n".join(lines[:10]) + ("\n..." if len(lines) > 10 else ""))
+        print(
+            f"Error: Server returned HTTP status code {http_status} "
+            f"for URL: {url}. Response:"
+        )
+        _pretty_print_json(response)
 
         return None, False
 
     except json.JSONDecodeError:
-        # Fallback to raw response if JSON parsing fails at the initial check
-        print(f"Error: Server returned HTTP status code {http_status}. Response:")
+        # Fallback to the raw response when an error response expected to contain JSON is invalid
+        print(
+            f"Error: Server returned HTTP status code {http_status} "
+            f"for URL: {url}. Response:"
+        )
         lines = response.strip().splitlines()
         print("\n".join(lines[:10]) + ("\n..." if len(lines) > 10 else ""))
         return None, False
@@ -149,8 +176,10 @@ def _print_validation_errors(errors: dict | list, prefix: str = "  ") -> None:
 
 
     Examples of leaf nodes:
-      - {"0": ["Invalid module name ..."]}  -> prints "data.modules.0: Invalid module name ..."
-      - {"field": "This field is required."} -> prints "field: This field is required."
+      - {"data": {"modules": {"0": ["Invalid module name ..."]}}}
+        -> prints "data.modules.0: Invalid module name ..."
+      - {"field": "This field is required."}
+        -> prints "field: This field is required."
     """
     print("Validation errors:")
 
@@ -183,7 +212,63 @@ def _pretty_print_json(response: str, suppress_html: bool = False):
         print(json.dumps(parsed, indent=3))
     except json.JSONDecodeError:
         if suppress_html:
-            return  # do not print anything for 404 HTML errors
+            return  # Do not print non-JSON response content
         # print only the first 10 lines of non-JSON response
         lines = response.strip().splitlines()
         print("\n".join(lines[:10]) + ("\n..." if len(lines) > 10 else ""))
+
+
+def configure_terminal_backspace() -> None:
+    """
+    Normalize terminal input handling so Backspace works in interactive prompts.
+
+    Some shells, containers, IDE terminals, or exec sessions can leave the TTY
+    in a mode where Backspace is echoed as ^? instead of being handled as an
+    erase character. This restores canonical line editing, enables normal echo,
+    and sets DEL (^?) as the erase character.
+
+    This is best-effort and does nothing when terminal settings cannot be changed.
+    """
+    if termios is None:
+        return
+
+    tty_file = None
+
+    try:
+        if sys.stdin.isatty():
+            terminal = sys.stdin
+        else:
+            try:
+                tty_file = open("/dev/tty", "rb", buffering=0)
+                terminal = tty_file
+            except OSError:
+                return
+
+        attrs = termios.tcgetattr(terminal)
+        cc = attrs[6]
+        current_erase = cc[termios.VERASE]
+
+        # Use DEL (^?) as the erase character.
+        if isinstance(current_erase, int):
+            cc[termios.VERASE] = 0x7f
+        else:
+            cc[termios.VERASE] = b"\x7f"
+
+        # Restore normal cooked/canonical terminal line editing.
+        attrs[3] |= termios.ICANON
+        attrs[3] |= termios.ECHO
+        attrs[3] |= termios.ECHOE
+        attrs[3] |= termios.ECHOK
+
+        # Prevent control characters from being displayed as ^?.
+        if hasattr(termios, "ECHOCTL"):
+            attrs[3] &= ~termios.ECHOCTL
+
+        termios.tcsetattr(terminal, termios.TCSANOW, attrs)
+
+    except Exception:
+        return
+
+    finally:
+        if tty_file is not None:
+            tty_file.close()

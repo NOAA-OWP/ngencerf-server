@@ -14,8 +14,7 @@ from rest_framework.decorators import api_view
 from rest_framework.request import Request
 from rest_framework.response import Response
 
-from calibration.enums import StatusEnum, PlotDefinitionsEnum, ValidationType, ValidationMetricPeriod, GetValidationJobsScope
-from calibration.enums_vanilla import JobType
+from calibration.enums import StatusEnum, PlotDefinitionsEnum, ValidationType, ValidationMetricPeriod, GetValidationJobsScope, JobType
 from calibration.models import CalibrationRun, ValidationRun, ValidationMetrics, NWMRetrospectiveMetrics
 from calibration.util.caching import get_filtered_plot_definitions
 from calibration.util.calibration_validators import EmptySerializer, GetPlotNamesResponseSerializer, \

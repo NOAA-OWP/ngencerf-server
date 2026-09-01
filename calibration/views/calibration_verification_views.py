@@ -11,18 +11,16 @@ from rest_framework.decorators import api_view
 from rest_framework.request import Request
 from rest_framework.response import Response
 
-from calibration.enums import StatusEnum
-from calibration.enums_vanilla import JobType
-from calibration.models import ForecastRun
-from calibration.run_util.run_common import submit_job
+from calibration.enums import StatusEnum, JobType
+from calibration.run_util.job_lifecycle import launch_job
 from calibration.util.calibration_validators import ErrorResponseSerializer, \
     CreateAndRunVerificationRequestSerializer, CreateAndRunVerificationResponseSerializer, \
     GetVerificationPlotNamesResponseSerializer, GetVerificationPlotRequestSerializer, \
     GetVerificationPlotResponseSerializer, DeleteVerificationJobResponseSerializer, VerificationRunIdSerializer
-from calibration.util.ngen_locations import get_verification_run_dir
+from calibration.util.ngen_locations import get_verification_run_dir, get_observational_file_for_hindcast
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import handle_exceptions, validate_response, validate_request, \
-    get_forecast_run, get_verification_run, ResponseError, get_user_email, get_elapsed_str, \
+    get_verification_run, ResponseError, get_user_email, get_elapsed_str, \
     create_verification_run_internal, png_to_base64_url, truncate_large_fields, get_job_description, get_hindcast_run
 
 logger = logging.getLogger(__name__)
@@ -47,12 +45,12 @@ logger = logging.getLogger(__name__)
 @handle_exceptions
 def create_and_run_verification_job(request: Request) -> Response:
     """
-    Creates a new verification job for the requesting user, and submits it for processing.
+    Create a new hindcast-based verification job for the requesting user and submit it for processing.
 
     Handles the creation process by accepting verification details in the request, validating them,
     and creating a new verification job if the request is valid.
 
-    :param request: The HTTP request object, containing user and verification job details.
+    :param request: The HTTP request object containing hindcast verification job details.
     :return: A Response object with the serialized verification job data.
     """
     data = request.data
@@ -62,40 +60,38 @@ def create_and_run_verification_job(request: Request) -> Response:
     if error_return:
         return error_return
 
-    forecast_run_id = validator.get('forecast_run_id')
     hindcast_run_id = validator.get('hindcast_run_id')
     logging_config = validator.get('logging_config')
 
-    if forecast_run_id:
-        run, error_return = get_forecast_run(forecast_run_id, request.user, run_status=[StatusEnum.DONE])
-        if error_return:
-            return error_return
-    else:
-        run, error_return = get_hindcast_run(hindcast_run_id, request.user, run_status=[StatusEnum.DONE])
-        if error_return:
-            return error_return
+    assert isinstance(hindcast_run_id, int)
 
-    assert run is not None
+    hindcast_run, error_return = get_hindcast_run(hindcast_run_id, request.user, run_status=[StatusEnum.DONE])
+    if error_return:
+        return error_return
 
-    verification_run = create_verification_run_internal(run)
+    assert hindcast_run is not None
 
-    error_response = submit_job(verification_run, logging_config=logging_config)
+    # See if we have obs data, which would have been created
+    # at the end of the hindcast job
+    obs = get_observational_file_for_hindcast(hindcast_run)
+    if obs is None or not os.path.exists(obs):
+        return ResponseError("Observed streamflow is not available for the full hindcast window.")
+
+    verification_run = create_verification_run_internal(hindcast_run)
+
+    error_response = launch_job(verification_run, logging_config=logging_config)
     if error_response:
         return error_response
 
     msg = get_job_description(verification_run) + ' created and submitted'
     response = {
         'message': msg,
-        'calibration_run_id': run.calibration_run.id,
+        'calibration_run_id': hindcast_run.calibration_run.id,
+        'hindcast_run_id': hindcast_run.id,
         'verification_run_id': verification_run.id,
         'submit_date': verification_run.submit_date,
         'status': verification_run.status.name
     }
-
-    if isinstance(run, ForecastRun):
-        response['forecast_run_id'] = run.id
-    else:
-        response['hindcast_run_id'] = run.id
 
     response_validator, error_response = validate_response(
         CreateAndRunVerificationResponseSerializer,
@@ -143,6 +139,7 @@ def get_verification_plot_names(request: Request) -> Response:
         return error_return
 
     verification_run_id = validator.get('verification_run_id')
+    assert isinstance(verification_run_id, int)
 
     run, error_return = get_verification_run(
         verification_run_id,
@@ -158,7 +155,7 @@ def get_verification_plot_names(request: Request) -> Response:
 
     plot_names = []
 
-    config_name = run.parent_run.configuration.internal_name
+    config_name = run.hindcast_run.configuration.internal_name
 
     base_dir = get_verification_run_dir(run)
     verification_plot_location = os.path.join(base_dir, 'plots', config_name)
@@ -237,6 +234,7 @@ def get_verification_plot(request: Request) -> Response:
         return error_return
 
     verification_run_id = validator.get('verification_run_id')
+    assert isinstance(verification_run_id, int)
 
     plot_name = validator.get('plot_name')
 
@@ -319,6 +317,7 @@ def delete_verification_job(request: Request) -> Response:
         return error_return
 
     verification_run_id = validator.get('verification_run_id')
+    assert isinstance(verification_run_id, int)
 
     run, error_return = get_verification_run(verification_run_id, request.user, run_status=list(StatusEnum))
     if error_return:
@@ -337,8 +336,6 @@ def delete_verification_job(request: Request) -> Response:
 
         logger.info(f"Deleting directory {verification_dir}")
         shutil.rmtree(verification_dir, ignore_errors=True)
-
-        shutil.rmtree(get_verification_run_dir(run), ignore_errors=True)
 
     message = f"Verification Job {run_id} has been deleted"
 

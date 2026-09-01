@@ -29,21 +29,29 @@ services:
         - MSW_MGR_REF=${MSW_MGR_REF:-development}
         - NGEN_REF=${NGEN_REF:-development}
         - NGEN_FORCING_REF=${NGEN_FORCING_REF:-development}
-        - CACHE_BUST=${CACHE_BUST:-1}
+        # Per-dependency cache-bust. Default 1 (no busting). Override with the
+        # dependency's HEAD to force a fresh install, e.g.:
+        #   EWTS_CACHE_BUST=$(git ls-remote https://github.com/NGWPC/nwm-ewts.git development | awk '{print $1}')
+        - DATA_ASSIMILATION_CACHE_BUST=${DATA_ASSIMILATION_CACHE_BUST:-1}
+        - EWTS_CACHE_BUST=${EWTS_CACHE_BUST:-1}
+        - MSW_MGR_CACHE_BUST=${MSW_MGR_CACHE_BUST:-1}
+        - NGEN_CACHE_BUST=${NGEN_CACHE_BUST:-1}
+        - NGEN_FORCING_CACHE_BUST=${NGEN_FORCING_CACHE_BUST:-1}
     image: ghcr.io/noaa-owp/ngencerf-server:${NGENCERF_SERVER_TAG:-latest}
     pull_policy: always
     ports:
       - "8000:8000"
     volumes:
       - ../data/.ngencerf-init:/ngencerf/ngencerf-server/.init/
-      - ${NGEN_CAL_DATA_PATH}:/ngencerf/data/
+      - ${NGEN_CAL_DATA_PATH:-/ngencerf-app/data/ngen-cal-data/}:/ngencerf/data/
       - ../logs/ngencerf-server:/ngencerf/ngencerf-server/logs/
-      - ${CONTAINER_PATH}:/ngencerf/containers/
+      - ${CONTAINER_PATH:-/ngencerf-app/singularity}:/ngencerf/containers/
       - /var/run/docker.sock:/var/run/docker.sock
       - /ngencerf-app/aws:/root/.aws:ro
     environment:
-      - NGEN_CAL_DATA_PATH=${NGEN_CAL_DATA_PATH:-/ngencerf-app/data/ngen-cal-data/}
+      - HOST_DATA_ROOT=${HOST_DATA_ROOT:-/ngencerf-app/data/ngen-cal-data/}
       - NGENCERF_UI_TAG=${NGENCERF_UI_TAG:-latest}
+      - NGENCERF_BASE_URL=${HOSTNAME}
     env_file:
       - path: ./cerfServer/.env-docker-prod
         required: true

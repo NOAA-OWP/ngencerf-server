@@ -27,22 +27,45 @@ from calibration.views.calibration_gage_views import get_data_files_status, rese
 from calibration.views.calibration_optimization_views import get_user_optimization, validate_optimizations, validate_objective_function, \
     write_optimization_inputs
 from calibration.views.calibration_run_views import normalize_failure_messages
-from calibration.views.calibration_tuning_views import get_times, get_parameters_for_export, validate_and_save_times, validate_parameter_values, \
+from calibration.views.calibration_tuning_views import get_times, get_parameters_for_export, save_time_controls, validate_parameter_values, \
     save_parameters, has_user_selected_tuning_parameters, compute_time_range, persist_time_range
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import get_calibration_run, ResponseError, handle_exceptions, validate_response, create_calibration_run_internal, \
     validate_request, truncate_large_fields, get_user_email, generate_ngen_logging_config, get_elapsed_str, readonly_transaction, \
-    format_datetime, map_path_to_host
+    format_datetime
 from calibration.views.data_services import DataServicesException, get_geopackage_from_data_services, \
     get_module_metadata_from_data_services, update_parameters
 
 logger = logging.getLogger(__name__)
 
 
+def validate_parameter_module_dependencies(
+        module_names: set[str],
+        parameters: list[dict[str, Any]] | None
+) -> str | None:
+    """
+    Validate dependencies between imported calibration parameters and modules.
+
+    SFT parameters are only valid when LASAM is included in the formulation.
+    Also see comments in data_services.get_module_metadata_from_data_services.
+
+    :param module_names: Full set of modules included in the imported formulation.
+    :param parameters: Imported calibration parameter selections.
+    :return: Validation error message, or None if valid.
+    """
+    if not parameters or "LASAM" in module_names:
+        return None
+
+    if any(parameter.get("module") == "SFT" for parameter in parameters):
+        return "SFT parameters cannot be specified unless LASAM is included in the formulation"
+
+    return None
+
+
 def import_calibration_run_data(request: Request,
                                 calibration_run_data: dict,
                                 genesis: JobGenesis,
-                                run: CalibrationRun = None,
+                                run: CalibrationRun | None = None,
                                 is_cli: bool = False
                                 ) -> tuple[CalibrationRun | None, dict | None, Response | None]:
     """
@@ -86,14 +109,19 @@ def import_calibration_run_data(request: Request,
     use_sloth = calibration_run_data.get('use_sloth')
     parameters = calibration_run_data.get('parameters')
 
-    automatic_validation = calibration_run_data.get('automatic_validation')  # defaults handled later on run
-    calibration_times = calibration_run_data.get('calibration_times')
-    validation_times = calibration_run_data.get('validation_times')
+    parameter_dependency_errors = validate_parameter_module_dependencies(
+        module_names,
+        parameters
+    )
+    if parameter_dependency_errors:
+        return None, None, ResponseError(parameter_dependency_errors)
+
+    time_controls = calibration_run_data.get('time_controls')
 
     optimization_name = calibration_run_data.get('optimization')
     objective_function_name = calibration_run_data.get('objective_function')
-    streamflow_threshold = calibration_run_data.get('streamflow_threshold')
-    peak_flow_threshold = calibration_run_data.get('peak_flow_threshold')
+    threshold_categorical = calibration_run_data.get('threshold_categorical')
+    threshold_event = calibration_run_data.get('threshold_event')
     raw_optimization_inputs = calibration_run_data.get('optimization_inputs')
 
     if isinstance(raw_optimization_inputs, list):
@@ -136,12 +164,12 @@ def import_calibration_run_data(request: Request,
             return None, None, ResponseError("You cannot specify sloth_parameters or use_sloth when using LSTM")
         if have_lstm and (
                 optimization_name or objective_function_name or
-                streamflow_threshold is not None or peak_flow_threshold is not None or
+                threshold_categorical is not None or threshold_event is not None or
                 stop_criteria is not None or
                 save_plot_iteration_frequency is not None or save_output_iteration
         ):
             return None, None, ResponseError(
-                "You cannot specify optimization_name, objective_function_name, streamflow_threshold, peak_flow_threshold, "
+                "You cannot specify optimization_name, objective_function_name, threshold_categorical, threshold_event, "
                 "stop_criteria, save_plot_iteration_frequency or save_output_iteration when using LSTM"
             )
 
@@ -176,10 +204,6 @@ def import_calibration_run_data(request: Request,
         if (not use_sloth) and sloth_parameters:
             return None, None, ResponseError(f"You must indicate 'use_sloth' is True to allow {SLOTH} parameters to be specified")
 
-        # Validation times constraints (no DB writes here)
-        if not automatic_validation and validation_times:
-            return None, None, ResponseError('validation_times cannot be specified unless automatic_validation is True')
-
         # Optimization validations (assigns to `run` in memory only; no DB write)
         if optimization_name:
             assert isinstance(optimization_name, str)
@@ -191,7 +215,7 @@ def import_calibration_run_data(request: Request,
                 return None, None, ResponseError('Optimization inputs cannot be specified without an optimization name')
 
         # Objective function validation (assigns to `run` in memory only; no DB write)
-        error_message = validate_objective_function(run, objective_function_name, streamflow_threshold, peak_flow_threshold)
+        error_message = validate_objective_function(run, objective_function_name, threshold_categorical, threshold_event)
         if error_message:
             return None, None, ResponseError(error_message)
 
@@ -279,6 +303,7 @@ def import_calibration_run_data(request: Request,
         # -----------------------------
         # Geopackage
         # -----------------------------
+        assert isinstance(geopackage_source_name, str)
         run.geopackage_source = GeopackageSourceEnum.get_instance(geopackage_source_name) if geopackage_source_name else None
 
         try:
@@ -300,6 +325,7 @@ def import_calibration_run_data(request: Request,
         # -----------------------------
         # Forcing data
         # -----------------------------
+        assert isinstance(forcing_source_name, str)
         forcing_source = (
             ForcingSourceEnum.get_instance(forcing_source_name)
             if forcing_source_name
@@ -318,8 +344,6 @@ def import_calibration_run_data(request: Request,
         # -----------------------------
         # Tuning (validate & persist)
         # -----------------------------
-        run.automatic_validation = automatic_validation
-
         # Only validate parameters if we didn't hit Data Services parameter metadata errors
         if parameters and not any(error.get('name') == 'parameters' for error in eds_errors):
             # These validations read from DB; saving persists selections
@@ -334,8 +358,8 @@ def import_calibration_run_data(request: Request,
         if time_range and (not run.time_range_start or not run.time_range_end):
             persist_time_range(run, time_range)
 
-        # Times (persist)
-        error_message = validate_and_save_times(run, calibration_times, validation_times)
+        # Time controls (persist)
+        error_message = save_time_controls(run, time_controls)
         if error_message:
             return None, None, ResponseError(error_message)
 
@@ -349,8 +373,8 @@ def import_calibration_run_data(request: Request,
         # Thresholds & iteration save flags
         run.save_plot_iteration_frequency = save_plot_iteration_frequency
         run.save_output_iteration = bool(save_output_iteration) if save_output_iteration is not None else False
-        run.streamflow_threshold = streamflow_threshold
-        run.peak_flow_threshold = peak_flow_threshold
+        run.threshold_categorical = threshold_categorical
+        run.threshold_event = threshold_event
 
         if stop_criteria is not None:
             # assuming single CalibrationStopCriteria
@@ -456,7 +480,11 @@ def export_job(request: Request) -> Response:
     return Response(response_validator.data)
 
 
-def load_calibration_run_data(run: CalibrationRun, export: bool = False, include_gpkg_map: bool = False) -> tuple[dict, dict[str, datetime | None]]:
+def load_calibration_run_data(
+        run: CalibrationRun,
+        export: bool = False,
+        include_gpkg_map: bool = False
+) -> tuple[dict, dict[str, datetime]]:
     """
     Load calibration run data for export, cloning, or UI display.
 
@@ -497,19 +525,39 @@ def load_calibration_run_data(run: CalibrationRun, export: bool = False, include
     # Always load formulations once, for both export and UI modes
     formulations = CalibrationFormulation.objects.filter(calibration_run=run)
 
+    # Get times for both modes (export will only include the time controls)
+    calibration_times, validation_times, time_controls = get_times(
+        run,
+        default_time_controls=False
+    )
+
     #############################
     # Export or Clone Mode
     #############################
     if export:
         export_start = time.perf_counter()
+
+        serialized_calibration_times = {
+            key: value.isoformat() if value is not None else None
+            for key, value in calibration_times.items()
+        }
+
+        serialized_validation_times = {
+            key: value.isoformat() if value is not None else None
+            for key, value in validation_times.items()
+        }
+
         metadata = {
             'source_calibration_run_id': run.id,
             'last_updated_on': format_datetime(run.updated_at),
             'source_status': run.status.name,
             'time_range': serialized_time_range,
-            'job_data_dir': map_path_to_host(run.job_data_dir),
+            'job_data_dir': run.job_data_dir,
             'num_catchments': run.num_catchments,
+            'calibration_times': serialized_calibration_times,
+            'validation_times': serialized_validation_times,
         }
+
         fm = normalize_failure_messages(run.failure_messages)
         if fm is not None:
             metadata['failure_messages'] = fm
@@ -528,7 +576,7 @@ def load_calibration_run_data(run: CalibrationRun, export: bool = False, include
     # UI Display Mode (Non-Export)
     #############################
     else:
-        calibration_run_data['job_data_dir'] = map_path_to_host(run.job_data_dir)
+        calibration_run_data['job_data_dir'] = run.job_data_dir
 
         calibration_run_data['last_updated_on'] = run.updated_at
 
@@ -563,6 +611,9 @@ def load_calibration_run_data(run: CalibrationRun, export: bool = False, include
                 base64_str = base64.b64encode(geopackage_png.getvalue()).decode('utf-8')
                 calibration_run_data['geopackage_image_url'] = f'data:image/png;base64,{base64_str}'
             logger.info(f"Geopackage map generation completed in {time.perf_counter() - gpkg_map_start:.2f}s")
+
+        calibration_run_data['calibration_times'] = {} if any(value is None for value in calibration_times.values()) else calibration_times
+        calibration_run_data['validation_times'] = {} if any(value is None for value in validation_times.values()) else validation_times
 
         # Determine external data status (whether required files are available)
         data_files_status_start = time.perf_counter()
@@ -683,11 +734,7 @@ def load_calibration_run_data(run: CalibrationRun, export: bool = False, include
     logger.info("Processing tuning data")
     tuning_start = time.perf_counter()
 
-    calibration_run_data['automatic_validation'] = run.automatic_validation
-
-    calibration_times, validation_times = get_times(run)
-    calibration_run_data['calibration_times'] = calibration_times
-    calibration_run_data['validation_times'] = validation_times
+    calibration_run_data['time_controls'] = time_controls
 
     logger.info(f"Tuning data processed in {time.perf_counter() - tuning_start:.2f}s")
 
@@ -698,8 +745,8 @@ def load_calibration_run_data(run: CalibrationRun, export: bool = False, include
     optimization_start = time.perf_counter()
 
     calibration_run_data['objective_function'] = run.objective_function.name if run.objective_function else None
-    calibration_run_data['streamflow_threshold'] = run.streamflow_threshold
-    calibration_run_data['peak_flow_threshold'] = run.peak_flow_threshold
+    calibration_run_data['threshold_categorical'] = run.threshold_categorical
+    calibration_run_data['threshold_event'] = run.threshold_event
 
     # Fetch optimization details
     optimization, optimization_inputs = get_user_optimization(run)
@@ -780,7 +827,10 @@ def load_calibration_run(request: Request) -> Response:
     # Short write block: persist computed time range if needed
     # -------------------------------------------------------------
     # Persist only if we computed a valid time range
-    if time_range and (not run.time_range_start or not run.time_range_end):
+    if time_range and (
+            run.time_range_start is None
+            or run.time_range_end is None
+    ):
         with transaction.atomic():
             persist_time_range(run, time_range)
 

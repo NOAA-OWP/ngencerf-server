@@ -2,12 +2,15 @@ import errno
 import json
 import logging
 import os
+import re
 import shutil
 import time
+from collections import defaultdict
 from datetime import datetime, timezone
 from functools import lru_cache
 
 from django.conf import settings
+from django.http import HttpResponse, HttpRequest
 from drf_spectacular.utils import extend_schema, OpenApiResponse
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
@@ -16,7 +19,7 @@ from rest_framework.response import Response
 
 from calibration.enums import StatusEnum, JobGenesis
 from calibration.models import CalibrationRun, ValidationRun, ForecastRun
-from calibration.run_util.run_common import submit_job
+from calibration.run_util.job_lifecycle import launch_job
 from calibration.util.calibration_validators import FooterResponseSerializer, \
     ErrorResponseSerializer, ImportResponseSerializer, \
     EmptySerializer, ArchiveJobRequestSerializer, GetGitInfoResponseSerializer, CalibrationRunIdList, CalibrationRunListResponse, ImportSerializer, \
@@ -125,10 +128,24 @@ def get_footer(request: Request) -> Response:
     response_validator, error_response = validate_response(FooterResponseSerializer, response)
     if error_response:
         return error_response
+    assert response_validator is not None
 
     logger.debug(
-        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
+        f'Returning to {get_user_email(request)} from {get_caller_name()}()'
+        f'{get_elapsed_str(request)} - '
+        f'{json.dumps(response_validator.data)}')
     return Response(response_validator.data)
+
+
+def health_check(_request: HttpRequest) -> HttpResponse:
+    """
+    Liveness endpoint used by AWS load balancer health checks.
+
+    Returns HTTP 200 if the Django application is running and able to
+    accept HTTP requests. No authentication or dependency checks are
+    performed.
+    """
+    return HttpResponse("ok", content_type="text/plain")
 
 
 @extend_schema(
@@ -170,9 +187,12 @@ def get_git_info(request: Request) -> Response:
     response_validator, error_response = validate_response(GetGitInfoResponseSerializer, response)
     if error_response:
         return error_response
+    assert response_validator is not None
 
     logger.debug(
-        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data, default=str)}')
+        f'Returning to {get_user_email(request)} from {get_caller_name()}()'
+        f'{get_elapsed_str(request)} - '
+        f'{json.dumps(response_validator.data, default=str)}')
     return Response(response_validator.data)
 
 
@@ -247,6 +267,7 @@ def delete_jobs(request: Request) -> Response:
         return error_return
 
     calibration_run_ids = validator.get('calibration_run_ids')
+    assert isinstance(calibration_run_ids, list)
 
     job_results = []
 
@@ -268,6 +289,7 @@ def delete_jobs(request: Request) -> Response:
                 "message": error.data.get('message'),
                 "calibration_run_id": calibration_run_id,
                 "success": False,
+                "message_type": "error"
             })
             continue
 
@@ -278,7 +300,8 @@ def delete_jobs(request: Request) -> Response:
             job_results.append({
                 "message": f'Calibration Job {calibration_run_id} is locked for archiving/deleting',
                 "calibration_run_id": calibration_run_id,
-                "success": False
+                "success": False,
+                "message_type": "error"
             })
             continue
 
@@ -288,7 +311,8 @@ def delete_jobs(request: Request) -> Response:
             job_results.append({
                 "message": running_jobs_error,
                 "calibration_run_id": calibration_run_id,
-                "success": False
+                "success": False,
+                "message_type": "error"
             })
             continue
 
@@ -298,17 +322,23 @@ def delete_jobs(request: Request) -> Response:
         job_results.append({
             "message": f"Calibration Job {calibration_run_id} and associated records have been deleted",
             "calibration_run_id": calibration_run_id,
-            "success": True
+            "success": True,
+            "message_type": "success"
         })
 
-    response = {"jobs": job_results}
+    job_summaries = create_job_summaries(job_results)
+
+    response = {"jobs": job_results, "summaries": job_summaries}
 
     response_validator, error_response = validate_response(CalibrationRunListResponse, response)
     if error_response:
         return error_response
+    assert response_validator is not None
+
     logger.debug(
         f'Returning to {get_user_email(request)} from {get_caller_name()}()'
-        f'{get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
+        f'{get_elapsed_str(request)} - '
+        f'{json.dumps(response_validator.data)}')
 
     return Response(response_validator.data)
 
@@ -365,6 +395,8 @@ def archive_jobs(request: Request) -> Response:
     calibration_run_ids = validator.get('calibration_run_ids')
     archive = validator.get('archive')
 
+    assert isinstance(calibration_run_ids, list)
+
     if not settings.NGENCERF_ARCHIVE_S3_PATH:
         return ResponseError("NGENCERF_ARCHIVE_S3_PATH is undefined")
 
@@ -410,7 +442,8 @@ def archive_jobs(request: Request) -> Response:
             job_results.append({
                 "message": error.data.get('message'),
                 "calibration_run_id": calibration_run_id,
-                "success": False
+                "success": False,
+                "message_type": "error"
             })
             continue
 
@@ -421,7 +454,8 @@ def archive_jobs(request: Request) -> Response:
             job_results.append({
                 "message": f'Calibration Job {calibration_run_id} is locked for archiving/deleting',
                 "calibration_run_id": calibration_run_id,
-                "success": False
+                "success": False,
+                "message_type": "error"
             })
             continue
 
@@ -430,7 +464,8 @@ def archive_jobs(request: Request) -> Response:
             job_results.append({
                 "message": f'Calibration Job {calibration_run_id} is {"already" if archive else "not"} archived',
                 "calibration_run_id": calibration_run_id,
-                "success": False
+                "success": False,
+                "message_type": "warn"
             })
             continue
 
@@ -445,7 +480,8 @@ def archive_jobs(request: Request) -> Response:
                     job_results.append({
                         "message": running_jobs_error,
                         "calibration_run_id": calibration_run_id,
-                        "success": False
+                        "success": False,
+                        "message_type": "error"
                     })
                     continue
 
@@ -566,7 +602,8 @@ def archive_jobs(request: Request) -> Response:
                 'message': f'Calibration Job {calibration_run_id} has been '
                            f'{"archived" if archive else "unarchived"}',
                 "calibration_run_id": calibration_run_id,
-                "success": True
+                "success": True,
+                "message_type": "success"
             })
 
         except Exception as e:
@@ -574,18 +611,23 @@ def archive_jobs(request: Request) -> Response:
             job_results.append({
                 "message": f"Failed to {'archive' if archive else 'unarchive'} Calibration Job {calibration_run_id}: {e}",
                 "calibration_run_id": calibration_run_id,
-                "success": False
+                "success": False,
+                "message_type": "error"
             })
             continue
 
-    response = {"jobs": job_results}
+    job_summaries = create_job_summaries(job_results)
+
+    response = {"jobs": job_results, "summaries": job_summaries}
 
     response_validator, error_response = validate_response(CalibrationRunListResponse, response)
     if error_response:
         return error_response
+    assert response_validator is not None
 
     logger.debug(
-        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - '
+        f'Returning to {get_user_email(request)} from {get_caller_name()}()'
+        f'{get_elapsed_str(request)} - '
         f'{json.dumps(response_validator.data)}'
     )
 
@@ -626,6 +668,8 @@ def lock_jobs(request: Request) -> Response:
     calibration_run_ids = validator.get('calibration_run_ids')
     lock = validator.get('lock')
 
+    assert isinstance(calibration_run_ids, list)
+
     job_results = []
 
     # Bulk fetch all the calibration jobs
@@ -644,7 +688,8 @@ def lock_jobs(request: Request) -> Response:
             job_results.append({
                 "message": error.data.get('message'),
                 "calibration_run_id": calibration_run_id,
-                "success": False
+                "success": False,
+                "message_type": "error"
             })
             continue
 
@@ -655,7 +700,8 @@ def lock_jobs(request: Request) -> Response:
             job_results.append({
                 "message": f'Calibration Job {calibration_run_id} is {"already" if lock else "not"} locked',
                 "calibration_run_id": calibration_run_id,
-                "success": False
+                "success": False,
+                "message_type": "warn"
             })
             continue
 
@@ -665,17 +711,23 @@ def lock_jobs(request: Request) -> Response:
         job_results.append({
             'message': f'Calibration Job {calibration_run_id} has been {"locked" if lock else "unlocked"}',
             "calibration_run_id": calibration_run_id,
-            "success": True
+            "success": True,
+            "message_type": "success"
         })
 
-    response = {"jobs": job_results}
+    job_summaries = create_job_summaries(job_results)
+
+    response = {"jobs": job_results, "summaries": job_summaries}
 
     response_validator, error_response = validate_response(CalibrationRunListResponse, response)
     if error_response:
         return error_response
+    assert response_validator is not None
+
     logger.debug(
         f'Returning to {get_user_email(request)} from {get_caller_name()}()'
-        f'{get_elapsed_str(request)} - {json.dumps(response_validator.data)}')
+        f'{get_elapsed_str(request)} - '
+        f'{json.dumps(response_validator.data)}')
 
     return Response(response_validator.data)
 
@@ -743,6 +795,7 @@ def import_job(request: Request) -> Response:
     run_after_import = data.get('run_after_import', False)
 
     if calibration_run_id:
+        assert isinstance(calibration_run_id, int)
         calibration_run, error_return = get_calibration_run(calibration_run_id, request.user)
         if error_return:
             return error_return
@@ -763,7 +816,7 @@ def import_job(request: Request) -> Response:
             not error_object.warnings and
             not error_object.errors
     ):
-        error_response = submit_job(run)
+        error_response = launch_job(run)
         if error_response:
             return error_response
         imported_and_submitted = f"{imported_and_submitted} and submitted"
@@ -786,9 +839,12 @@ def import_job(request: Request) -> Response:
     response_validator, error_response = validate_response(ImportResponseSerializer, response)
     if error_response:
         return error_response
+    assert response_validator is not None
 
     logger.debug(
-        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - {json.dumps(response_validator.data)}'
+        f'Returning to {get_user_email(request)} from {get_caller_name()}()'
+        f'{get_elapsed_str(request)} - '
+        f'{json.dumps(response_validator.data)}'
     )
     return Response(response_validator.data)
 
@@ -839,12 +895,19 @@ def delete_tree_with_retries(path: str, attempts: int = 3, delay_seconds: float 
                 errno.EBUSY,
             }
 
-            failed_path = getattr(exc, 'filename', None)
-            full_failed_path = (
-                os.path.join(path, failed_path)
-                if failed_path and not os.path.isabs(failed_path)
-                else failed_path or path
-            )
+            failed_filename = exc.filename
+
+            if failed_filename is None:
+                full_failed_path = path
+            else:
+                # OSError.filename may be either str or bytes.
+                failed_path = os.fsdecode(failed_filename)
+
+                full_failed_path = (
+                    failed_path
+                    if os.path.isabs(failed_path)
+                    else os.path.join(path, failed_path)
+                )
 
             is_nfs_placeholder = os.path.basename(full_failed_path).startswith('.nfs')
 
@@ -905,3 +968,80 @@ def move_tree_out_of_active_path(path: str) -> str:
     os.replace(path, quarantine_path)
 
     return quarantine_path
+
+
+def create_job_summaries(job_results: list) -> list:
+    """
+    Generates summaries combining the individual status messages generated by a multiple job operation.
+
+    This is used after deleting, arhchiving/unarchiving, or locking/unlocking one or more jobs, for the
+    sake of giving the UI concise messages to show when dealing with larger job lists.
+
+    :param job_results: The individual job results from a multiple job operation.
+    :return: A list of summary messages, each with message_type "success", "warning", or "error".
+    """
+    jobs_grouped = defaultdict(list)
+
+    for job in job_results:
+        message = job["message"]
+
+        match = re.match(
+            r"Calibration Job \S+\s+(.*)",
+            message
+        )
+
+        if not match:
+            # Fallback: don't group messages that don't match the pattern
+            key = (job["message_type"], message)
+        else:
+            remainder = match.group(1)
+            key = (job["message_type"], remainder)
+
+        jobs_grouped[key].append(job["calibration_run_id"])
+
+    job_summaries = [
+        {
+            "message_type": message_type,
+            "message": remainder,
+            "calibration_run_ids": ids,
+        }
+        for (message_type, remainder), ids in jobs_grouped.items()
+    ]
+
+    for summary in job_summaries:
+        ids = [str(i) for i in summary["calibration_run_ids"]]
+
+        if len(ids) == 1:
+            ids_text = ids[0]
+        elif len(ids) == 2:
+            ids_text = " and ".join(ids)
+        else:
+            ids_text = f"{', '.join(ids[:-1])} and {ids[-1]}"
+
+        remainder_message = summary["message"]
+        assert isinstance(remainder_message, str)
+
+        if len(ids) > 1:
+            replacements = {
+                "has": "have",
+                "is": "are",
+                "does": "do",
+            }
+
+            for singular, plural in replacements.items():
+                remainder_message = re.sub(
+                    rf"\b{singular}\b",
+                    plural,
+                    remainder_message,
+                    flags=re.IGNORECASE,
+                )
+
+        summary["message"] = (
+            f"Calibration Job{'s' if len(ids) > 1 else ''} "
+            f"{ids_text} {remainder_message}"
+        )
+
+        # Remove calibration_run_ids from the final response
+        del summary["calibration_run_ids"]
+
+    return job_summaries

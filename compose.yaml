@@ -1,3 +1,6 @@
+#This file is used for development testing only
+#compose files are not used for production
+
 name: ngencerf-server
 
 services:
@@ -22,11 +25,11 @@ services:
       - "5432:5432"
     volumes:
       - ../data/db:/var/lib/postgresql/data
-    env_file:
-      - path: ./postgres_db.env
-        required: true
-      - path: ./postgres_db.override.env
-        required: false
+    # Throwaway dev creds; overridable via shell env if ever needed.
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-postgres}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
       interval: 10s
@@ -46,17 +49,28 @@ services:
         - EWTS_REF=${EWTS_REF:-development}
         - MSW_MGR_REF=${MSW_MGR_REF:-development}
         - NGEN_FORCING_REF=${NGEN_FORCING_REF:-development}
-        - CACHE_BUST=${CACHE_BUST:-1}
+        # Per-dependency cache-bust. Default 1 (no busting). Override with the
+        # dependency's HEAD to force a fresh install, e.g.:
+        #   EWTS_CACHE_BUST=$(git ls-remote https://github.com/NGWPC/nwm-ewts.git development | awk '{print $1}')
+        - DATA_ASSIMILATION_CACHE_BUST=${DATA_ASSIMILATION_CACHE_BUST:-1}
+        - EWTS_CACHE_BUST=${EWTS_CACHE_BUST:-1}
+        - MSW_MGR_CACHE_BUST=${MSW_MGR_CACHE_BUST:-1}
+        - NGEN_FORCING_CACHE_BUST=${NGEN_FORCING_CACHE_BUST:-1}
     image: ghcr.io/NOAA-OWP/ngencerf-server:${NGENCERF_SERVER_TAG:-latest}
     pull_policy: build
     ports:
       - "8000:8000"
     volumes:
       - ../data/.ngencerf-init:/ngencerf/ngencerf-server/.init/
-      - ${NGEN_CAL_DATA_PATH}:/ngencerf/data/
+      - ${NGEN_CAL_DATA_PATH:-/ngencerf/data/}:/ngencerf/data/
       - ../logs/ngencerf-server:/ngencerf/ngencerf-server/logs/
+    # NGEN_CAL_DATA_PATH defaults to the README's /ngencerf/data symlink;
+    # DB creds default to the throwaway dev postgres/postgres.
     environment:
-      - NGEN_CAL_DATA_PATH=${NGEN_CAL_DATA_PATH}
+      - NGEN_CAL_DATA_PATH=${NGEN_CAL_DATA_PATH:-/ngencerf/data/}
+      - CERF_SERVER_DATABASE_NAME=${POSTGRES_DB:-postgres}
+      - CERF_SERVER_DATABASE_USER=${POSTGRES_USER:-postgres}
+      - CERF_SERVER_DATABASE_PASSWORD=${POSTGRES_PASSWORD:-postgres}
     env_file:
       - path: cerfServer/.env-docker-dev
         required: true

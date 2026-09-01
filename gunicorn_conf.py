@@ -1,9 +1,5 @@
 import logging
 import os
-import platform
-import signal
-import threading
-import time
 
 """
 Gunicorn configuration for ngenCERF.
@@ -22,23 +18,6 @@ Why --preload matters:
 runCerf.sh already uses --preload.
 """
 
-
-# ---------------------------------------------------------------------
-# Environment / flags
-# ---------------------------------------------------------------------
-
-def _env_bool(name: str, default: bool = False) -> bool:
-    """
-    Read a boolean value from the environment.
-
-    Accepts: 1, true, yes, on (case-insensitive).
-    """
-    val = os.getenv(name)
-    if val is None:
-        return default
-    return val.strip().lower() in {"1", "true", "yes", "on"}
-
-
 # ---------------------------------------------------------------------
 # Gunicorn native logging settings
 # ---------------------------------------------------------------------
@@ -56,7 +35,7 @@ attaches Django's handlers to gunicorn.* and uvicorn.* loggers instead.
 accesslog = None
 
 # Do not write Gunicorn error logs to a separate destination/file.
-# Gunicorn may still emit certain lifecycle lines to stderr/stdout.
+# Gunicorn lifecycle logs are routed through configured logging handlers.
 errorlog = None
 
 # Threshold for Gunicorn's own loggers and for gunicorn/uvicorn loggers
@@ -70,10 +49,6 @@ capture_output = False
 # Django's LOGGING controls logger behavior and propagation.
 disable_existing_loggers = False
 
-# Enable extra diagnostics only when explicitly requested
-_DIAG = _env_bool("GUNICORN_DIAGNOSTICS", False)
-_DIAG_POLL_SECONDS = int(os.getenv("GUNICORN_DIAGNOSTICS_POLL_SECONDS", "10"))
-
 
 # ---------------------------------------------------------------------
 # Logging helpers
@@ -84,14 +59,16 @@ def _configure_logging(worker=None):
     Route Gunicorn and Uvicorn logs through Django's logging system.
 
     Behavior:
-    - Reads handlers from Django's root logger (already installed due to --preload)
-    - Attaches those handlers to gunicorn.* and uvicorn.* loggers
-    - Sets propagate=False to prevent duplicate handling
-    - De-duplicates handlers on repeated calls by object identity
+    - Reads handlers from Django's root logger (already installed due to --preload).
+    - Attaches those handlers to gunicorn.* and uvicorn.* loggers.
+    - Sets propagate=False to prevent duplicate handling.
+    - De-duplicates handlers on repeated calls by object identity.
 
+    With --preload, Django logging should already be installed in the master
+    before when_ready(), and workers inherit that state at fork.
 
-    This allows all Gunicorn/Uvicorn output to land in ngencerf.log using
-    Django's formatting and file/console configuration.
+    This keeps Gunicorn/Uvicorn log output aligned with Django's configured
+    console/file handlers.
     """
     try:
         # Django logging handlers should already be installed because --preload loads
@@ -124,66 +101,6 @@ def _configure_logging(worker=None):
         print(f"[gunicorn_conf] Logging hook failed (safe to ignore early): {e}")
 
 
-def _log_signal_handlers(logger: logging.Logger, where: str) -> None:
-    """
-    Log the current signal handlers in the master process.
-
-    Used to confirm that Gunicorn's arbiter owns SIGCHLD, SIGTERM,
-    and other lifecycle signals, and to detect unexpected overrides.
-    """
-
-    def _h(sig_name: str) -> str:
-        sig = getattr(signal, sig_name, None)
-        if sig is None:
-            return "<missing>"
-        try:
-            return repr(signal.getsignal(sig))
-        except Exception as e:
-            return f"<error: {e}>"
-
-    logger.info(
-        "[gunicorn_conf] %s signal handlers: SIGCHLD=%s SIGTERM=%s SIGINT=%s SIGHUP=%s SIGQUIT=%s SIGUSR1=%s SIGUSR2=%s",
-        where,
-        _h("SIGCHLD"),
-        _h("SIGTERM"),
-        _h("SIGINT"),
-        _h("SIGHUP"),
-        _h("SIGQUIT"),
-        _h("SIGUSR1"),
-        _h("SIGUSR2"),
-    )
-
-
-def _start_sigchld_monitor(logger: logging.Logger) -> None:
-    """
-    Start a background thread in the master process that periodically checks
-    whether the SIGCHLD handler has changed.
-
-    This is a diagnostic tool to detect external code or libraries that override
-    Gunicorn's child-process signal handling, which can prevent worker respawning.
-    """
-    try:
-        last = signal.getsignal(signal.SIGCHLD)
-    except Exception as e:
-        logger.warning("[gunicorn_conf] SIGCHLD monitor could not read handler: %s", e)
-        return
-
-    def _run():
-        nonlocal last
-        while True:
-            time.sleep(_DIAG_POLL_SECONDS)
-            try:
-                cur = signal.getsignal(signal.SIGCHLD)
-            except Exception:
-                continue
-            if cur != last:
-                logger.warning("[gunicorn_conf] SIGCHLD handler changed: %r -> %r", last, cur)
-                last = cur
-
-    t = threading.Thread(target=_run, name="sigchld-monitor", daemon=True)
-    t.start()
-
-
 # ---------------------------------------------------------------------
 # Gunicorn lifecycle hooks
 # ---------------------------------------------------------------------
@@ -202,16 +119,8 @@ def when_ready(_server):
     """
     Runs once in the master process after Gunicorn has finished --preload.
 
-    At this point:
-    - Django is loaded in the master process
-    - Django logging handlers are installed and can be attached to gunicorn/uvicorn
-    - Signal handlers reflect Gunicorn's arbiter state
-
-    This hook:
-    - Configures logging for gunicorn/uvicorn loggers
-    - Emits version and platform diagnostics
-    - Snapshots SIGCHLD and other signal handlers
-    - Optionally starts a background monitor to detect SIGCHLD handler changes
+    This hook configures logging for gunicorn/uvicorn loggers and emits
+    basic startup diagnostics.
     """
     _configure_logging()
 
@@ -230,32 +139,15 @@ def when_ready(_server):
     except Exception:
         pass
 
-    _log_signal_handlers(logger, "when_ready(master)")
 
-    # Background diagnostic thread: periodically checks the master's SIGCHLD handler
-    # and logs only if it changes, to detect external code or libraries interfering
-    # with Gunicorn's child-process signal handling.
-    if _DIAG:
-        logger.info(
-            "[gunicorn_conf] DIAGNOSTICS enabled. python=%s platform=%s",
-            platform.python_version(),
-            platform.platform(),
-        )
-        _start_sigchld_monitor(logger)
-
-
-def pre_fork(_server, worker):
+def pre_fork(_server, _worker):
     """
     Runs in the master process immediately before forking a worker.
 
-    Used for diagnostics to confirm the master is attempting to respawn
-    workers when they exit or exceed max_requests.
+    Currently a no-op. Kept as an explicit hook so future pre-fork setup can be
+    added here without changing the Gunicorn hook structure.
     """
-    if _DIAG:
-        logging.getLogger("gunicorn.error").info(
-            "[gunicorn_conf] pre_fork: about to fork worker (worker_tmp=%s)",
-            getattr(worker, "tmp", None)
-        )
+    pass
 
 
 def post_fork(_server, worker):
@@ -288,7 +180,10 @@ def worker_exit(_server, worker):
 
     Useful for correlating exits with SIGCHLD handling and respawn behavior.
     """
-    logging.getLogger("gunicorn.error").warning("[gunicorn_conf] worker_exit: Worker PID=%s exiting", worker.pid)
+    logging.getLogger("gunicorn.error").info(
+        "[gunicorn_conf] worker_exit: Worker PID=%s exiting",
+        worker.pid
+    )
 
 
 def worker_int(worker):

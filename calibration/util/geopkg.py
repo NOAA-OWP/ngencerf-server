@@ -5,7 +5,7 @@ from functools import lru_cache
 from io import BytesIO, StringIO
 from itertools import cycle
 
-import fiona
+import pyogrio
 import geopandas as gpd
 import matplotlib
 import matplotlib.pyplot as plt
@@ -86,31 +86,31 @@ def check_file_accessible(file_path: str) -> None:
 
 def safe_read_gpkg(gpkg_path: str, layer: str | None = None) -> gpd.GeoDataFrame:
     """
-    Read a specific layer from a GeoPackage file with detailed error handling.
+    Read a specific layer from an NHF GeoPackage file using GeoPandas with the Pyogrio engine.
 
-    This function wraps GeoPandas' `read_file()` to provide informative diagnostics
+    This function wraps GeoPandas' `read_file()` to provide more informative diagnostics
     when file reading fails due to reasons such as:
       - Missing file or layer
       - Corrupted or invalid GeoPackage
-      - Missing required drivers
+      - Missing or incompatible GDAL/OGR support
       - Invalid geometry or projection data
 
-    :param gpkg_path: Path to the GeoPackage (.gpkg) file.
+    :param gpkg_path: Path to the NHF GeoPackage (.gpkg) file.
     :param layer: Optional name of the layer to read. If None, the default layer is loaded.
     :return: A GeoDataFrame containing the requested layer's features and attributes.
-    :raises RuntimeError: If the file cannot be opened or parsed, with context such as:
+    :raises RuntimeError: If the file or layer cannot be opened or parsed, with context such as:
                           - Whether the file exists
-                          - File size (if available)
-                          - List of available layers (if accessible)
-                          - Underlying exception details
+                          - File size, if available
+                          - List of available layers, if accessible
+                          - Underlying Pyogrio/GDAL exception details
+
     """
     try:
-        return gpd.read_file(gpkg_path, layer=layer)
-    except fiona.errors.DriverError as e:
-        raise RuntimeError(f"Could not open {gpkg_path}. Ensure it is a valid GeoPackage. Error: {e}")
+        return gpd.read_file(gpkg_path, layer=layer, engine="pyogrio")
     except Exception as e:
         raise RuntimeError(
-            f"Failed to read '{layer}' layer from {gpkg_path}. Possible issues:\n"
+            f"Could not read layer '{layer}' from NHF GeoPackage '{gpkg_path}'. "
+            f"Ensure it is a valid GeoPackage and that the requested layer exists.\n"
             f"  - File exists: {os.path.exists(gpkg_path)}\n"
             f"  - File size: {os.path.getsize(gpkg_path) if os.path.exists(gpkg_path) else 'N/A'} bytes\n"
             f"  - Available layers: {list_layers(gpkg_path) if os.path.exists(gpkg_path) else 'N/A'}\n"
@@ -372,11 +372,12 @@ def list_layers(gpkg_path: str) -> list[str]:
     :raises RuntimeError: If the file cannot be opened or read as a GeoPackage.
     """
     try:
-        return fiona.listlayers(gpkg_path)
-    except fiona.errors.DriverError as e:
-        raise RuntimeError(f"Could not open GeoPackage '{gpkg_path}'. It may be corrupted or not a valid file. Error: {e}")
+        return pyogrio.list_layers(gpkg_path)[:, 0].tolist()
     except Exception as e:
-        raise RuntimeError(f"Unexpected error listing layers in '{gpkg_path}': {e}")
+        raise RuntimeError(
+            f"Could not open GeoPackage '{gpkg_path}'. "
+            f"It may be corrupted or not a valid file. Error: {e}"
+        )
 
 
 def find_gage_id(gpkg_path: str) -> list[str]:

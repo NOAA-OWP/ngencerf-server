@@ -1,9 +1,7 @@
 import json
 import logging
-from datetime import datetime, timezone
+from typing import Any
 
-import requests
-from django.conf import settings
 from django.db import transaction
 from django.forms import model_to_dict
 from drf_spectacular.types import OpenApiTypes
@@ -13,37 +11,37 @@ from rest_framework.decorators import api_view
 from rest_framework.request import Request
 from rest_framework.response import Response
 
-from calibration.enums import StatusEnum, ValidationType
-from calibration.enums_vanilla import JobType, SecondaryDataEnum
-from calibration.models import Iteration, ValidationRun, ForecastRun, CalibrationRun, Status, ColdStartRun, VerificationRun
+from calibration.enums import StatusEnum, ValidationType, JobType, SlurmCallbackStatusEnum
+from calibration.enums_vanilla import SecondaryDataEnum
+from calibration.models import Iteration, ValidationRun, ForecastRun, CalibrationRun, Status, ColdStartRun, VerificationRun, PerformanceMetrics
 from calibration.models.base_run import BaseRun
 from calibration.models.hindcast_run import HindcastRun
-from calibration.run_util.run_common import cancel_job_common, submit_job
-from calibration.run_util.run_ngen_cal_pw import SlurmCallbackStatusEnum, run_calibration_job_callback_pw, run_validation_job_callback_pw, \
-    run_forecast_job_callback_pw, run_cold_start_job_callback_pw, run_verification_job_callback_pw, run_hindcast_job_callback_pw
-from calibration.util.calibration_validators import CalibrationRunIdSerializer, GenericResponseSerializer, \
-    ErrorResponseSerializer, ReportIterationSerializer, SubmitCalibrationJobResponseSerializer, GetIterationsResponseSerializer, \
-    CalibrationJobSlurmCallbackRequestSerializer, ValidationJobSlurmCallbackRequestSerializer, EmptySerializer, \
+from calibration.run_util.job_executor_slurm import get_slurm_status
+from calibration.run_util.job_lifecycle import launch_job, cancel_job_common, handle_job_event
+from calibration.util.calibration_validators import GenericResponseSerializer, \
+    ErrorResponseSerializer, SubmitCalibrationJobResponseSerializer, GetIterationsResponseSerializer, \
     GetStatusForCalibrationResponseSerializer, GetStatusForComparisonRequestSerializer, GetStatusForComparisonResponseSerializer, \
-    CalibrationOrValidationOrColdStartOrForecastOrHindcastOrVerificationRunIdSerializer, ForecastJobSlurmCallbackRequestSerializer, \
     CancelJobResponseSerializer, \
-    ValidationRunIdSerializer, GenericResponseSerializerWithValidator, RunCalibrationJob, ColdStartJobSlurmCallbackRequestSerializer, \
-    VerificationJobSlurmCallbackRequestSerializer, GetStatusForValidationResponseSerializer, \
-    GetStatusForForecastResponseSerializer, GetStatusForVerificationResponseSerializer, GetStatusRequestSerializer, \
-    HindcastJobSlurmCallbackRequestSerializer, GetStatusForHindcastResponseSerializer
+    GenericResponseSerializerWithValidator, RunCalibrationJob, \
+    GetStatusForValidationResponseSerializer, GetStatusForForecastResponseSerializer, GetStatusForVerificationResponseSerializer, \
+    GetStatusRequestSerializer, GetStatusForHindcastResponseSerializer, CalibrationRunIdSerializer, \
+    CalibrationOrValidationOrColdStartOrForecastOrHindcastOrVerificationRunIdSerializer, ValidationRunIdSerializer, \
+    CalibrationJobSlurmCallbackRequestSerializer, ValidationJobSlurmCallbackRequestSerializer, ColdStartJobSlurmCallbackRequestSerializer, \
+    ForecastJobSlurmCallbackRequestSerializer, HindcastJobSlurmCallbackRequestSerializer, VerificationJobSlurmCallbackRequestSerializer, \
+    ReportIterationSerializer, EmptySerializer, BaseSerializer
 from calibration.views import ngen_cal_input
 from calibration.views.calibration_secondary_data_views import generate_secondary_ts_data
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import ResponseError, get_calibration_run, handle_exceptions, validate_response, validate_request, \
-    generate_custom_token, TOKEN_SLURM_SCOPE, get_validation_run, get_forecast_run, get_user_email, \
-    get_job_description, get_elapsed_str, readonly_transaction, auth_scope_required, get_cold_start_run, get_verification_run, \
-    join_with_or, get_calibration_runs_bulk, get_hindcast_run
+    get_validation_run, get_forecast_run, get_user_email, \
+    get_job_description, get_elapsed_str, readonly_transaction, get_verification_run, \
+    join_with_or, get_calibration_runs_bulk, get_hindcast_run, auth_scope_required, TOKEN_SLURM_SCOPE, generate_custom_token
 from calibration.views.end_of_job_processing import read_calibration_output
 
 logger = logging.getLogger(__name__)
 
 
-def normalize_failure_messages(value) -> list[dict]:
+def normalize_failure_messages(value: Any) -> list[dict]:
     """
     Normalize failure_messages into a canonical list[dict] form.
 
@@ -124,6 +122,7 @@ def get_status(request: Request) -> Response:
     verification_run_id = validator.get('verification_run_id')
 
     include_performance_metrics = validator.get('include_performance_metrics')
+    assert isinstance(include_performance_metrics, bool)
 
     if calibration_run_id:
         serializer_class = GetStatusForCalibrationResponseSerializer
@@ -140,13 +139,15 @@ def get_status(request: Request) -> Response:
     calibration_run: CalibrationRun | None = None
     run: BaseRun | None = None
     needs_reconcile = False
-    sacct_status = None
+    slurm_status = None
 
     # ─────────────────────────────────────────────────────────────
     # READ-ONLY PHASE
     # ─────────────────────────────────────────────────────────────
     with readonly_transaction():
         if calibration_run_id:
+            assert isinstance(calibration_run_id, int)
+            
             calibration_run, error_return = get_calibration_run(
                 calibration_run_id, request.user, run_status=list(StatusEnum)
             )
@@ -160,15 +161,17 @@ def get_status(request: Request) -> Response:
                 f"{get_job_description(run)} (slurm_job_id: {run.slurm_job_id}) - "
                 f"calling check_slurm_reconciliation"
             )
-            needs_reconcile, sacct_status = check_slurm_reconciliation(run)
+            needs_reconcile, slurm_status = check_slurm_reconciliation(run)
             logger.info(
                 f"{get_job_description(run)} (slurm_job_id: {run.slurm_job_id}) - "
-                f"needs_reconcile={needs_reconcile}, sacct_status={sacct_status}"
+                f"needs_reconcile={needs_reconcile}, slurm_status={slurm_status}"
             )
 
             response = get_status_for_calibration(calibration_run, include_performance_metrics)
 
         elif validation_run_id:
+            assert isinstance(validation_run_id, int)
+
             validation_run, error_return = get_validation_run(
                 validation_run_id, request.user, run_status=list(StatusEnum)
             )
@@ -177,10 +180,12 @@ def get_status(request: Request) -> Response:
             assert validation_run is not None
 
             run = validation_run
-            needs_reconcile, sacct_status = check_slurm_reconciliation(validation_run)
+            needs_reconcile, slurm_status = check_slurm_reconciliation(validation_run)
             response = get_status_for_validation(validation_run, include_performance_metrics)
 
         elif forecast_run_id:
+            assert isinstance(forecast_run_id, int)
+
             # Handle cold start
             forecast_run, error_return = get_forecast_run(
                 forecast_run_id, request.user, run_status=list(StatusEnum)
@@ -190,10 +195,12 @@ def get_status(request: Request) -> Response:
             assert forecast_run is not None
 
             run = forecast_run
-            needs_reconcile, sacct_status = check_slurm_reconciliation(forecast_run)
+            needs_reconcile, slurm_status = check_slurm_reconciliation(forecast_run)
             response = get_status_for_forecast(forecast_run, include_performance_metrics)
 
         elif hindcast_run_id:
+            assert isinstance(hindcast_run_id, int)
+
             # Handle cold start
             hindcast_run, error_return = get_hindcast_run(
                 hindcast_run_id, request.user, run_status=list(StatusEnum)
@@ -203,10 +210,12 @@ def get_status(request: Request) -> Response:
             assert hindcast_run is not None
 
             run = hindcast_run
-            needs_reconcile, sacct_status = check_slurm_reconciliation(hindcast_run)
+            needs_reconcile, slurm_status = check_slurm_reconciliation(hindcast_run)
             response = get_status_for_hindcast(hindcast_run, include_performance_metrics)
 
         else:
+            assert isinstance(verification_run_id, int)
+
             verification_run, error_return = get_verification_run(
                 verification_run_id, request.user, run_status=list(StatusEnum)
             )
@@ -215,7 +224,7 @@ def get_status(request: Request) -> Response:
             assert verification_run is not None
 
             run = verification_run
-            needs_reconcile, sacct_status = check_slurm_reconciliation(verification_run)
+            needs_reconcile, slurm_status = check_slurm_reconciliation(verification_run)
             response = get_status_for_verification(verification_run, include_performance_metrics)
 
     # TODO Can we combine these?
@@ -251,7 +260,7 @@ def get_status(request: Request) -> Response:
                 StatusEnum.SUBMITTED.db_instance,
                 StatusEnum.RUNNING.db_instance,
             }:
-                apply_slurm_reconciliation(reconciled_run, sacct_status)
+                apply_slurm_reconciliation(reconciled_run, slurm_status)
 
                 # Reflect the DB update in the response that was built earlier.
                 response["status"] = StatusEnum.SERVER_ERROR.value
@@ -592,7 +601,7 @@ def get_status_for_verification(verification_run: VerificationRun, include_perfo
     - Verification timing and status fields
     - Failure messages (if any)
     - Performance metrics (only if requested and job is DONE or FAILED)
-    - A summarized view of the associated ForecastRun or HindcastRun
+    - A summarized view of the associated HindcastRun
 
     All database access is read-only and executed inside a readonly transaction.
 
@@ -601,12 +610,12 @@ def get_status_for_verification(verification_run: VerificationRun, include_perfo
         when the run status allows it.
     :return: A dict suitable for the verification status response serializer.
     """
-    parent_run = verification_run.parent_run
+    hindcast_run = verification_run.hindcast_run
 
     verification_data = {
         'message': f'{get_job_description(verification_run)}, status is {verification_run.status.name}',
         'verification_run_id': verification_run.id,
-        'calibration_run_id': parent_run.calibration_run_id,
+        'calibration_run_id': hindcast_run.calibration_run_id,
         'status': verification_run.status.name,
         'submit_date': verification_run.submit_date,
         'sent_date': verification_run.sent_date,
@@ -629,46 +638,37 @@ def get_status_for_verification(verification_run: VerificationRun, include_perfo
     if verification_metrics:
         verification_data['performance_metrics'] = verification_metrics
 
-    parent_data = {
-        'calibration_run_id': parent_run.calibration_run_id,
-        'status': parent_run.status.name,
-        'configuration': parent_run.configuration.name,
-        'cycle_date': parent_run.cycle_date,
-        'submit_date': parent_run.submit_date,
-        'sent_date': parent_run.sent_date,
-        'run_start': parent_run.run_start,
-        'run_end': parent_run.run_end,
+    hindcast_data = {
+        'calibration_run_id': hindcast_run.calibration_run_id,
+        'hindcast_run_id': hindcast_run.id,
+        'status': hindcast_run.status.name,
+        'configuration': hindcast_run.configuration.name,
+        'cycle_date': hindcast_run.cycle_date,
+        'interval_cycle': hindcast_run.interval_cycle,
+        'num_iterations': hindcast_run.num_iterations,
+        'created_new_cold_start': hindcast_run.created_new_cold_start,
+        'submit_date': hindcast_run.submit_date,
+        'sent_date': hindcast_run.sent_date,
+        'run_start': hindcast_run.run_start,
+        'run_end': hindcast_run.run_end,
     }
 
-    if isinstance(parent_run, ForecastRun):
-        parent_data['forecast_run_id'] = parent_run.id
-    elif isinstance(parent_run, HindcastRun):
-        parent_data['hindcast_run_id'] = parent_run.id
-        parent_data['interval_cycle'] = parent_run.interval_cycle
-        parent_data['num_iterations'] = parent_run.num_iterations
-        parent_data['created_new_cold_start'] = parent_run.created_new_cold_start
-    else:
-        raise TypeError(f"Unexpected verification parent run type: {type(parent_run).__name__}")
+    hindcast_failure_message = normalize_failure_messages(hindcast_run.failure_messages)
+    if hindcast_failure_message:
+        hindcast_data['failure_messages'] = hindcast_failure_message
 
-    parent_failure_message = normalize_failure_messages(parent_run.failure_messages)
-    if parent_failure_message:
-        parent_data['failure_messages'] = parent_failure_message
+    if hindcast_run.run_end and hindcast_run.submit_date:
+        hindcast_data['elapsed_time'] = hindcast_run.run_end - hindcast_run.submit_date
 
-    if parent_run.run_end and parent_run.submit_date:
-        parent_data['elapsed_time'] = parent_run.run_end - parent_run.submit_date
-
-    parent_metrics = (
-        get_performance_metrics(parent_run.performance_metrics)
-        if should_include_metrics(parent_run.status, include_performance_metrics)
+    hindcast_metrics = (
+        get_performance_metrics(hindcast_run.performance_metrics)
+        if should_include_metrics(hindcast_run.status, include_performance_metrics)
         else None
     )
-    if parent_metrics:
-        parent_data['performance_metrics'] = parent_metrics
+    if hindcast_metrics:
+        hindcast_data['performance_metrics'] = hindcast_metrics
 
-    if verification_run.forecast_run_id is not None:
-        verification_data['forecast_run'] = parent_data
-    else:
-        verification_data['hindcast_run'] = parent_data
+    verification_data['hindcast_run'] = hindcast_data
 
     return verification_data
 
@@ -707,6 +707,7 @@ def get_status_for_comparison(request: Request) -> Response:
         return error_return
 
     calibration_run_ids = validator.get('calibration_run_ids')
+    assert isinstance(calibration_run_ids, list)
 
     response = {
         'calibration_run_ids': calibration_run_ids,
@@ -803,12 +804,14 @@ def run_calibration(request: Request) -> Response:
     calibration_run_id = validator.get('calibration_run_id')
     logging_config = validator.get('logging_config')
 
+    assert isinstance(calibration_run_id, int)
+
     run, error_return = get_calibration_run(calibration_run_id, request.user)
     if error_return:
         return error_return
     assert run is not None
 
-    error_response = submit_job(run, logging_config=logging_config)
+    error_response = launch_job(run, logging_config=logging_config)
     if error_response:
         return error_response
 
@@ -827,7 +830,7 @@ def run_calibration(request: Request) -> Response:
     return Response(response_validator.data)
 
 
-def get_performance_metrics(performance_metrics) -> dict[str, str | int | float | None]:
+def get_performance_metrics(performance_metrics: PerformanceMetrics | None) -> dict[str, str | int | float | None]:
     """
     Helper function to retrieve selected performance metrics, converting numeric fields to 'K' units.
     """
@@ -881,7 +884,7 @@ def should_include_metrics(run_status: Status, include_performance_metrics: bool
 )
 @api_view(['GET', 'POST'])
 @handle_exceptions
-def process_calibration_output(request):
+def process_calibration_output(request: Request) -> Response:
     """
     This endpoint is mostly for testing, to kick off the processing of output for a completed job.
     Normally read_calibration_output() is called automatically when a job completes.
@@ -895,6 +898,7 @@ def process_calibration_output(request):
         return error_return
 
     calibration_run_id = validator.get('calibration_run_id')
+    assert isinstance(calibration_run_id, int)
 
     run, error_return = get_calibration_run(calibration_run_id, request.user, run_status=[StatusEnum.DONE, StatusEnum.FAILED])
 
@@ -947,6 +951,7 @@ def process_swe_timeseries(request: Request) -> Response:
         return error_return
 
     validation_run_id = validator.get('validation_run_id')
+    assert isinstance(validation_run_id, int)
 
     run, error_return = get_validation_run(validation_run_id, request.user, run_status=[StatusEnum.DONE])
 
@@ -987,7 +992,7 @@ def process_swe_timeseries(request: Request) -> Response:
 # Called by cal-mgr
 @api_view(['POST'])
 @handle_exceptions
-def report_iteration(request):
+def report_iteration(request: Request) -> Response:
     """
     Reports an iteration for a running calibration job. This endpoint updates or creates an
     iteration record for a specific worker in the calibration job.
@@ -1019,6 +1024,8 @@ def report_iteration(request):
     iteration_number = validator.get('iteration')
     worker_name = validator.get('worker_name')
     first_iteration_for_worker = validator.get('first_iteration_for_worker')
+
+    assert isinstance(calibration_run_id, int)
 
     logger.debug(
         f"Report Iteration for calibration_run_id {calibration_run_id}, iteration number: {iteration_number}, "
@@ -1111,6 +1118,7 @@ def get_iteration(request: Request) -> Response:
         return error_return
 
     calibration_run_id = validator.get('calibration_run_id')
+    assert isinstance(calibration_run_id, int)
 
     with readonly_transaction():
         run, error_return = get_calibration_run(
@@ -1189,6 +1197,8 @@ def cancel_job(request: Request) -> Response:
 
     # Determine job type and retrieve the appropriate run instance
     if calibration_run_id:
+        assert isinstance(calibration_run_id, int)
+
         run_type = JobType.CALIBRATION.value
         run, error_return = get_calibration_run(
             calibration_run_id, request.user, run_status=[StatusEnum.RUNNING, StatusEnum.SUBMITTED]
@@ -1197,6 +1207,8 @@ def cancel_job(request: Request) -> Response:
             return error_return
 
     elif validation_run_id:
+        assert isinstance(validation_run_id, int)
+
         run_type = JobType.VALIDATION.value
         run, error_return = get_validation_run(
             validation_run_id, request.user, run_status=[StatusEnum.RUNNING, StatusEnum.SUBMITTED]
@@ -1205,6 +1217,8 @@ def cancel_job(request: Request) -> Response:
             return error_return
 
     elif verification_run_id:
+        assert isinstance(verification_run_id, int)
+
         run_type = JobType.VERIFICATION.value
         run, error_return = get_verification_run(
             verification_run_id, request.user, run_status=[StatusEnum.RUNNING, StatusEnum.SUBMITTED]
@@ -1213,6 +1227,8 @@ def cancel_job(request: Request) -> Response:
             return error_return
 
     elif forecast_run_id:
+        assert isinstance(forecast_run_id, int)
+
         forecast_run, error_return = get_forecast_run(
             forecast_run_id, request.user, run_status=list(StatusEnum)
         )
@@ -1228,6 +1244,8 @@ def cancel_job(request: Request) -> Response:
             return error_response
 
     elif hindcast_run_id:
+        assert isinstance(hindcast_run_id, int)
+
         hindcast_run, error_return = get_hindcast_run(
             hindcast_run_id,
             request.user,
@@ -1257,8 +1275,7 @@ def cancel_job(request: Request) -> Response:
     if not cancel_job_common(run):
         return ResponseError(f"Unable to cancel {run_type.capitalize()} Job {run.id}")
 
-    run.status = StatusEnum.CANCELLED.db_instance
-    run.save(update_fields=['status'])
+    run.refresh_from_db(fields=["status"])
 
     response = {
         'message': f"{get_job_description(run)} has been canceled",
@@ -1359,10 +1376,10 @@ def calibration_job_slurm_callback(request: Request) -> Response:
     :return: HTTP 202 response indicating the callback was processed.
     """
     return handle_slurm_callback(
-        request,
-        CalibrationJobSlurmCallbackRequestSerializer,
-        get_calibration_run,
-        run_calibration_job_callback_pw
+        request=request,
+        serializer_class=CalibrationJobSlurmCallbackRequestSerializer,
+        job_type=JobType.CALIBRATION.value,
+        run_id_field="calibration_run_id"
     )
 
 
@@ -1394,8 +1411,8 @@ def validation_job_slurm_callback(request: Request) -> Response:
     return handle_slurm_callback(
         request,
         ValidationJobSlurmCallbackRequestSerializer,
-        get_validation_run,
-        run_validation_job_callback_pw
+        JobType.VALIDATION.value,
+        "validation_run_id",
     )
 
 
@@ -1427,8 +1444,8 @@ def cold_start_job_slurm_callback(request: Request) -> Response:
     return handle_slurm_callback(
         request,
         ColdStartJobSlurmCallbackRequestSerializer,
-        get_cold_start_run,
-        run_cold_start_job_callback_pw
+        JobType.COLD_START.value,
+        "cold_start_run_id",
     )
 
 
@@ -1460,8 +1477,8 @@ def forecast_job_slurm_callback(request: Request) -> Response:
     return handle_slurm_callback(
         request,
         ForecastJobSlurmCallbackRequestSerializer,
-        get_forecast_run,
-        run_forecast_job_callback_pw
+        JobType.FORECAST.value,
+        "forecast_run_id",
     )
 
 
@@ -1493,8 +1510,8 @@ def hindcast_job_slurm_callback(request: Request) -> Response:
     return handle_slurm_callback(
         request,
         HindcastJobSlurmCallbackRequestSerializer,
-        get_hindcast_run,
-        run_hindcast_job_callback_pw
+        JobType.HINDCAST.value,
+        "hindcast_run_id",
     )
 
 
@@ -1526,20 +1543,29 @@ def verification_job_slurm_callback(request: Request) -> Response:
     return handle_slurm_callback(
         request,
         VerificationJobSlurmCallbackRequestSerializer,
-        get_verification_run,
-        run_verification_job_callback_pw
+        JobType.VERIFICATION.value,
+        "verification_run_id",
     )
 
 
-def handle_slurm_callback(request: Request, serializer_class, get_run_fn, job_end_callback_fn) -> Response:
+def handle_slurm_callback(
+        request: Request,
+        serializer_class: type[BaseSerializer],
+        job_type: str,
+        run_id_field: str,
+) -> Response:
     """
-    Common handler for Slurm callback endpoints for any run type that inherits from BaseRun.
+    Common handler for Slurm callback endpoints.
+
+    The endpoint validates the callback payload and delegates state transitions
+    to job_lifecycle.handle_job_event(), which enforces expected status transitions
+    and ignores duplicate/out-of-order callbacks.
 
     :param request: The incoming HTTP request.
-    :param serializer_class: The serializer used for validating the incoming data.
-    :param get_run_fn: A function that returns the correct run object given its ID.
-    :param job_end_callback_fn: A function that handles the job completion logic.
-    :return: HTTP 202 Response or error Response.
+    :param serializer_class: Serializer used to validate the callback payload.
+    :param job_type: Normalized job type string.
+    :param run_id_field: Serializer field containing the run id.
+    :return: HTTP 202 Response or validation error Response.
     """
     data = request.data
     logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
@@ -1548,32 +1574,23 @@ def handle_slurm_callback(request: Request, serializer_class, get_run_fn, job_en
     if error_return:
         return error_return
 
-    run_id = validator.get(next(k for k in validator.keys() if k.endswith("_id")))
+    run_id = validator.get(run_id_field)
     job_status = validator.get("job_status")
-    slurm_status = SlurmCallbackStatusEnum(job_status)
+    slurm_job_id = validator.get("slurm_job_id")
 
-    # If Slurm is reporting that the job is now starting, we expect to be in Submitted status
-    # For any other status changes, we should be Running or Submitted.  We allow Submitted just in case
-    #  1) The job doesn't properly transition to Running
-    #  2) To allow a submitted job to be canceled
-    expected_status = [StatusEnum.SUBMITTED] if slurm_status == SlurmCallbackStatusEnum.STARTING else [StatusEnum.RUNNING, StatusEnum.SUBMITTED]
+    assert isinstance(run_id, int)
 
-    run, error_return = get_run_fn(run_id, None, run_status=expected_status)
-    if error_return:
-        return error_return
+    # State validation and duplicate callback protection are centralized there.
+    handle_job_event(
+        job_type=job_type,
+        run_id=run_id,
+        job_status=SlurmCallbackStatusEnum(job_status),
+        slurm_job_id=slurm_job_id,
+    )
 
-    job_description = f"{get_job_description(run)} (slurm_job_id: {run.slurm_job_id})"
-    if slurm_status == SlurmCallbackStatusEnum.STARTING:
-        logger.info(f'{job_description} is starting')
-        run.status = StatusEnum.RUNNING.db_instance
-        run.run_start = datetime.now(timezone.utc)
-        run.save(update_fields=["status", "run_start"])
-    else:
-        # Job has ended
-        logger.info(f'{job_description} is ending')
-        job_end_callback_fn(run, slurm_status)
-
-    logger.debug(f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)}')
+    logger.debug(
+        f"Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)}"
+    )
     return Response(status=status.HTTP_202_ACCEPTED)
 
 
@@ -1645,11 +1662,11 @@ def check_slurm_reconciliation(run: BaseRun) -> tuple[bool, str | None]:
     readonly transaction.
 
     :param run: The run object to inspect. Must inherit from BaseRun.
-    :return: Tuple (needs_reconciliation, sacct_status)
+    :return: Tuple (needs_reconciliation, slurm_status)
         - needs_reconciliation: True if the database indicates the run is still
           active but Slurm indicates it is no longer active, excluding the
           COMPLETED callback-wait case.
-        - sacct_status: The status detail returned by get_slurm_status(), used
+        - slurm_status: The status detail returned by get_slurm_status(), used
           for logging and reconciliation messaging.
     """
     if not run.slurm_job_id:
@@ -1661,33 +1678,34 @@ def check_slurm_reconciliation(run: BaseRun) -> tuple[bool, str | None]:
     }:
         return False, None
 
-    slurm_is_active, sacct_status = get_slurm_status(run.slurm_job_id)
+    slurm_is_active, slurm_status = get_slurm_status(run.slurm_job_id)
 
     logger.debug(
         f"{get_job_description(run)} (slurm_job_id: {run.slurm_job_id}): "
-        f"Slurm active={slurm_is_active}, sacct_status={sacct_status}"
+        f"Slurm active={slurm_is_active}, slurm_status={slurm_status}"
     )
 
     # Race-condition exception:
-    if not slurm_is_active and sacct_status == "COMPLETED":
+    if not slurm_is_active and slurm_status == "COMPLETED":
         logger.info(
             f"{get_job_description(run)} (slurm_job_id: {run.slurm_job_id}): "
-            f"slurm inactive but sacct_status=COMPLETED; "
+            f"slurm inactive but slurm_status=COMPLETED; "
             f"skipping reconciliation (awaiting callback)"
         )
-        return False, sacct_status
+        return False, slurm_status
 
     if not slurm_is_active:
         logger.warning(
             f"{get_job_description(run)} (slurm_job_id: {run.slurm_job_id}): "
-            f"reconciliation needed; DB status={run.status.name}, sacct_status={sacct_status}"
+            f"reconciliation needed; DB status={run.status.name}, "
+            f"slurm_status={slurm_status}"
         )
-        return True, sacct_status
+        return True, slurm_status
 
     return False, None
 
 
-def apply_slurm_reconciliation(run: BaseRun, sacct_status: str | None) -> None:
+def apply_slurm_reconciliation(run: BaseRun, slurm_status: str | None) -> None:
     """
     Mark a run as SERVER_ERROR due to a Slurm/database inconsistency.
 
@@ -1707,8 +1725,9 @@ def apply_slurm_reconciliation(run: BaseRun, sacct_status: str | None) -> None:
     :param run: The run object to update. The caller is expected to
         re-fetch it inside a write-capable transaction before calling
         this function.
-    :param sacct_status: The Slurm status detail associated with the
-        inconsistency.
+    :param slurm_status: The normalized status returned by
+        get_slurm_status(), which may originate from sacct,
+        squeue, or synthesized fallback logic.
     :return: None
     """
     # Re-check the status after acquiring the row lock because another
@@ -1727,7 +1746,7 @@ def apply_slurm_reconciliation(run: BaseRun, sacct_status: str | None) -> None:
 
     message = (
         f"Slurm job {run.slurm_job_id} not active while DB status was "
-        f"{original_status}; sacct_status={sacct_status}"
+        f"{original_status}; slurm_status={slurm_status}"
     )
 
     # Record the reconciliation event in the server logs.
@@ -1740,7 +1759,7 @@ def apply_slurm_reconciliation(run: BaseRun, sacct_status: str | None) -> None:
     existing.append({
         "source": "slurm",
         "type": "reconciliation",
-        "sacct_status": sacct_status,
+        "slurm_status": slurm_status,
         "message": message,
     })
 
@@ -1748,86 +1767,3 @@ def apply_slurm_reconciliation(run: BaseRun, sacct_status: str | None) -> None:
     run.failure_messages = json.dumps(existing)
 
     run.save(update_fields=["status", "failure_messages"])
-
-
-def get_slurm_status(slurm_id: int) -> tuple[bool, str | None]:
-    """
-    Query the Slurm status service for the current status of a job.
-
-    Semantics:
-    - If squeue is empty, the job is no longer active.
-    - If squeue reports COMPLETING, the job is in teardown/cleanup rather than normal execution.
-      In that case, if sacct already reports a terminal state, treat the job as inactive and use sacct.
-      Otherwise, treat it as still active and allow time for callback/accounting to settle.
-    - For any other non-empty squeue state, treat the job as active.
-    - If the response is unusable (non-200, invalid JSON, or missing fields), treat the job as not active
-      with status "UNKNOWN".
-
-    :param slurm_id: Slurm job ID to query.
-    :return: Tuple (is_active, status_detail)
-        - is_active: True if the job is considered active, False otherwise.
-        - status_detail: A relevant Slurm status string, or "UNKNOWN" if indeterminate.
-    """
-    # ----------------------------------
-    # TODO Get rid of this debug code
-    FORCE_SLURM_INACTIVE = False
-    if FORCE_SLURM_INACTIVE:
-        logger.warning(
-            f"FORCE_SLURM_INACTIVE enabled — treating Slurm job {slurm_id} as inactive"
-        )
-        return False, "FORCED_ERROR"
-    # ------------------------------------
-
-    base_url = f"{settings.SLURM_URL.rstrip('/')}/{settings.SLURM_JOB_STATUS_ENDPOINT.lstrip('/')}"
-
-    # Query Slurm for the live job status
-    url = f"{base_url}?slurm_job_id={slurm_id}"
-
-    try:
-        resp = requests.get(url, timeout=10)
-
-        # Non-200 HTTP responses (including 404) are treated as unknown
-        if resp.status_code != 200:
-            logger.error(
-                f"Non-200 response from Slurm for job {slurm_id}: "
-                f"{resp.status_code}\n{resp.text}"
-            )
-            return False, "UNKNOWN"
-
-        # Try to parse JSON response
-        try:
-            data = resp.json()
-        except ValueError:
-            # Log the entire response text when not JSON
-            logger.error(
-                f"Invalid JSON response from Slurm for job {slurm_id}:\n{resp.text}"
-            )
-            return False, "UNKNOWN"
-
-        squeue_status = data.get("squeue")
-        sacct_status = data.get("sacct")
-
-        if isinstance(squeue_status, str):
-            squeue_status = squeue_status.strip().upper()
-
-        if isinstance(sacct_status, str):
-            sacct_status = sacct_status.strip().upper()
-
-        # No squeue entry -> job is no longer active; use sacct if available.
-        if not squeue_status:
-            return False, sacct_status or "UNKNOWN"
-
-        # COMPLETING is a cleanup/teardown state. If sacct already reports a terminal
-        # outcome, trust sacct; otherwise keep treating the job as active for now.
-        if squeue_status == "COMPLETING":
-            if sacct_status and sacct_status != "COMPLETED":
-                return False, sacct_status
-            return True, "COMPLETING"
-
-        # Any other visible squeue state is treated as active.
-        return True, squeue_status
-
-    except Exception as ex:
-        logger.exception(f"Error querying Slurm status for job {slurm_id}: {ex}")
-        # Safest assumption: job is gone, status indeterminate
-        return False, "UNKNOWN"

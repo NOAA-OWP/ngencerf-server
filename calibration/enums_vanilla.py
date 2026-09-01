@@ -1,33 +1,14 @@
-from enum import StrEnum, Enum
+from enum import StrEnum, Enum, auto
 from typing import Self, Any
 
 
 # These enums are used from settings.py.  We need to avoid any references to the model
 
-class ScriptEnum(StrEnum):
-    CALIBRATION = "calibration"
-    VALIDATION = "validation"
-    VALIDATION_ITERATION = "validation_iteration"
-    COLD_START = "cold_start"
-    FORECAST = "forecast"
-    HINDCAST = "hindcast"
-    VERIFICATION = "verification"
 
-
-class NgenEnvironmentEnum(StrEnum):
-    LOCAL = "LOCAL"
-    PARALLEL_WORKS = "PARALLEL_WORKS"
-    DOCKER = "DOCKER"
-
-
-class JobType(StrEnum):
-    CALIBRATION = 'calibration'
-    VALIDATION = 'validation'
-    COLD_START = 'cold_start'
-    FORECAST = 'forecast'
-    HINDCAST = 'hindcast'
-    VERIFICATION = 'verification'
-    COMPARISON = 'comparison'
+class JobExecutionMode(StrEnum):
+    SLURM = auto()
+    SLURM_MOCK = auto()
+    DOCKER = auto()
 
 
 class SecondaryDataEnum(StrEnum):
@@ -119,7 +100,7 @@ class CalibrationSortField(_SortFieldMixin, Enum):
 
 class VerificationSortField(_SortFieldMixin, Enum):
     VERIFICATION_RUN_ID = ("verification_run_id", "id")
-    FORECAST_RUN_ID = ("forecast_run_id", "forecast_run__id")
+    HINDCAST_RUN_ID = ("hindcast_run_id", "hindcast_run__id")
     STATUS = ("status", "status__name")
     SUBMIT_DATE = ("submit_date", "submit_date")
     CREATED_AT = ("created_at", "created_at")

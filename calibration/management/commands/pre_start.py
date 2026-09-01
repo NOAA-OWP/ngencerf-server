@@ -8,7 +8,7 @@ from calibration.models import CalibrationRun, ValidationRun, ForecastRun, ColdS
 from calibration.models.base_run import BaseRun
 from calibration.views.calibration_run_views import get_slurm_status
 from calibration.views.common import get_job_description
-from cerfServer.settings import NgenEnvironmentEnum
+from cerfServer.settings import JobExecutionMode
 
 logger = logging.getLogger(__name__)
 
@@ -28,10 +28,10 @@ class Command(BaseCommand):
 
         try:
             # ─────────────────────────────────────────────────────────────
-            # Case 1: NOT on Parallel Works → we trust DB state only.
+            # Case 1: NOT in Slurm mode → we trust DB state only.
             # Safe to bulk mark *all* RUNNING entries immediately.
             # ─────────────────────────────────────────────────────────────
-            if settings.NGEN_ENVIRONMENT != NgenEnvironmentEnum.PARALLEL_WORKS:
+            if settings.JOB_EXECUTION_MODE != JobExecutionMode.SLURM:
 
                 total_count = 0
                 for model in RUN_MODELS:
@@ -41,12 +41,12 @@ class Command(BaseCommand):
                     total_count += count
 
                 logger.info(
-                    f"Non-Parallel cleanup summary: updated {total_count} total job(s) to SERVER_ERROR."
+                    f"Non-Slurm cleanup summary: updated {total_count} total job(s) to SERVER_ERROR."
                 )
                 return
 
             # ─────────────────────────────────────────────────────────────
-            # Case 2: On Parallel Works → must check Slurm to confirm if
+            # Case 2: Slurm mode → must check Slurm to confirm if
             # the job is *still actually running*, before setting error.
             # ─────────────────────────────────────────────────────────────
             total_running = 0  # total in DB with status=RUNNING
@@ -99,7 +99,7 @@ class Command(BaseCommand):
                         )
 
             logger.info(
-                f"Parallel Works cleanup summary: "
+                f"Slurm cleanup summary: "
                 f"{total_marked_error} job(s) marked SERVER_ERROR "
                 f"out of {total_running} RUNNING/SUBMITTED."
             )

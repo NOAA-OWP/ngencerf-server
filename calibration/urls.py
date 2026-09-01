@@ -8,7 +8,7 @@ from calibration.views import calibration_formulation_views, calibration_tuning_
     calibration_optimization_views, calibration_run_views, calibration_plot_views, calibration_import_export_views, calibration_landing_views, \
     calibration_evaluation_views, calibration_forecast_views, calibration_regionalization_views, \
     calibration_verification_views, calibration_secondary_data_views, calibration_download_views, calibration_log_files_views, \
-    calibration_create_jobs_views, calibration_mfa_views
+    calibration_create_jobs_views
 
 urlpatterns = [
     ##################################
@@ -19,6 +19,7 @@ urlpatterns = [
     path('calibration/create_and_run_forecast/', calibration_create_jobs_views.create_and_run_forecast, name="createAndRunForecast"),
     path('calibration/create_and_run_hindcast/', calibration_create_jobs_views.create_and_run_hindcast, name="createAndRunHndcast"),
     path('calibration/get_footer/', calibration_landing_views.get_footer, name="getFooter"),
+    path('health_check/', calibration_landing_views.health_check, name="healthCheck"),
     path('calibration/get_git_info/', calibration_landing_views.get_git_info, name="getGitInfo"),
     path('calibration/load_calibration_run/', calibration.views.calibration_import_export_views.load_calibration_run, name="loadCalibrationRun"),
     path('calibration/delete_jobs/', calibration_landing_views.delete_jobs, name="deleteJobs"),
@@ -38,10 +39,8 @@ urlpatterns = [
     path('calibration/get_forecast_jobs/', calibration.views.get_jobs_views.get_forecast_jobs, name="getForecastJobs"),
     path('calibration/get_hindcast_jobs/', calibration.views.get_jobs_views.get_hindcast_jobs, name="getHindcastJobs"),
     path('calibration/get_verification_jobs/', calibration.views.get_jobs_views.get_verification_jobs, name="getVerificationJobs"),
-    path('calibration/get_calibration_jobs_summary/', calibration.views.get_jobs_views.get_calibration_jobs_summary,
+    path('calibration/get_jobs_summary/', calibration.views.get_jobs_views.get_jobs_summary,
          name="getCalibrationJobsSummary"),
-    path('calibration/get_forecast_jobs_for_verification/', calibration.views.get_jobs_views.get_forecast_jobs_for_verification,
-         name="getForecastJobsForVerification"),
     path('calibration/get_hindcast_jobs_for_verification/', calibration.views.get_jobs_views.get_hindcast_jobs_for_verification,
          name="getHindcastJobsForVerification"),
     path('calibration/get_calibration_gages/', calibration.views.get_jobs_views.get_calibration_gages, name="getCalibrationGages"),
@@ -50,8 +49,6 @@ urlpatterns = [
     path('calibration/get_calibration_gages_for_evaluation/', calibration.views.get_jobs_views.get_calibration_gages_for_evaluation,
          name="getCalibrationGagesForEvaluation"),
     path('calibration/get_forecast_gages/', calibration.views.get_jobs_views.get_forecast_gages, name="getForecastGages"),
-    path('calibration/get_forecast_gages_for_verification/', calibration.views.get_jobs_views.get_forecast_gages_for_verification,
-         name="getForecastGagesForVerification"),
     path('calibration/get_hindcast_gages/', calibration.views.get_jobs_views.get_hindcast_gages, name="getHindcastGages"),
     path('calibration/get_hindcast_gages_for_verification/', calibration.views.get_jobs_views.get_hindcast_gages_for_verification,
          name="getHindcastGagesForVerification"),
@@ -85,6 +82,7 @@ urlpatterns = [
     ##################################
     path('calibration/load_tuning_tab/', calibration_tuning_views.load_tuning_tab, name="loadTuningTab"),
     path('calibration/save_tuning_tab/', calibration_tuning_views.save_tuning_tab, name="saveTuningTab"),
+    path('calibration/validate_tuning_times/', calibration_tuning_views.validate_tuning_times, name="validateTuningTimes"),
     path('calibration/upload_user_parameters/', calibration_tuning_views.upload_user_parameters, name="uploadUserParameters"),
     path('calibration/validate_parameters/', calibration_tuning_views.validate_parameters, name="validateParameters"),
 
@@ -174,12 +172,9 @@ urlpatterns = [
          name="getRegionalizationFilesZip"),
 
     ##################################
-    # MFA
+    # Auth / MFA
     ##################################
-    path("auth/mfa/setup/", calibration_mfa_views.setup_mfa, name="setupMfa"),
-    path("auth/mfa/setup/confirm/", calibration_mfa_views.confirm_setup_mfa, name="confirmSetupMfa"),
-    path("auth/mfa/verify/", calibration_mfa_views.verify_mfa, name="verifyMfa"),
-    path("auth/login/", calibration_mfa_views.login, name="login"),
+    # All /auth endpoints are defined in the top-level urls.py to avoid conflict with Djoser
 
     ##################################
     # Swagger - drf_spectacular

@@ -5,11 +5,11 @@ import logging
 import os
 import re
 import time
-from collections.abc import Sequence
+from collections.abc import Sequence, Iterator
 from contextlib import contextmanager
 from datetime import timedelta, datetime
 from functools import wraps
-from typing import Any, Callable, TypeVar, cast
+from typing import Any, Callable, Protocol, TypeVar, cast
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -72,12 +72,10 @@ def validate_run_instance(
 
     allowed_statuses = [s.db_instance for s in effective_run_status]
 
-    # Some run types do not reach the archive flag through a single fixed parent.
-    # For example, VerificationRun may need to follow either
-    # `forecast_run__calibration_run__is_archived` or
-    # `hindcast_run__calibration_run__is_archived`. Since these are nested
-    # attribute paths rather than direct attributes on `run`, we use
-    # `get_nested_attr()` to walk each path safely.
+    # Some run types reach the archive flag through a related run rather than
+    # through a direct attribute. Since these are nested attribute paths rather
+    # than direct attributes on `run`, use `get_nested_attr()` to walk each path
+    # safely.
     is_archived = any(get_nested_attr(run, field, False) for field in is_archived_fields)
     if is_archived and not include_archived:
         return ResponseError(
@@ -444,24 +442,12 @@ def get_verification_run(
         verification_run_id,
         user,
         run_status,
-        owner_fields=(
-            'forecast_run__calibration_run__owner',
-            'hindcast_run__calibration_run__owner',
-        ),
-        is_archived_fields=(
-            'forecast_run__calibration_run__is_archived',
-            'hindcast_run__calibration_run__is_archived',
-        ),
+        owner_fields=('hindcast_run__calibration_run__owner',),
+        is_archived_fields=('hindcast_run__calibration_run__is_archived',),
         include_archived=include_archived,
         select_related_fields=(
             'status',
             'performance_metrics',
-            'forecast_run',
-            'forecast_run__status',
-            'forecast_run__performance_metrics',
-            'forecast_run__configuration',
-            'forecast_run__calibration_run',
-            'forecast_run__calibration_run__owner',
             'hindcast_run',
             'hindcast_run__status',
             'hindcast_run__performance_metrics',
@@ -560,9 +546,7 @@ def create_calibration_run_internal(user: User, genesis: JobGenesis | None = Non
 
     logger.info(f"Directory created: {run.job_data_dir} | perms={oct(mode)}")
 
-    # This is always true
-    run.automatic_validation = True
-    run.save(update_fields=['job_data_dir', 'automatic_validation'])
+    run.save(update_fields=['job_data_dir'])
     return run
 
 
@@ -708,25 +692,17 @@ def create_hindcast_run_internal(
     return hindcast_run
 
 
-def create_verification_run_internal(run: ForecastRun | HindcastRun) -> VerificationRun:
+def create_verification_run_internal(hindcast_run: HindcastRun) -> VerificationRun:
     """
-    Create a new VerificationRun for the given ForecastRun or HindcastRun.
+    Create a new VerificationRun for the given HindcastRun.
 
-    - Calls create_verification_input(verification_run) to generate the config
-
-    :param run: Forecast or Hindcast job to associate with this verification run
+    :param hindcast_run: Hindcast job to associate with this verification run.
     :return: New VerificationRun instance.
     """
-    if isinstance(run, ForecastRun):
-        verification_run = VerificationRun.objects.create(
-            status=StatusEnum.SAVED.db_instance,
-            forecast_run=run,
-        )
-    else:
-        verification_run = VerificationRun.objects.create(
-            status=StatusEnum.SAVED.db_instance,
-            hindcast_run=run,
-        )
+    verification_run = VerificationRun.objects.create(
+        status=StatusEnum.SAVED.db_instance,
+        hindcast_run=hindcast_run,
+    )
 
     os.makedirs(get_verification_run_dir(verification_run))
     logger.info(f"Creating {get_job_description(verification_run)}")
@@ -756,7 +732,7 @@ def generate_custom_token(user: User, scope: str) -> str:
     return str(access)
 
 
-def auth_scope_required(scope):
+def auth_scope_required(scope: str) -> Callable[[Any], Any]:
     """
     Custom decorator to require a specific token scope.
     """
@@ -768,45 +744,77 @@ class CheckTokenScope(BasePermission):
     Permission class to check if the provided JWT token contains a specific scope.
     """
 
-    def __init__(self, required_scope):
+    def __init__(self, required_scope: str) -> None:
         self.required_scope = required_scope
 
-    def has_permission(self, request, view) -> bool:
+    def has_permission(self, request: Request, view: Any) -> bool:
         # Ensure that the user is authenticated and has a valid token
         if not request.user or not request.auth:
-            logger.debug(f"No token or user provided - user: {request.user}, auth: {request.auth}")
+            logger.debug(
+                "No token or user provided - "
+                "user_authenticated=%s, "
+                "user_id=%s, "
+                "user_email=%s, "
+                "auth_provided=%s",
+                getattr(request.user, 'is_authenticated', False),
+                getattr(request.user, 'id', None),
+                getattr(request.user, 'email', None),
+                request.auth is not None,
+            )
             return False
 
         # We should already have a validated token in request.auth
         token = request.auth
 
         logger.debug(
-            f"Scope check token type={type(token)}, "
-            f"has_get={hasattr(token, 'get')}, "
-            f"has_payload={hasattr(token, 'payload')}, "
-            f"repr={token!r}"
+            "Scope check token - type=%s, module=%s, payload=%s",
+            type(token).__name__,
+            type(token).__module__,
+            getattr(token, "payload", None),
         )
 
         try:
-            token_scope = str(token.get('scope', '')).split()
+            token_dict = cast(dict[str, Any], token)
+            token_scope = str(token_dict.get('scope', '')).split()
         except AttributeError:
-            logger.debug(f"Invalid token object for scope check: {token!r}")
+            logger.debug(
+                "Invalid token object for scope check - type=%s, payload=%s",
+                type(token).__name__,
+                getattr(token, "payload", None),
+            )
             return False
 
-        logger.debug(f"Validating token: Token scope: {token_scope}, Required scope: {self.required_scope}")
+        logger.debug(
+            "Validating token: Token scope: %s, Required scope: %s",
+            token_scope,
+            self.required_scope,
+        )
 
         # Make sure we have our custom scope
         if self.required_scope not in token_scope:
             logger.debug(
-                f"Permission denied: required scope '{self.required_scope}' not in token scope {token_scope}"
+                "Permission denied: required scope '%s' not in token scope %s",
+                self.required_scope,
+                token_scope,
             )
             return False
 
         return True
 
 
+class ViewFunc(Protocol):
+    __module__: str
+    __name__: str
+
+    def __call__(self, request: Request, *args: Any, **kwargs: Any) -> Response:
+        ...
+
+
+ViewFuncT = TypeVar("ViewFuncT", bound=ViewFunc)
+
+
 # Function wrapper to implement common exception handling
-def handle_exceptions(view_func):
+def handle_exceptions(view_func: ViewFuncT) -> ViewFuncT:
     """
     A decorator to wrap view functions and handle common exceptions.
     Logs the exception and returns a formatted error response when an exception occurs.
@@ -816,7 +824,7 @@ def handle_exceptions(view_func):
     """
 
     @wraps(view_func)
-    def _wrapped_view(request, *args, **kwargs):
+    def _wrapped_view(request: Request, *args: Any, **kwargs: Any) -> Response | JsonResponse:
         original_logger = logging.getLogger(view_func.__module__)
         try:
             response = view_func(request, *args, **kwargs)
@@ -825,7 +833,7 @@ def handle_exceptions(view_func):
             if isinstance(response, Response):
                 original_render = response.render
 
-                def safe_render():
+                def safe_render() -> Response | JsonResponse:
                     """ Wrap response rendering to catch JSON serialization errors """
                     try:
                         return original_render()
@@ -867,7 +875,7 @@ def handle_exceptions(view_func):
             original_logger.exception(f"Unhandled exception in handle_exceptions: {message}")
             return ResponseError(message, response_type='exception')
 
-    return _wrapped_view
+    return cast(ViewFuncT, _wrapped_view)
 
 
 def get_valid_path(eds_path: str | None, get_path_func: Callable[[], str | None]) -> str | None:
@@ -893,7 +901,11 @@ def get_valid_path(eds_path: str | None, get_path_func: Callable[[], str | None]
     return None
 
 
-def truncate_large_fields(data, fields_to_truncate=None, max_length=100):
+def truncate_large_fields(
+        data: dict[str, Any],
+        fields_to_truncate: Sequence[str] | None = None,
+        max_length: int = 100,
+) -> dict[str, Any]:
     """
     Truncate large fields (lists, dicts, strings) in the data to prevent logging large values.
 
@@ -923,7 +935,13 @@ def truncate_large_fields(data, fields_to_truncate=None, max_length=100):
     return truncated_data
 
 
-def ResponseError(message, response_type='error', validation_errors=None, errors=None, http_status=status.HTTP_400_BAD_REQUEST):
+def ResponseError(
+        message: str,
+        response_type: str = 'error',
+        validation_errors: Any = None,
+        errors: Any = None,
+        http_status: int = status.HTTP_400_BAD_REQUEST,
+) -> Response:
     """
     Return a standardized error response, with optional validation errors.
 
@@ -934,7 +952,7 @@ def ResponseError(message, response_type='error', validation_errors=None, errors
     :param http_status: The HTTP status code for the response (default is 400).
     :return: A formatted Response object with the error details.
     """
-    response = {'response_type': response_type, 'message': message}
+    response: dict[str, Any] = {'response_type': response_type, 'message': message}
     if validation_errors:
         response['validation_errors'] = validation_errors
     if errors:
@@ -944,7 +962,11 @@ def ResponseError(message, response_type='error', validation_errors=None, errors
     return Response(serializer.data, status=http_status)
 
 
-def validate_request(serializer_class, data, context=None):
+def validate_request(
+        serializer_class: type[BaseSerializer],
+        data: dict[str, Any],
+        context: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any] | None, Response | None]:
     """
     Validate request data using the specified serializer class.
     Returns the validated data or an error response if validation fails.
@@ -954,7 +976,7 @@ def validate_request(serializer_class, data, context=None):
     :param context: Optional context for the serializer.
     :return: The validated data or an error response.
     """
-    validator = serializer_class(data=data, context=context)
+    validator = serializer_class(data=data, context={} if context is None else context)
     try:
         validator.is_valid(raise_exception=True)
         return validator.validated_data, None
@@ -965,7 +987,12 @@ def validate_request(serializer_class, data, context=None):
         return None, ResponseError(message, response_type='validation_error', validation_errors=validation_errors)
 
 
-def validate_response(serializer_class, data, fields_to_truncate=None, max_length=100):
+def validate_response(
+        serializer_class: type[BaseSerializer],
+        data: dict[str, Any],
+        fields_to_truncate: Sequence[str] | None = None,
+        max_length: int = 100,
+) -> tuple[BaseSerializer | None, Response | None]:
     """
     Validate the response data using the specified serializer class.
     Logs validation errors if any and returns the validator or an error response.
@@ -996,7 +1023,11 @@ def validate_response(serializer_class, data, fields_to_truncate=None, max_lengt
         return None, ResponseError(message, response_type='validation_error_response', validation_errors=validation_errors)
 
 
-def validate_response_data(serializer_class: type[BaseSerializer], data: dict[str, Any], error_message: str) -> dict[str, Any]:
+def validate_response_data(
+        serializer_class: type[BaseSerializer],
+        data: dict[str, Any],
+        error_message: str
+) -> dict[str, Any]:
     """
     Validates response data and raises an exception if validation fails.
 
@@ -1022,15 +1053,15 @@ class CerfException(Exception):
     Custom exception class for handling specific exceptions with optional details.
     """
 
-    def __init__(self, message=None, details=None):
+    def __init__(self, message: str | None = None, details: Any = None) -> None:
         self.message = message
         self.details = details
         super().__init__(self.message)
 
-    def __str__(self):
+    def __str__(self) -> str:
         if self.details:
             return f"{self.message}: {self.details}"
-        return self.message
+        return str(self.message)
 
 
 def get_job_description(run: BaseRun) -> str:
@@ -1053,12 +1084,11 @@ def get_job_description(run: BaseRun) -> str:
     elif isinstance(run, ColdStartRun):
         return f"Cold Start Job {run.id} for Calibration Job {run.calibration_run.id}, user: {run.calibration_run.owner.username}"
     elif isinstance(run, VerificationRun):
-        parent_run = run.parent_run
-        parent_job_type = 'Forecast' if run.forecast_run_id is not None else 'Hindcast'
+        hindcast_run = run.hindcast_run
         return (
-            f"Verification Job {run.id} for {parent_job_type} Job {parent_run.id} "
-            f"for Calibration Job {parent_run.calibration_run.id}, "
-            f"user: {parent_run.calibration_run.owner.username}"
+            f"Verification Job {run.id} for Hindcast Job {hindcast_run.id} "
+            f"for Calibration Job {hindcast_run.calibration_run.id}, "
+            f"user: {hindcast_run.calibration_run.owner.username}"
         )
 
     raise ValueError(f"Unknown job type: {type(run).__name__}")
@@ -1147,7 +1177,7 @@ def find_validation_worker_with_matching_id(
 
         # Check if worker_id file exists in the current worker directory
         if os.path.isfile(worker_id_path):
-            # Read the first (and only) line of the file
+            # Read the frirst (and only) line of the file
             with open(worker_id_path, 'r') as file:
                 first_line = file.readline().strip()
 
@@ -1400,7 +1430,7 @@ def get_elapsed_str(request: Request) -> str:
 
 
 @contextmanager
-def readonly_transaction():
+def readonly_transaction() -> Iterator[None]:
     """
     Context manager to enforce a read-only transaction.
     Use this for functions that only query the database.
@@ -1443,16 +1473,16 @@ def map_path_to_host(path: str) -> str:
         Host:      /ngencerf-app/data/ngen-cal-data/foo/bar
 
     Controlled by settings:
-        NGEN_CAL_MOUNT_POINT = container root (e.g. /ngencerf/data)
-        NGEN_CAL_DATA_PATH   = host root (e.g. /ngencerf-app/data/ngen-cal-data)
+        CONTAINER_DATA_ROOT = container root (e.g. /ngencerf/data)
+        HOST_DATA_ROOT      = host root (e.g. /ngencerf-app/data/ngen-cal-data)
 
     Behavior:
     - If the roots differ, replace the container root with the host root.
     - If they are the same, return the path unchanged.
-    - Fail fast if the input path is invalid or outside the expected root.
+    - Fail fast if the input path is invalid or outside the expected container root.
 
-    :param path: Absolute container path under NGEN_CAL_MOUNT_POINT
-    :return: Corresponding host path
+    :param path: Absolute container path under CONTAINER_DATA_ROOT
+    :return: Corresponding host path under HOST_DATA_ROOT
     :raises ValueError:
         - If the path is not absolute
         - If the path does not start with the expected container root
@@ -1460,8 +1490,8 @@ def map_path_to_host(path: str) -> str:
     if not path:
         return path
 
-    container_root = os.path.normpath(settings.NGEN_CAL_MOUNT_POINT)
-    host_root = os.path.normpath(settings.NGEN_CAL_DATA_PATH)
+    host_root = os.path.normpath(settings.HOST_DATA_ROOT)
+    container_root = os.path.normpath(settings.CONTAINER_DATA_ROOT)
     path = os.path.normpath(path)
 
     # Only translate if the roots are actually different
@@ -1476,7 +1506,7 @@ def map_path_to_host(path: str) -> str:
             )
 
         # Strip the container root and rebuild under the host root
-        relative_path = os.path.relpath(path, start=container_root)
+        relative_path = cast(str, os.path.relpath(path, start=container_root))
         return os.path.normpath(os.path.join(host_root, relative_path))
 
     # No translation needed
@@ -1488,26 +1518,26 @@ def map_path_to_container(path: str) -> str:
     Translate a host filesystem path into the corresponding container path.
 
     This is used when:
-    - The Django app (running on the host) constructs a path, but that path
-      needs to be passed into a containerized process (e.g., Slurm job).
-    - The host and container see the same data through a bind mount, but
-      at different root paths.
+    - The Django app constructs or stores a host path, but that path needs to be
+      passed into a containerized process.
+    - The host and container see the same data through a bind mount, but at
+      different root paths.
 
     Example mapping:
         Host:      /ngencerf-app/data/ngen-cal-data/foo/bar
         Container: /ngencerf/data/foo/bar
 
     Controlled by settings:
-        NGEN_CAL_MOUNT_POINT = container root (e.g. /ngencerf/data)
-        NGEN_CAL_DATA_PATH   = host root (e.g. /ngencerf-app/data/ngen-cal-data)
+        HOST_DATA_ROOT      = host root (e.g. /ngencerf-app/data/ngen-cal-data)
+        CONTAINER_DATA_ROOT = container root (e.g. /ngencerf/data)
 
     Behavior:
     - If the roots differ, replace the host root with the container root.
     - If they are the same, return the path unchanged.
-    - Fail fast if the input path is invalid or outside the expected root.
+    - Fail fast if the input path is invalid or outside the expected host root.
 
-    :param path: Absolute host path under NGEN_CAL_DATA_PATH
-    :return: Corresponding container path
+    :param path: Absolute host path under HOST_DATA_ROOT
+    :return: Corresponding container path under CONTAINER_DATA_ROOT
     :raises ValueError:
         - If the path is not absolute
         - If the path does not start with the expected host root
@@ -1515,8 +1545,8 @@ def map_path_to_container(path: str) -> str:
     if not path:
         return path
 
-    container_root = os.path.normpath(settings.NGEN_CAL_MOUNT_POINT)
-    host_root = os.path.normpath(settings.NGEN_CAL_DATA_PATH)
+    container_root = os.path.normpath(settings.CONTAINER_DATA_ROOT)
+    host_root = os.path.normpath(settings.HOST_DATA_ROOT)
     path = os.path.normpath(path)
 
     # Only translate if the roots are actually different
@@ -1531,7 +1561,7 @@ def map_path_to_container(path: str) -> str:
             )
 
         # Strip the host root and rebuild under the container root
-        relative_path = os.path.relpath(path, start=host_root)
+        relative_path = cast(str, os.path.relpath(path, start=host_root))
         return os.path.normpath(os.path.join(container_root, relative_path))
 
     # No translation needed

@@ -9,7 +9,8 @@ dependencies = [
     "tabulate~=0.10.0",
     "PyYAML~=6.0.3",
     "qrcode~=8.2",
-    "pillow~=12.2.0"
+    "pillow~=12.2.0",
+    "truststore~=0.10.4"
 ]
 
 [project.scripts]

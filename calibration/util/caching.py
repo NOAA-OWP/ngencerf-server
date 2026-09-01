@@ -1,25 +1,31 @@
 """
 caching.py
 
-Centralized caching utilities for static model data (Modules, Gages, OptimizationInputs, etc.)
-used throughout calibration, validation, and forecast processes.
+Centralized caching utilities for model data and generated configuration data
+used throughout calibration, validation, and forecast workflows.
 
 Caching Strategy
 ----------------
-Redis is used as the Django cache backend. All workers share the same cache
+Redis is used as the Django cache backend. All application workers share the
+same cached values.
 
 Behavior Summary
 ----------------
-- All cache lookups use Django’s Redis backend.
-- On cache miss, functions query the DB and store serialized data in Redis.
-- Since Redis is shared across workers, the first load benefits all workers.
-- No invalidation logic is required because this data is static for the lifetime
-  of the server.
+- Cache lookups use Django's configured cache backend.
+- On a cache miss, functions load data from the database, enums, or another
+  appropriate source and store the result in Redis.
+- Since Redis is shared across workers, data loaded by one worker is available
+  to all workers.
+- Most cached reference data is stored indefinitely because it changes rarely
+  during a deployment.
+- Some utilities explicitly update cached values or regenerate local files when
+  required.
 
-This ensures:
+This provides:
 - Shared high-speed caching across workers
-- No per-worker duplication of memory
-- Clean and consistent cached state
+- Reduced database and initialization work
+- No unnecessary per-worker duplication
+- Consistent cached reference data
 """
 import json
 import logging
@@ -30,8 +36,7 @@ import yaml
 from django.conf import settings
 from django.core.cache import cache
 
-from calibration.enums import PlotDefinitionsEnum, ForecastConfigEnum, HindcastConfigEnum
-from calibration.enums_vanilla import JobType
+from calibration.enums import PlotDefinitionsEnum, ForecastConfigEnum, JobType, HindcastConfigEnum
 from calibration.models import Module, ModuleGroup, Gage, CalibrationRun, ValidationRun, CalibrationFormulation, OptimizationInput, \
     ModulePropertyChoice, ModuleProperty
 from calibration.views.cache_prefix import CACHE_PREFIX
@@ -48,7 +53,7 @@ def get_cached_modules_with_groups() -> dict[str, Module]:
 
     Redis-backed cache provides global sharing across workers.
 
-    :return Returns a dict keyed by module name.
+    :return: Returns a dict keyed by module name.
     """
     modules = cache.get(_CACHED_MODULES_KEY)
     if modules is None:
@@ -78,7 +83,7 @@ def get_cached_module_groups() -> list[str]:
     Retrieve a list of active module group names, ordered by 'order',
     cached to avoid repeated queries.
 
-    - Cached in Django cache under MODULE_GROUPS_CACHE_KEY.
+    - Cached in Django cache under _MODULE_GROUPS_CACHE_KEY.
     - Ordered by the 'order' field from the DB.
 
     :return: List of module group names (strings).
@@ -94,11 +99,12 @@ def get_cached_module_groups() -> list[str]:
 
 def get_cached_modules_by_id() -> dict[int, Module]:
     """
-    Canonical accessor: ID → Module (authoritative module cache)
+    Return the cached modules keyed by module ID.
 
-    Redis provides shared global state
+    This derives the ID-based lookup from the canonical name-based module cache
+    returned by ``get_cached_modules_with_groups()``.
 
-    :return: Dict mapping {module.id → fully hydrated Module instance}.
+    :return: Dictionary mapping module IDs to fully hydrated Module instances.
     """
     modules_by_name = get_cached_modules_with_groups()
     return {m.id: m for m in modules_by_name.values()}
@@ -138,7 +144,8 @@ _CACHED_MODULE_PROPERTIES_KEY = f"{CACHE_PREFIX}cached_module_properties"
 
 def get_cached_module_properties() -> list[ModuleProperty]:
     """
-    Retrieve all ModuleProperty ORM objects, fully-hydrated for safe reuse.
+    Retrieve ModuleProperty ORM objects with the fields and module relationship
+    needed by current callers.
 
     These rows are treated as static for the lifetime of the server, so we cache
     them indefinitely. We select_related('module') and force-access the relation
@@ -169,21 +176,20 @@ _CACHED_MODULE_PROPERTY_CHOICES_KEY = f"{CACHE_PREFIX}cached_module_property_cho
 
 def get_cached_module_property_choices() -> list[ModulePropertyChoice]:
     """
-    Retrieve all ModulePropertyChoice ORM objects, fully-hydrated for safe reuse.
+    Retrieve ordered ModulePropertyChoice ORM objects from the shared cache.
 
-    These rows are treated as static for the lifetime of the server, so we cache
-    them indefinitely. We select_related('module_property') and force-access the
-    relation to avoid accidental lazy DB hits.
+    The rows are treated as static for the cache lifetime and are stored in
+    module-property and display order. Only fields needed by current callers
+    are loaded.
 
-    Ordering: we store them ordered, so callers can group without re-sorting.
-
-    :return: List of ModulePropertyChoice ORM objects.
+    :return: Module-property choices ordered by module property, sort order,
+             and ID.
     """
     choices = cache.get(_CACHED_MODULE_PROPERTY_CHOICES_KEY)
+
     if choices is None:
-        qs = (
+        choices = list(
             ModulePropertyChoice.objects
-            .select_related("module_property")
             .only(
                 "id",
                 "module_property_id",
@@ -193,15 +199,18 @@ def get_cached_module_property_choices() -> list[ModulePropertyChoice]:
                 "value_int",
                 "value_str",
             )
-            .order_by("module_property_id", "sort_order", "id")
+            .order_by(
+                "module_property_id",
+                "sort_order",
+                "id"
+            )
         )
-        choices = list(qs)
 
-        # Force evaluate related module_property to prevent lazy DB hits later
-        for c in choices:
-            _ = c.module_property_id
-
-        cache.set(_CACHED_MODULE_PROPERTY_CHOICES_KEY, choices, timeout=None)
+        cache.set(
+            _CACHED_MODULE_PROPERTY_CHOICES_KEY,
+            choices,
+            timeout=None
+        )
 
     return choices
 
@@ -211,20 +220,23 @@ _CACHED_GAGES_KEY = f"{CACHE_PREFIX}cached_gages"
 
 def get_cached_gages() -> dict[str, dict[str, str | float | int | None]]:
     """
-    Retrieve all active Gages from cache, falling back to the database on cache miss.
+    Retrieve all gages from cache, falling back to the database on a cache miss.
 
-    - Cached under CACHED_GAGES_KEY in Django cache.
+    - Cached under ``_CACHED_GAGES_KEY`` in Django's cache.
+    - Includes active and inactive gages so callers can inspect or update
+      ``is_active``.
     - Includes all gage attributes needed for lookups and display.
-    - Domain is normalized to 'domain' (instead of 'domain__name').
-    - Results are frozen as dicts (not ORM objects) for cheap reuse.
+    - Normalizes ``domain__name`` to ``domain``.
+    - Stores the results as dictionaries rather than ORM objects.
 
-    :return: Dict mapping {gage_id → dict of gage fields}.
+    :return: Dictionary mapping each gage ID to its cached field values.
+
     """
-    # Check if the gages are already cached
+    # Return the shared cached lookup when it has already been populated.
 
     gages_lookup = cache.get(_CACHED_GAGES_KEY)
     if gages_lookup is None:
-        # Fetch from DB and cache results as a dictionary
+        # Fetch all gages and cache them as a dictionary keyed by gage ID.
         gages = Gage.objects.all().values(
             'gage_id', 'agency', 'station_name', 'latitude', 'longitude',
             'altitude', 'nws_id', 'headwater_calibration', 'domain__name', 'is_active'
@@ -243,10 +255,11 @@ def update_and_get_cached_gage_status(gage_id: str, is_active: bool | None = Non
     """
     Update (or query) the cached 'is_active' flag for a gage.
 
-    - If is_active is provided, update the flag if needed.
-    - If is_active is None, just return the current state.
-    - Returns (gage_id, current_is_active) in either case.
-    - Returns None if the gage_id doesn't exist in the cached map.
+    This updates only the cached value; it does not update the database.
+
+    - If ``is_active`` is provided, the cached value is updated when necessary.
+    - If ``is_active`` is None, the current cached value is returned.
+    - Returns None when the gage ID is not present in the cached lookup.
 
     :param gage_id: ID of the gage to update/query
     :param is_active: Desired active state, or None to just query
@@ -348,58 +361,91 @@ def get_filtered_plot_definitions(
         first_match: bool = False
 ) -> list[dict[str, Any]] | dict[str, Any] | None:
     """
-    Retrieve filtered plot definitions for the specified run and plot name, with a case-insensitive match.
+    Retrieve filtered plot definitions for the specified run and optional plot
+    name.
 
-    Behavior:
-    - ValidationRun or CalibrationRun with automatic_validation → validation plots included.
-    - CalibrationRun with LSTM module → only plots with lstm_flag=True.
-    - Otherwise → plots must have a valid_optimizations list containing run.optimization.name.
+    Filtering behavior:
+      - Include calibration and validation plot definitions.
+      - For runs using an LSTM module, include only plots with
+        ``lstm_flag=True``.
+      - For other runs, include only plots whose ``valid_optimizations`` list
+        contains the run's optimization name.
+      - Match ``plot_name`` case-insensitively when it is provided.
 
-    :param run: The run object, which could be a calibration or validation run.
-    :param plot_name: The name of the plot to filter by (case-insensitive), or None to retrieve all valid plots.
-    :param first_match: If True, returns only the first matching plot definition as a dictionary, or None if no match.
-    :return: A list of dictionaries representing plot definitions that match the criteria, a single dictionary if
-        first_match is True, or None if no match is found.
+    :param run: Calibration or validation run for which plots are requested.
+    :param plot_name: Optional plot name to match case-insensitively.
+    :param first_match: If True, return only the first matching definition.
+    :return: A list of matching plot definitions, or the first matching
+             definition when ``first_match`` is True. Returns None when
+             ``first_match`` is True and no match exists.
     """
     cached_plot_definitions = PlotDefinitionsEnum.get_choices_with_fields(
-        fields=['name', 'display_name', 'description', 'valid_optimizations',
-                'job_type', 'location', 'filename_mask',
-                'timeseries_available', 'lstm_flag']
+        fields=[
+            "name",
+            "display_name",
+            "description",
+            "valid_optimizations",
+            "job_type",
+            "location",
+            "filename_mask",
+            "timeseries_available",
+            "lstm_flag",
+        ]
     )
 
-    have_lstm_flag = have_LSTM(run if isinstance(run, CalibrationRun) else run.calibration_run)
+    have_lstm_flag = have_LSTM(
+        run if isinstance(run, CalibrationRun) else run.calibration_run
+    )
 
     plot_name_lower = plot_name.lower() if plot_name else None
 
-    # Determine if validation plots should be included
-    include_validation_plots = isinstance(run, ValidationRun) or (
-            isinstance(run, CalibrationRun) and run.automatic_validation
+    # Both supported run types include calibration and validation plots.
+    include_validation_plots = isinstance(run, ValidationRun) or isinstance(
+        run,
+        CalibrationRun,
     )
 
-    optimization = run.optimization if isinstance(run, CalibrationRun) else run.calibration_run.optimization
+    optimization = (
+        run.optimization
+        if isinstance(run, CalibrationRun)
+        else run.calibration_run.optimization
+    )
 
     def matches_common_criteria(plot: dict[str, Any]) -> bool:
         return (
-                (plot_name_lower is None or plot['name'].lower() == plot_name_lower)
+                (
+                        plot_name_lower is None
+                        or plot["name"].lower() == plot_name_lower
+                )
                 and (
-                        plot['job_type'] == JobType.CALIBRATION.value
-                        or (include_validation_plots and plot['job_type'] == JobType.VALIDATION.value)
+                        plot["job_type"] == JobType.CALIBRATION.value
+                        or (
+                                include_validation_plots
+                                and plot["job_type"] == JobType.VALIDATION.value
+                        )
                 )
         )
 
     if have_lstm_flag:
-        # LSTM mode: only include plots with lstm_flag=True
         filtered_plots = [
-            plot for plot in cached_plot_definitions
-            if matches_common_criteria(plot) and plot.get('lstm_flag', False) is True
+            plot
+            for plot in cached_plot_definitions
+            if (
+                    matches_common_criteria(plot)
+                    and plot.get("lstm_flag", False) is True
+            )
         ]
     else:
         # Standard case: filter by valid_optimizations
         filtered_plots = [
-            plot for plot in cached_plot_definitions
-            if matches_common_criteria(plot)
-               and plot['valid_optimizations'] is not None
-               and optimization.name in json.loads(plot['valid_optimizations'])
+            plot
+            for plot in cached_plot_definitions
+            if (
+                    matches_common_criteria(plot)
+                    and plot["valid_optimizations"] is not None
+                    and optimization.name
+                    in json.loads(plot["valid_optimizations"])
+            )
         ]
 
     if first_match:
@@ -464,17 +510,22 @@ def generate_forecast_config_yaml(
         enum_class: type[ForecastConfigEnum] | type[HindcastConfigEnum] = ForecastConfigEnum
 ) -> str:
     """
-    Generate (once per server run, per enum type) a YAML mapping of forecast configurations.
+    Generate a YAML mapping of forecast configurations when it is not already
+    available for the current cache and local filesystem state.
+
+    A Redis cache flag avoids unnecessary regeneration across workers, while the
+    local file-existence check ensures that each container has the required file.
 
     Example output:
         short_range: [0, 23, 1, 18, 1]
         short_range_hawaii: [0, 12, 12, 48, 0.25]
 
-    Uses cached ForecastConfiguration data from the supplied enum class (no DB hit).
+    Configuration values are obtained from the supplied enum class without a
+    database query.
 
-    :param enum_class: ForecastConfigEnum for all active forecast configs,
-                       HindcastConfigEnum for hindcast-supported configs only.
-    :return: Full path of the generated forecast configuration YAML file.
+    :param enum_class: ForecastConfigEnum for active forecast configurations, or
+                       HindcastConfigEnum for hindcast-supported configurations.
+    :return: Full path to the generated configuration YAML file.
     """
     is_hindcast = enum_class is HindcastConfigEnum
 
@@ -487,8 +538,9 @@ def generate_forecast_config_yaml(
         else f"{_FORECAST_CFG_FILE_CACHE_KEY_BASE}_forecast"
     )
 
-    # Only generate once per server process, per config type
-    if cache.get(cache_key):
+    # Reuse the generated file only when both the shared cache flag and this
+    # container's local file are present.
+    if cache.get(cache_key) and os.path.isfile(output_file):
         return output_file
 
     os.makedirs(os.path.dirname(output_file), exist_ok=True)

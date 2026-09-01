@@ -86,11 +86,6 @@ def no_space_validator(value):
         raise serializers.ValidationError("This field must not contain spaces.")
 
 
-def greater_than_zero(value):
-    if value <= 0:
-        raise serializers.ValidationError("This field must be greater than 0.")
-
-
 class ModuleNameField(serializers.CharField):
     """
     Validates a single module name against the cached active module set.
@@ -384,6 +379,66 @@ class TimeRangeSerializerAllowEmpty(BaseSerializer):
     end_time = serializers.DateTimeField(required=False, allow_null=True)
 
 
+class TuningTimeControls(BaseSerializer):
+    simulation_start_time = serializers.DateTimeField(required=True, allow_null=False)
+    warmup_duration = serializers.IntegerField(required=True, min_value=0)
+    calibration_duration = serializers.IntegerField(required=True, min_value=1)
+    validation_window_gap = serializers.IntegerField(required=True, min_value=0)
+    validation_window_after_calibration = serializers.BooleanField(required=True)
+    validation_duration = serializers.IntegerField(required=True, min_value=1)
+
+    def __init__(
+            self,
+            *args,
+            allow_partial=False,
+            apply_defaults=False,
+            **kwargs
+    ):
+        super().__init__(*args, **kwargs)
+
+        # Applying defaults requires missing fields to be permitted.
+        if apply_defaults:
+            allow_partial = True
+
+        # Partial representations, such as loading or importing an incomplete
+        # calibration run, may omit controls that have not been saved.
+        if allow_partial:
+            for field in self.fields.values():
+                field.required = False
+                field.allow_null = True
+
+        # The tuning-tab load response supplies UI defaults for controls that
+        # have not yet been persisted. Defaults apply only to missing fields.
+        if apply_defaults:
+            self.fields['warmup_duration'].allow_null = False
+            self.fields['warmup_duration'].default = 12
+
+            self.fields['calibration_duration'].allow_null = False
+            self.fields['calibration_duration'].default = 60
+
+            self.fields['validation_window_gap'].allow_null = False
+            self.fields['validation_window_gap'].default = 0
+
+            self.fields['validation_window_after_calibration'].allow_null = False
+            self.fields['validation_window_after_calibration'].default = True
+
+            self.fields['validation_duration'].allow_null = False
+            self.fields['validation_duration'].default = 36
+
+
+class TuningTimeControlLimits(BaseSerializer):
+    simulation_start_time_min = serializers.DateTimeField()
+    simulation_start_time_max = serializers.DateTimeField()
+    warmup_duration_min = serializers.IntegerField()
+    warmup_duration_max = serializers.IntegerField()
+    validation_window_gap_min = serializers.IntegerField()
+    validation_window_gap_max = serializers.IntegerField()
+    calibration_duration_min = serializers.IntegerField()
+    calibration_duration_max = serializers.IntegerField()
+    validation_duration_min = serializers.IntegerField()
+    validation_duration_max = serializers.IntegerField()
+
+
 class CalibrationTimeControls(BaseSerializer):
     calibration_start_time = serializers.DateTimeField()
     calibration_end_time = serializers.DateTimeField()
@@ -517,10 +572,15 @@ class ModuleMetadataStaticSerializer(BaseSerializer):
 # Landing page
 ##################################
 
-class GetCalibrationJobsSummaryResponseSerializer(BaseSerializer):
-    running_count = serializers.IntegerField()
-    ready_count = serializers.IntegerField()
-    saved_count = serializers.IntegerField()
+class GetJobsSummaryResponseSerializer(BaseSerializer):
+    running_calibration_count = serializers.IntegerField()
+    ready_calibration_count = serializers.IntegerField()
+    saved_calibration_count = serializers.IntegerField()
+    running_forecast_count = serializers.IntegerField()
+    done_forecast_count = serializers.IntegerField()
+    running_hindcast_count = serializers.IntegerField()
+    done_hindcast_count = serializers.IntegerField()
+    done_hindcast_verification_count = serializers.IntegerField()
 
 
 class ValidationStatusSerializer(ValidationRunIdSerializer):
@@ -579,10 +639,16 @@ class LoadCalibrationJobSerializer(CalibrationRunIdSerializer):
 class JobElement(GenericMessageResponseSerializer):
     calibration_run_id = serializers.IntegerField(required=True, min_value=1)
     success = serializers.BooleanField(required=True, allow_null=False)
+    message_type = serializers.CharField(required=True)
+
+
+class MessageSummaryElement(GenericMessageResponseSerializer):
+    message_type = serializers.CharField(required=True)
 
 
 class CalibrationRunListResponse(BaseSerializer):
     jobs = JobElement(many=True, required=True, allow_null=False)
+    summaries = MessageSummaryElement(many=True, required=True, allow_null=False)
 
 
 class FooterResponseSerializer(BaseSerializer):
@@ -592,12 +658,6 @@ class FooterResponseSerializer(BaseSerializer):
     contact_email = serializers.CharField(required=True, allow_blank=True)
 
 
-def validate_automatic_validation(value):
-    if value is not True:
-        raise serializers.ValidationError("automatic_validation must always be True.")
-    return value
-
-
 class LoadCalibrationRunResponseSerializer(BaseSerializer):
     calibration_run_id = serializers.IntegerField(required=True, min_value=1)
     last_updated_on = serializers.DateTimeField(required=True)
@@ -605,7 +665,6 @@ class LoadCalibrationRunResponseSerializer(BaseSerializer):
     submit_date = serializers.DateTimeField(required=True, allow_null=True)
     gage = GageSerializer(required=True, allow_null=True)
     forcing_source = serializers.CharField(required=True, allow_null=True, validators=[enum_validator(ForcingSourceEnum)])
-    # forcing_source_actual = serializers.CharField(required=True, allow_null=True, validators=[enum_validator(ForcingSourceEnum)])
     observational_source = serializers.CharField(required=True, allow_null=True, validators=[enum_validator(ObservationalSourceEnum)])
     geopackage_source = serializers.CharField(required=True, allow_null=True, validators=[enum_validator(GeopackageSourceEnum)])
     geopackage_image_url = serializers.CharField(required=False)
@@ -617,15 +676,15 @@ class LoadCalibrationRunResponseSerializer(BaseSerializer):
     parameters_selected = serializers.BooleanField(required=True)
     use_sloth = serializers.BooleanField(default=False)
     sloth_parameters = SlothParameters(many=True, default=[])
-    automatic_validation = serializers.BooleanField(default=True, validators=[validate_automatic_validation])
     time_range = TimeRangeSerializerAllowEmpty(required=False)
     calibration_times = CalibrationTimeControls(required=False, allow_empty=True)
     validation_times = ValidationTimeControls(required=False, allow_empty=True)
+    time_controls = TuningTimeControls(required=False, allow_partial=True)
     num_catchments = serializers.IntegerField(required=True, allow_null=True)
     logging_config = LoggingConfigSerializer(required=False)
     objective_function = serializers.CharField(required=True, allow_null=True)
-    streamflow_threshold = serializers.FloatField(required=False, allow_null=True, validators=[greater_than_zero])
-    peak_flow_threshold = serializers.FloatField(required=False, allow_null=True, validators=[greater_than_zero])
+    threshold_categorical = serializers.FloatField(required=False, allow_null=True)
+    threshold_event = serializers.FloatField(required=False, allow_null=True, min_value=0, max_value=100)
     optimization = serializers.CharField(allow_blank=False, required=True, allow_null=True, validators=[enum_validator(OptimizationEnum)])
     optimization_inputs = OptimizationInputsSerializer(many=True, default=[])
     save_plot_iteration_frequency = serializers.IntegerField(min_value=1, required=True, allow_null=True)
@@ -789,14 +848,7 @@ class VerificationSortSerializer(SortSerializer):
 class GetGagesRequestSerializer(BaseSerializer):
     domain_name = serializers.CharField(required=False, allow_blank=True, validators=[enum_validator(DomainEnum)])
     include_archived = serializers.BooleanField(default=False, required=False)
-
-
-class GetVerificationGagesRequestSerializer(GetGagesRequestSerializer):
-    verification_job_type = serializers.ChoiceField(
-        choices=['forecast', 'hindcast'],
-        required=True,
-        allow_null=False,
-    )
+    for_comparison = serializers.BooleanField(default=False, required=False)
 
 
 class GetGagesResponseSerializer(BaseSerializer):
@@ -825,11 +877,6 @@ class HindcastPaginationSerializer(PaginationSerializer):
 
 class VerificationPaginationSerializer(PaginationSerializer):
     sort = VerificationSortSerializer(required=False, allow_null=True)
-    verification_job_type = serializers.ChoiceField(
-        choices=['forecast', 'hindcast'],
-        required=True,
-        allow_null=False,
-    )
 
 
 ##################################
@@ -1183,17 +1230,10 @@ class ValidateParametersResponseSerializer(BaseSerializer):
 
 class UploadUserParameterFile(BaseSerializer):
     calibration_run_id = serializers.IntegerField(required=True, min_value=1)
-    user_parameter_file = serializers.FileField(required=True)
-
-    def validate_user_parameter_file(self, value):
-        request = self.context.get('request')
-        files = request.FILES.getlist('user_parameter_file')
-        if len(files) != 1:
-            raise serializers.ValidationError("Only one parameter file should be uploaded.")
-        return value
+    user_parameter_files = serializers.ListField(child=serializers.FileField(required=True), required=True)
 
 
-class ParameterFileSerializer(BaseSerializer):
+class ParameterFileDataSerializer(BaseSerializer):
     param = serializers.CharField(required=True)
     min = serializers.FloatField(required=True)
     max = serializers.FloatField(required=True)
@@ -1201,10 +1241,16 @@ class ParameterFileSerializer(BaseSerializer):
     model = serializers.CharField(required=True)
 
 
+class ParameterFileSerializer(BaseSerializer):
+    name = serializers.CharField(required=True)
+    message = serializers.CharField(required=True, allow_null=True)
+    parameters = ParameterFileDataSerializer(many=True, required=True, allow_null=True)
+
+
 class UserParameterFileUploadResponse(BaseSerializer):
     message = serializers.CharField(required=True)
     calibration_run_id = serializers.IntegerField(required=True, min_value=1)
-    user_parameter_file = ParameterFileSerializer(many=True, required=True)
+    parsed_data = ParameterFileSerializer(many=True, required=True)
 
 
 # Module object from Data Services containing module parameters and output variables
@@ -1244,14 +1290,24 @@ class ModuleDataListSerializer(BaseSerializer):
 class SaveTuningRequestSerializer(BaseSerializer):
     calibration_run_id = serializers.IntegerField(required=True, min_value=1)
     parameters = SaveTuningParametersSerializer(many=True, required=False)
-    calibration_times = CalibrationTimeControls(required=False, allow_empty=False)
-    validation_times = ValidationTimeControls(required=False, allow_empty=False)
-    automatic_validation = serializers.BooleanField(default=True, validators=[validate_automatic_validation])
+    time_controls = TuningTimeControls(required=True)
 
 
 class SaveTuningResponseSerializer(GenericResponseSerializer):
     parameter_errors = serializers.JSONField(required=False)
     parameter_warnings = serializers.JSONField(required=False)
+
+
+class ValidateTuningTimesRequestSerializer(BaseSerializer):
+    calibration_run_id = serializers.IntegerField(required=True, min_value=1)
+    time_controls = TuningTimeControls(required=True)
+
+
+class ValidateTuningTimesResponseSerializer(GenericResponseSerializer):
+    time_errors = serializers.JSONField(required=False)
+    calibration_times = CalibrationTimeControls(required=False, allow_empty=False)
+    validation_times = ValidationTimeControls(required=False, allow_empty=False)
+    time_control_limits = TuningTimeControlLimits(required=False)
 
 
 class LoadTuningResponseSerializer(BaseSerializer):
@@ -1260,6 +1316,7 @@ class LoadTuningResponseSerializer(BaseSerializer):
     time_range = TimeRangeSerializerAllowEmpty(required=True)
     calibration_times = CalibrationTimeControls(required=False, allow_empty=True)
     validation_times = ValidationTimeControls(required=False, allow_empty=True)
+    time_controls = TuningTimeControls(required=True, apply_defaults=True)
     status = serializers.CharField(required=True, validators=[enum_validator(StatusEnum, allow_blank=False)])
 
 
@@ -1273,8 +1330,8 @@ class SaveOptimizationRequestSerializer(BaseSerializer):
     optimization_inputs = OptimizationInputsSerializer(many=True, required=False)
     optimization = serializers.CharField(allow_blank=False, required=False, validators=[enum_validator(OptimizationEnum)])
     objective_function = serializers.CharField(allow_blank=False, required=False)
-    streamflow_threshold = serializers.FloatField(required=False, validators=[greater_than_zero])
-    peak_flow_threshold = serializers.FloatField(required=False, validators=[greater_than_zero])
+    threshold_categorical = serializers.FloatField(required=False, allow_null=True)
+    threshold_event = serializers.FloatField(required=False, allow_null=True, min_value=0, max_value=100)
     stop_criteria = serializers.IntegerField(required=False, min_value=2)
     save_plot_iteration_frequency = serializers.IntegerField(min_value=1, required=False)
     save_output_iteration = serializers.BooleanField(required=False)
@@ -1386,16 +1443,14 @@ class GetStatusForCalibrationResponseSerializer(GenericResponseSerializer, Commo
 
 class GetStatusForVerificationResponseSerializer(CommonStatusFieldsMixin, CalibrationRunIdSerializer, VerificationRunIdSerializer):
     message = serializers.CharField(required=True)
-    forecast_run = GetStatusForForecastResponseSerializer(required=False, allow_null=False)
-    hindcast_run = GetStatusForHindcastResponseSerializer(required=False, allow_null=False)
+    hindcast_run = GetStatusForHindcastResponseSerializer(required=True, allow_null=False)
 
 
 class GetVerificationJobStatusResponseSerializer(CommonStatusFieldsMixin, VerificationRunIdSerializer):
-    forecast_run = GetStatusForForecastResponseSerializer(required=False, allow_null=False)
-    hindcast_run = GetStatusForHindcastResponseSerializer(required=False, allow_null=False)
+    hindcast_run = GetStatusForHindcastResponseSerializer(required=True, allow_null=False)
 
 
-class GetVerificationJobListItemSerializer(CommonStatusFieldsMixin, VerificationRunIdSerializer, ForecastOrHindcastRunIdSerializer):
+class GetVerificationJobListItemSerializer(CommonStatusFieldsMixin, VerificationRunIdSerializer, HindcastRunIdSerializer):
     pass
 
 
@@ -1430,26 +1485,32 @@ class GetIterationsResponseSerializer(GenericResponseSerializer):
 
 class CalibrationJobSlurmCallbackRequestSerializer(CalibrationRunIdSerializer):
     job_status = serializers.CharField(required=True, validators=[enum_validator(SlurmCallbackStatusEnum, allow_blank=False)])
+    slurm_job_id = serializers.IntegerField(required=True, allow_null=False)
 
 
 class ValidationJobSlurmCallbackRequestSerializer(ValidationRunIdSerializer):
     job_status = serializers.CharField(required=True, validators=[enum_validator(SlurmCallbackStatusEnum, allow_blank=False)])
+    slurm_job_id = serializers.IntegerField(required=True, allow_null=False)
 
 
 class ColdStartJobSlurmCallbackRequestSerializer(ColdStartRunIdSerializer):
     job_status = serializers.CharField(required=True, validators=[enum_validator(SlurmCallbackStatusEnum, allow_blank=False)])
+    slurm_job_id = serializers.IntegerField(required=True, allow_null=False)
 
 
 class ForecastJobSlurmCallbackRequestSerializer(ForecastRunIdSerializer):
     job_status = serializers.CharField(required=True, validators=[enum_validator(SlurmCallbackStatusEnum, allow_blank=False)])
+    slurm_job_id = serializers.IntegerField(required=True, allow_null=False)
 
 
 class HindcastJobSlurmCallbackRequestSerializer(HindcastRunIdSerializer):
     job_status = serializers.CharField(required=True, validators=[enum_validator(SlurmCallbackStatusEnum, allow_blank=False)])
+    slurm_job_id = serializers.IntegerField(required=True, allow_null=False)
 
 
 class VerificationJobSlurmCallbackRequestSerializer(VerificationRunIdSerializer):
     job_status = serializers.CharField(required=True, validators=[enum_validator(SlurmCallbackStatusEnum, allow_blank=False)])
+    slurm_job_id = serializers.IntegerField(required=False, allow_null=False)
 
 
 class RunCalibrationJob(CalibrationRunIdSerializer):
@@ -1582,12 +1643,11 @@ class GetColdStartJobsForConfigurationResponseSerializer(BaseSerializer):
 ##################################
 
 
-class CreateAndRunVerificationRequestSerializer(ForecastOrHindcastRunIdSerializer):
+class CreateAndRunVerificationRequestSerializer(HindcastRunIdSerializer):
     logging_config = LoggingConfigSerializer(required=False)
 
 
-class CreateAndRunVerificationResponseSerializer(GenericMessageWithIdResponseSerializer, ForecastOrHindcastRunIdSerializer,
-                                                 VerificationRunIdSerializer):
+class CreateAndRunVerificationResponseSerializer(GenericMessageWithIdResponseSerializer, HindcastRunIdSerializer, VerificationRunIdSerializer):
     status = serializers.CharField(validators=[enum_validator(StatusEnum, allow_blank=False)], required=True)
     submit_date = serializers.DateTimeField(required=True, allow_null=False)
 
@@ -1644,11 +1704,9 @@ class ExportResponseSerializer(BaseSerializer):
     job_name = serializers.CharField(required=True, allow_null=True, allow_blank=False, validators=[no_space_validator])
     use_sloth = serializers.BooleanField(default=False)
     sloth_parameters = SlothParameters(many=True, default=list)
-    automatic_validation = serializers.BooleanField(default=True, validators=[validate_automatic_validation])
-    calibration_times = CalibrationTimeControls(required=False, allow_empty=True)
-    validation_times = ValidationTimeControls(required=False, allow_empty=True)
-    streamflow_threshold = serializers.FloatField(required=False, allow_null=True, validators=[greater_than_zero])
-    peak_flow_threshold = serializers.FloatField(required=False, allow_null=True, validators=[greater_than_zero])
+    time_controls = TuningTimeControls(required=False, allow_partial=True)
+    threshold_categorical = serializers.FloatField(required=False, allow_null=True)
+    threshold_event = serializers.FloatField(required=False, allow_null=True, min_value=0, max_value=100)
     parameters = SaveTuningParametersSerializer(many=True, required=True)
     objective_function = serializers.CharField(required=True, allow_null=True)
     optimization_inputs = OptimizationInputsSerializer(many=True, default=list)
@@ -1672,11 +1730,9 @@ class ImportDataSerializer(BaseSerializer):
     sloth_parameters = SlothParameters(required=False, many=True, allow_empty=True)
     job_name = serializers.CharField(required=False, allow_null=True, allow_blank=False, validators=[no_space_validator])
     use_sloth = serializers.BooleanField(required=False, default=False)
-    automatic_validation = serializers.BooleanField(default=True, validators=[validate_automatic_validation])
-    calibration_times = CalibrationTimeControls(required=False, allow_empty=True)
-    validation_times = ValidationTimeControls(required=False, allow_empty=True)
-    streamflow_threshold = serializers.FloatField(required=False, allow_null=True, validators=[greater_than_zero])
-    peak_flow_threshold = serializers.FloatField(required=False, allow_null=True, validators=[greater_than_zero])
+    time_controls = TuningTimeControls(required=False, allow_partial=True)
+    threshold_categorical = serializers.FloatField(required=False, allow_null=True)
+    threshold_event = serializers.FloatField(required=False, allow_null=True, min_value=0, max_value=100)
     parameters = SaveTuningParametersSerializer(many=True, required=False, allow_missing_bounds=True)
     objective_function = serializers.CharField(required=False, allow_null=True)
     optimization_inputs = OptimizationInputsSerializer(many=True, required=False)
@@ -1915,6 +1971,28 @@ class MFAConfirmSetupSerializer(BaseSerializer):
 class LoginRequestSerializer(BaseSerializer):
     email = serializers.EmailField()
     password = serializers.CharField()
+
+
+class CreateLocalUserRequestSerializer(BaseSerializer):
+    email = serializers.EmailField(required=True)
+    first_name = serializers.CharField(required=False, allow_blank=True)
+    last_name = serializers.CharField(required=False, allow_blank=True)
+    password = serializers.CharField(required=True, allow_blank=False)
+
+
+class CreateLocalUserResponseSerializer(BaseSerializer):
+    message = serializers.CharField(required=True)
+    email = serializers.EmailField(required=True)
+
+
+class ChangePasswordRequestSerializer(BaseSerializer):
+    email = serializers.EmailField(required=False)
+    current_password = serializers.CharField(required=False, allow_blank=False)
+    new_password = serializers.CharField(required=True, allow_blank=False)
+
+
+class ChangePasswordResponseSerializer(BaseSerializer):
+    message = serializers.CharField(required=True)
 
 
 class MFAVerifySerializer(BaseSerializer):

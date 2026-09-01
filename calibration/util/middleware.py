@@ -8,8 +8,9 @@ from django.utils.deprecation import MiddlewareMixin
 
 logger = logging.getLogger(__name__)
 
-CALIBRATION_PREFIX = "/calibration/"
-AUTH_PREFIX = "/auth/"
+CALIBRATION_PREFIX = "/api/calibration/"
+AUTH_PREFIX = "/api/auth/"
+HEALTH_CHECK_PATH = "/api/health_check/"
 
 
 class TimingMiddleware:
@@ -32,6 +33,9 @@ class TimingMiddleware:
         """
         Measure timing for the request end-to-end and attempt to include DB time.
 
+        Health-check requests are intentionally not logged because AWS calls the
+        endpoint frequently and successful checks add noise without diagnostic value.
+
         :param request: The incoming HttpRequest object.
         :return: The generated HttpResponse object.
         """
@@ -40,6 +44,11 @@ class TimingMiddleware:
 
         # Let Django process the request (views + later middleware)
         response = self.get_response(request)
+
+        # Do not log successful health-check timing. Failed health checks are still
+        # visible through normal request/error logging outside this middleware.
+        if request.path == HEALTH_CHECK_PATH and response.status_code < 400:
+            return response
 
         # Measure total elapsed time
         total_elapsed = time.perf_counter() - request._start_time

@@ -10,8 +10,7 @@ from rest_framework.response import Response
 
 from calibration.enums import StatusEnum, ValidationType, ForecastConfigEnum, JobGenesis
 from calibration.models import ValidationRun
-from calibration.run_util.run_common import submit_job
-
+from calibration.run_util.job_lifecycle import launch_job
 from calibration.util.calibration_validators import EmptySerializer, CreateCalibrationRunResponseSerializer, ErrorResponseSerializer, \
     CreateValidationRequestSerializer, CreateAndRunValidationResponseSerializer, CreateForecastRequestSerializer, \
     CreateAndRunForecastResponseSerializer, CreateHindcastRequestSerializer, CreateAndRunHindcastResponseSerializer, \
@@ -22,7 +21,7 @@ from calibration.views.calibration_landing_views import logger, validate_forecas
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import handle_exceptions, get_user_email, validate_request, create_calibration_run_internal, validate_response, \
     get_elapsed_str, get_calibration_run, ResponseError, create_validation_run_internal, format_datetime, create_cold_start_run_internal, \
-    create_forecast_run_internal, get_job_description, get_cold_start_run, create_hindcast_run_internal, readonly_transaction, map_path_to_host
+    create_forecast_run_internal, get_job_description, get_cold_start_run, create_hindcast_run_internal, readonly_transaction
 
 
 @extend_schema(
@@ -65,7 +64,7 @@ def create_calibration_run(request: Request) -> Response:
         response = {
             'message': f'Calibration Job {run.id} created',
             'calibration_run_id': run.id,
-            'job_data_dir': map_path_to_host(run.job_data_dir)
+            'job_data_dir': run.job_data_dir
         }
 
         response_validator, error_response = validate_response(CreateCalibrationRunResponseSerializer, response)
@@ -172,7 +171,7 @@ def create_and_run_validation(request: Request) -> Response:
         iteration_id,
         validation_type=ValidationType.VALID_ITERATION
     )
-    submit_job(validation_run)
+    launch_job(validation_run)
 
     response = {
         'message': f'Validation Job {validation_run.id} created and submitted for Calibration Job {calibration_run.id}',
@@ -289,9 +288,9 @@ def create_and_run_forecast(request: Request) -> Response:
 
     if cold_start_run is not None:
         # The Forecast Job will be submitted automatically after the Cold Start Job finishes.
-        submit_job(cold_start_run, logging_config=logging_config)
+        launch_job(cold_start_run, logging_config=logging_config)
     else:
-        submit_job(forecast_run, logging_config=logging_config)
+        launch_job(forecast_run, logging_config=logging_config)
 
     if cold_start_run is not None:
         msg = (
@@ -501,9 +500,9 @@ def create_and_run_hindcast(request: Request) -> Response:
 
     if run_cold_start:
         # The Hindcast Job will be submitted automatically after the Cold Start Job finishes.
-        submit_job(cold_start_run, logging_config=logging_config)
+        launch_job(cold_start_run, logging_config=logging_config)
     else:
-        submit_job(hindcast_run, logging_config=logging_config)
+        launch_job(hindcast_run, logging_config=logging_config)
 
     if run_cold_start:
         msg = (

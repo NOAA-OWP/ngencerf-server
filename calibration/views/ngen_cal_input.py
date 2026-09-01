@@ -4,16 +4,16 @@ import logging
 import os
 from collections import defaultdict
 from datetime import datetime
-from typing import Any
+from typing import Any, TypeAlias
 
 import toml
 from datetimerange import DateTimeRange
+from django.conf import settings
 from django.db import transaction
 from django.db.models import F
-from toml import TomlEncoder
 
 from calibration.enums import StatusEnum, DataTypeEnum
-from calibration.enums_vanilla import NgenEnvironmentEnum
+from calibration.enums_vanilla import JobExecutionMode
 from calibration.models import CalibrationOptimizationInput, CalibrationStopCriteria, CalibrationSlothParam, \
     CalibrationParameter, CalibrationFormulation, CalibrationRun, CalibrationModulePropertyValue
 from calibration.util.caching import get_cached_optimization_inputs, have_LSTM, get_cached_modules_by_id, get_cached_module_properties
@@ -26,11 +26,8 @@ from calibration.views.calibration_secondary_data_views import should_generate_s
 from calibration.views.calibration_tuning_views import get_full_evaluation_date_range, validate_time_range_against_data, \
     validate_parameter_rules
 from calibration.views.called_from import called_from
-from calibration.views.common import TOKEN_NGEN_SCOPE, generate_custom_token, SLOTH, format_datetime, join_with_or, ErrorReport, readonly_transaction, \
-    map_path_to_container
+from calibration.views.common import TOKEN_NGEN_SCOPE, generate_custom_token, SLOTH, format_datetime, join_with_or, ErrorReport, readonly_transaction
 from calibration.views.data_services import get_observational_data_from_data_services
-from calibration.views.mpi_rules import get_mpi_nodes
-from cerfServer.settings import NGEN_ENVIRONMENT, NGEN_BMI_FORCING_WORK_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +58,7 @@ CONFIG_TEMPLATE = {
         "calibration_run_id": 0,
         "ngen_cerf": True,  # Indicate that we came from the ngenCerf server - Always true
         "auth_token": "",
+        "ngencerf_base_url": settings.NGENCERF_BASE_URL,
         "optimization_algorithm": None,
         "swarm_size": 0,
         "c1": 0,
@@ -96,8 +94,10 @@ CONFIG_TEMPLATE = {
         # Iteration interval to save plots
         # This entry is optional and specified with the default value.
         "save_plot_iter_freq": 0,
-        "streamflow_threshold": 0.0,
-        "peak_flow_threshold": 0.0,
+        "threshold_categorical": 0.0,
+        "threshold_categorical_type": 'absolute',
+        "threshold_event": 0.0,
+        "threshold_event_type": 'quantile',
         "station_name": "",
 
         # Parameter file, dynamically built based on user input
@@ -108,7 +108,7 @@ CONFIG_TEMPLATE = {
 
     "Forcing": {
         "forcing_provider": "",
-        "root_dir": NGEN_BMI_FORCING_WORK_DIR,
+        "root_dir": settings.NGEN_BMI_FORCING_WORK_DIR,
         "forcing_configuration": "",
         "forcing_dir": "",
         "forcing_static_dir": FORCING_STATIC_DIR,
@@ -146,6 +146,10 @@ CONFIG_TEMPLATE = {
     }
 }
 
+ConfigValue: TypeAlias = str | int | float | bool | None
+ConfigSection: TypeAlias = dict[str, ConfigValue]
+Config: TypeAlias = dict[str, ConfigSection]
+
 
 def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport, str | None]:
     """
@@ -177,7 +181,7 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport,
     logger.info(called_from())
 
     error_object = ErrorReport()
-    config: dict[str, dict[str, str | int | float | bool]] = {}
+    config: Config = {}
     config_file: str | None = None
 
     # -----------------------------
@@ -196,7 +200,7 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport,
             return error_object, None
 
         # Deepcopy config template
-        config: dict[str, dict[str, str | int | float | bool]] = copy.deepcopy(CONFIG_TEMPLATE)
+        config: Config = copy.deepcopy(CONFIG_TEMPLATE)
 
         general = config['General']
         module_properties = config['ModuleProperties']
@@ -204,7 +208,7 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport,
         datafile = config['DataFile']
         forcing = config['Forcing']
 
-        parallel = {
+        parallel: ConfigSection = {
             "parallel_ngen_exe": PARALLEL_NGEN_EXE,
             "partition_generator_exe": PARTITION_GENERATOR_EXE,
             "nprocs": None
@@ -406,53 +410,48 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport,
         job_data_dir = run.job_data_dir
         general['main_dir'] = job_data_dir
 
-        # Validate required calibration fields
-        required_calibration_fields = {
+        # Validate required time control fields
+        required_time_control_fields = {
             "calibration_start_period": run.calibration_start_period,
-            "calibration_end_period": run.calibration_end_period,
-            "calibration_eval_start_period": run.calibration_eval_start_period,
-            "calibration_eval_end_period": run.calibration_eval_end_period,
+            "warmup_duration": run.warmup_duration,
+            "calibration_duration": run.calibration_duration,
+            "validation_window_gap": run.validation_window_gap,
+            "validation_window_after_calibration": run.validation_window_after_calibration,
+            "validation_duration": run.validation_duration
         }
-        missing_calibration_fields = [name for name, value in required_calibration_fields.items() if value is None]
-
-        if missing_calibration_fields:
-            error_object.add_warning(f"Missing required calibration fields: {', '.join(missing_calibration_fields)}")
+        missing_time_control_fields = [name for name, value in required_time_control_fields.items() if value is None]
+        if missing_time_control_fields:
+            error_object.add_warning(f"Missing required time control fields: {', '.join(missing_time_control_fields)}")
         else:
-            calibration.update({
-                'calib_start_period': format_datetime(run.calibration_start_period),
-                'calib_end_period': format_datetime(run.calibration_end_period),
-                'calib_eval_start_period': format_datetime(run.calibration_eval_start_period),
-                'calib_eval_end_period': format_datetime(run.calibration_eval_end_period),
-            })
-
-        if run.automatic_validation:
-            # Validate required validation fields
-            required_validation_fields = {
+            # Validate required start and end period fields
+            # These are automatically calculated so they should exist when the time controls above are defined
+            required_start_end_period_fields = {
+                "calibration_end_period": run.calibration_end_period,
+                "calibration_eval_start_period": run.calibration_eval_start_period,
+                "calibration_eval_end_period": run.calibration_eval_end_period,
                 "validation_start_period": run.validation_start_period,
                 "validation_end_period": run.validation_end_period,
                 "validation_eval_start_period": run.validation_eval_start_period,
-                "validation_eval_end_period": run.validation_eval_end_period,
+                "validation_eval_end_period": run.validation_eval_end_period
             }
-            missing_validation_fields = [name for name, value in required_validation_fields.items() if value is None]
-
-            if missing_validation_fields:
-                error_object.add_warning(f"Missing required validation fields: {', '.join(missing_validation_fields)}")
+            missing_start_end_period_fields = [name for name, value in required_start_end_period_fields.items() if value is None]
+            if missing_start_end_period_fields:
+                error_object.add_warning(f"Unable to calculate time values: {', '.join(missing_start_end_period_fields)}")
             else:
-                calibration.update({
-                    'valid_start_period': format_datetime(run.validation_start_period),
-                    'valid_end_period': format_datetime(run.validation_end_period),
-                    'valid_eval_start_period': format_datetime(run.validation_eval_start_period),
-                    'valid_eval_end_period': format_datetime(run.validation_eval_end_period),
-                })
+                calibration['calib_start_period'] = format_datetime(run.calibration_start_period)
+                calibration['calib_end_period'] = format_datetime(run.calibration_end_period)
+                calibration['calib_eval_start_period'] = format_datetime(run.calibration_eval_start_period)
+                calibration['calib_eval_end_period'] = format_datetime(run.calibration_eval_end_period)
+                calibration['valid_start_period'] = format_datetime(run.validation_start_period)
+                calibration['valid_end_period'] = format_datetime(run.validation_end_period)
+                calibration['valid_eval_start_period'] = format_datetime(run.validation_eval_start_period)
+                calibration['valid_eval_end_period'] = format_datetime(run.validation_eval_end_period)
+                full_eval_start, full_eval_end = get_full_evaluation_date_range(
+                    run.calibration_eval_start_period, run.calibration_eval_end_period,
+                    run.validation_eval_start_period, run.validation_eval_end_period)
 
-                # Set full evaluation periods if both calibration and validation evaluation periods are present
-                if run.calibration_eval_start_period and run.calibration_eval_end_period:
-                    full_eval_start, full_eval_end = get_full_evaluation_date_range(
-                        run.calibration_eval_start_period, run.calibration_eval_end_period,
-                        run.validation_eval_start_period, run.validation_eval_end_period)
-
-                    calibration['full_eval_start_period'] = format_datetime(full_eval_start)
-                    calibration['full_eval_end_period'] = format_datetime(full_eval_end)
+                calibration['full_eval_start_period'] = format_datetime(full_eval_start)
+                calibration['full_eval_end_period'] = format_datetime(full_eval_end)
 
         if not is_missing(run.objective_function, 'Objective function', error_object, have_LSTM_flag=have_LSTM_flag):
             calibration['objective_function'] = run.objective_function.name.lower()
@@ -479,30 +478,50 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport,
             if all_input_names:
                 error_object.add_warning(f'Missing required optimization inputs for {run.optimization.name} - {list(all_input_names)}')
 
-        if not is_missing(run.save_plot_iteration_frequency, 'Plot iteration frequency', error_object, have_LSTM_flag=have_LSTM_flag):
-            calibration['save_plot_iter_freq'] = run.save_plot_iteration_frequency
+        save_plot_iteration_frequency: int | None = run.save_plot_iteration_frequency
+
+        if not is_missing(save_plot_iteration_frequency, 'Plot iteration frequency', error_object, have_LSTM_flag=have_LSTM_flag):
+            calibration['save_plot_iter_freq'] = save_plot_iteration_frequency
 
         # This field is not required from user
         calibration['save_output_iter'] = int(run.save_output_iteration or 0)
 
         calibration['restart'] = 0
 
-        stop_criteria = CalibrationStopCriteria.objects.filter(calibration_run=run).first()
-        if not is_missing(stop_criteria, 'Stop criteria (number of iterations)', error_object, have_LSTM_flag=have_LSTM_flag):
-            # We're assuming there is only 1 stop criteria record for now
-            calibration['number_iteration'] = stop_criteria.value
+        stop_criteria = CalibrationStopCriteria.objects.filter(
+            calibration_run=run
+        ).first()
 
-        if stop_criteria and run.save_plot_iteration_frequency is not None and (stop_criteria.value < run.save_plot_iteration_frequency):
-            error_object.add_warning(
-                f"The plot iteration frequency, {run.save_plot_iteration_frequency}, must be <= the stop criteria (number of iteration) {stop_criteria.value}")
+        if stop_criteria:
+            number_iteration = stop_criteria.value
+            assert isinstance(number_iteration, int)
+
+            calibration['number_iteration'] = number_iteration
+
+            if (
+                    save_plot_iteration_frequency is not None
+                    and number_iteration < save_plot_iteration_frequency
+            ):
+                error_object.add_warning(
+                    f"The plot iteration frequency, {save_plot_iteration_frequency}, "
+                    f"must be <= the stop criteria (number of iteration) "
+                    f"{number_iteration}"
+                )
+        else:
+            is_missing(
+                stop_criteria,
+                'Stop criteria (number of iterations)',
+                error_object,
+                have_LSTM_flag=have_LSTM_flag
+            )
 
         calibration['start_iteration'] = 0
 
-        if run.streamflow_threshold:
-            calibration['streamflow_threshold'] = run.streamflow_threshold
+        if run.threshold_categorical:
+            calibration['threshold_categorical'] = run.threshold_categorical
 
-        if run.peak_flow_threshold:
-            calibration['peak_flow_threshold'] = run.peak_flow_threshold
+        if run.threshold_event:
+            calibration['threshold_event'] = run.threshold_event / 100.0
 
         if run.use_sloth:
             sloth_params = list(
@@ -582,15 +601,21 @@ def ready_to_run(run: CalibrationRun, build: bool = False) -> tuple[ErrorReport,
         # Write parameter files when build is true and there were no param errors.
         # This intentionally allows writing with an empty params list (e.g., LSTM jobs),
         if not param_error and build:
-            calibration['calib_parameter_file'] = os.path.join(job_data_dir, 'calib_parameter_dir')
-            write_parameter_files(params, calibration['calib_parameter_file'])
+            calib_parameter_file = os.path.join(job_data_dir, 'calib_parameter_dir')
+            calibration['calib_parameter_file'] = calib_parameter_file
+            write_parameter_files(params, calib_parameter_file)
 
-        if build and NGEN_ENVIRONMENT == NgenEnvironmentEnum.PARALLEL_WORKS:
+        if build and settings.JOB_EXECUTION_MODE in {JobExecutionMode.SLURM, JobExecutionMode.SLURM_MOCK}:
             if run.num_catchments is None:
                 # Handle old jobs which might not have saved num_catchments
+                # At this point validation should already have ensured that a geopackage path is available.
                 geopackage_path = get_geopackage_file_path(run)
+                assert isinstance(geopackage_path, str)
+
                 catchments = list(get_geometry_from_gpkg(geopackage_path)['catchments'].keys())
                 run.num_catchments = len(catchments)
+
+            assert isinstance(run.num_catchments, int)
 
             config['Parallel'] = parallel
             run.mpi_nprocs = get_mpi_nodes(run.num_catchments)
@@ -656,7 +681,7 @@ def write_parameter_files(params: list[dict[str, str | float]], parameter_dir: s
         logger.info(f'CSV parameter file for model {model} saved to {parameter_file}')
 
 
-class CustomTomlEncoder(TomlEncoder):
+class CustomTomlEncoder(toml.TomlEncoder):
     def __init__(self):
         super().__init__()
         self._dict = dict  # Ensure TOML dictionaries serialize properly
@@ -709,19 +734,41 @@ def is_missing(value: Any, label: str, report: ErrorReport, have_LSTM_flag: bool
     return False
 
 
-# Global table of node type rules.
-# Each pair represents [max_catchments, node_type]
-NODE_TYPE_RULES = [
-    [500, 'c5n-9xlarge'],
-    [-1, 'r8a-12xlarge']
-]
-
-
 def get_node_type(num_catchments: int) -> str:
-    node_type = None
-    for max_catchments, node_type in NODE_TYPE_RULES:
-        if max_catchments == -1 or num_catchments <= max_catchments:
-            break
+    """
+    Select the Slurm partition/node type for a calibration job.
 
-    logger.info(f'{num_catchments} catchments using node type {node_type}')
-    return node_type
+    Rules are loaded from settings.SLURM_NODE_TYPE_RULES and evaluated in order.
+    The first rule whose max_catchments value is -1 or greater than/equal to
+    num_catchments is selected.
+
+    :param num_catchments: Number of catchments in the calibration domain.
+    :return: Configured Slurm partition/node type.
+    :raises ValueError: If no configured rule matches.
+    """
+    for max_catchments, node_type in settings.SLURM_NODE_TYPE_RULES:
+        if max_catchments == -1 or num_catchments <= max_catchments:
+            logger.info(f'{num_catchments} catchments using node type {node_type}')
+            return node_type
+
+    raise ValueError(f'No node type rule matched for {num_catchments} catchments')
+
+
+def get_mpi_nodes(num_catchments: int) -> int:
+    """
+    Select the MPI node count for a calibration job.
+
+    Rules are loaded from settings.MPI_NODE_RULES and evaluated in order.
+    The first rule whose max_catchments value is -1 or greater than/equal to
+    num_catchments is selected.
+
+    :param num_catchments: Number of catchments in the calibration domain.
+    :return: Configured MPI node/process count.
+    :raises ValueError: If no configured rule matches.
+    """
+    for max_catchments, mpi_nodes in settings.MPI_NODE_RULES:
+        if max_catchments == -1 or num_catchments <= max_catchments:
+            logger.info(f"{num_catchments} catchments using {mpi_nodes} nodes")
+            return mpi_nodes
+
+    raise ValueError(f"No MPI node rule matched for {num_catchments} catchments")

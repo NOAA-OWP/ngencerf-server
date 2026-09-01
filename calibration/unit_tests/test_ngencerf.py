@@ -20,9 +20,9 @@ from calibration.views.common import get_calibration_run
 
 class CerfUnitTest(TestCase):
     """
-    This function initializes the calibration database with a mockup test data in a 
+    This function initializes the calibration database with a mockup test data in a
     calibration run record, and returns the run ID for the unit tests' use. It accomplishes
-    this by importing Import_test_data/import_complete.json file. 
+    this by importing Import_test_data/import_complete.json file.
     """
 
     # def setUp(self):
@@ -45,7 +45,7 @@ class CerfUnitTest(TestCase):
         f = open(Path(settings.BASE_DIR) / 'Import_test_data/import_complete.json')
         # returns JSON object as a dictionary
         data = json.load(f)
-        request = factory.post('/calibration/import/', data, format='json')
+        request = factory.post("/api/calibration/import/", data, format="json")
         force_authenticate(request, user=user)
         response = calibration.views.calibration_landing_views.import_job(request)
         response.render()
@@ -60,14 +60,16 @@ class CerfUnitTest(TestCase):
         run.status = status
         run.save()
 
-    # Tests the /calibration/get_plot_names/ end-point
+    # Tests the /api/calibration/get_plot_names/  end-point
     def test_plot_definitions_endpoint(self):
         calibration_run_id = self.run_id
         print(f"Executing test_plot_definitions_endpoint(): Calibration run ID = {self.run_id}")
         client = APIClient()
         user = User.objects.get(username='admin')
         client.force_authenticate(user=user)
-        response = client.get(f"/calibration/get_plot_names/?calibration_run_id={calibration_run_id}")
+        response = client.get(
+            f"/api/calibration/get_plot_names/?calibration_run_id={calibration_run_id}"
+        )
         # check if transaction was successful
         self.assertEqual(response.status_code, 200)
 
@@ -96,7 +98,9 @@ class CerfUnitTest(TestCase):
         user = User.objects.get(username='admin')
         if not user:
             user = User.objects.create_user('admin', 'test@...', 'tester')
-        request = factory.get(f"/calibration/get_plot_names/?calibration_run_id={calibration_run_id}")
+        request = factory.get(
+            f"/api/calibration/get_plot_names/?calibration_run_id={calibration_run_id}"
+        )
         force_authenticate(request, user=user)
         response = calibration_plot_views.get_plot_names(request)
         response.render()

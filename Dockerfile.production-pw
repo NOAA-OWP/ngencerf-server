@@ -1,10 +1,12 @@
+# syntax=docker/dockerfile:1.4
+
 ############################################################################
 # Change/Verify these values when adopting this Dockerfile into another org:
 #   GH_ORG, IMAGE_NAMESPACE,
 #   DATA_ASSIMILATION_ORG, DATA_ASSIMILATION_REF,
 #   EWTS_ORG, EWTS_REF,
 #   MSW_MGR_ORG, MSW_MGR_REF,
-#   NGEN_ORG, NGEN_REF
+#   NGEN_ORG, NGEN_REF,
 #   NGEN_FORCING_ORG, NGEN_FORCING_REF
 ############################################################################
 
@@ -23,13 +25,27 @@ ARG NGEN_ORG=${GH_ORG}
 ARG NGEN_REF=development
 ARG NGEN_FORCING_ORG=${GH_ORG}
 ARG NGEN_FORCING_REF=development
+
+############################################################################
+# Image selection
 ############################################################################
 
-# Image selection
-ARG BASE_REPO=rockylinux
-ARG BASE_TAG=8
+ARG GO_IMAGE=golang:1.25.11-bookworm
+ARG BASE_REPO=python
+ARG BASE_TAG=3.12-slim-bookworm
+ARG SINGULARITY_VERSION=4.4.2
+
+# SingularityCE 4.4 requires Go 1.25.6 or newer. Use the official Go
+# Bookworm image as the build-toolchain source rather than Debian's older
+# golang-go package.
+FROM ${GO_IMAGE} AS go-toolchain
 
 FROM ${BASE_REPO}:${BASE_TAG}
+
+# Make the current Go toolchain available while building SingularityCE.
+COPY --from=go-toolchain /usr/local/go /usr/local/go
+
+ENV PATH="/usr/local/go/bin:${PATH}"
 
 # Re-expose args after FROM for the remaining build stage
 # Keeps whatever value was already set
@@ -45,6 +61,7 @@ ARG NGEN_ORG
 ARG NGEN_REF
 ARG NGEN_FORCING_ORG
 ARG NGEN_FORCING_REF
+ARG SINGULARITY_VERSION
 
 # OCI Metadata Arguments
 ARG BASE_REPO
@@ -90,98 +107,140 @@ LABEL org.opencontainers.image.base.name="${BASE_NAME}" \
     io.${IMAGE_NAMESPACE}.ngen.forcing.revision="${NGEN_FORCING_REVISION}"
 
 # Install build and runtime dependencies
+#
+# Go is copied from the official Go image above because SingularityCE 4.4
+# requires a newer Go release than Debian 12 provides.
 RUN set -eux && \
-    dnf install -y yum-utils epel-release && \
-    dnf install -y \
-        redis \
-        # Singularity build requirements
-        golang \
-        libseccomp-devel \
-        squashfs-tools \
-        cryptsetup \
-        wget \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        gnupg \
+        # SingularityCE build and runtime requirements
+        autoconf \
+        automake \
+        cryptsetup-bin \
+        fuse2fs \
+        libfuse-dev \
+        libglib2.0-dev \
+        libseccomp-dev \
+        libssl-dev \
+        libtool \
         make \
-        gcc \
-        openssl-devel \
-        glib2-devel \
+        pkg-config \
+        # Provides unsquashfs for reading files directly from SIF root filesystems
+        squashfs-tools \
+        uidmap \
+        wget \
+        zlib1g-dev \
+        # General utilities
         findutils \
         file \
         jq \
-        libpq \
         git \
-        openssl openssl-devel \
-        # Python 3.11 stack
-        python3.11 python3.11-libs python3.11-devel \
-        python3.11-pip \
-        python3.11-setuptools \
+        openssl \
+        # PostgreSQL requirements
+        libpq5 \
+        libpq-dev \
+        # GDAL/Fiona requirements
+        gdal-bin \
+        libgdal-dev \
+        libproj-dev \
+        proj-data \
         # partitionGenerator requirements
+        build-essential \
         cmake \
-        gcc-c++ \
-        gcc-gfortran \
-        sqlite-devel \
-        udunits2 udunits2-devel \
-        openmpi openmpi-devel \
-        dnf-plugins-core && \
-    dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo && \
-    dnf install -y docker-ce-cli && \
-    dnf clean all && \
-    # Build and install SingularityCE 3.11.4 from source
-    git clone https://github.com/sylabs/singularity.git /tmp/singularity && \
+        g++ \
+        gcc \
+        gfortran \
+        libsqlite3-dev \
+        udunits-bin \
+        libudunits2-0 \
+        libudunits2-dev \
+        openmpi-bin \
+        libopenmpi-dev && \
+    install -m 0755 -d /etc/apt/keyrings && \
+    curl -fsSL https://download.docker.com/linux/debian/gpg \
+        | gpg --dearmor -o /etc/apt/keyrings/docker.gpg && \
+    chmod a+r /etc/apt/keyrings/docker.gpg && \
+    . /etc/os-release && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian ${VERSION_CODENAME} stable" \
+        > /etc/apt/sources.list.d/docker.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        docker-ce-cli && \
+    rm -rf /var/lib/apt/lists/*
+
+############################################################################
+# SingularityCE
+############################################################################
+
+# Build SingularityCE separately so dependency installation remains cached
+# when only the SingularityCE version or build steps change.
+#
+# libsubid support is disabled because the server does not need NSS-based
+# subordinate UID/GID configuration when reading or executing SIF images.
+RUN set -eux && \
+    go version && \
+    git clone --depth 1 --branch "v${SINGULARITY_VERSION}" \
+        https://github.com/sylabs/singularity.git /tmp/singularity && \
     cd /tmp/singularity && \
-    git checkout v3.11.4 && \
     git submodule update --init --recursive && \
-    ./mconfig && \
-    make -C builddir && \
+        ./mconfig --without-libsubid && \
+    make -C builddir -j "$(nproc)" && \
     make -C builddir install && \
+    singularity version && \
     cd / && \
     rm -rf /tmp/singularity
 
-
 # Install Boost
 ARG BOOST_VERSION=1.86.0
-RUN --mount=type=cache,target=/root/.cache/cmake,id=cmake-boost \
-    set -eux && \
-    curl --location --output boost.tar.gz "https://archives.boost.io/release/${BOOST_VERSION}/source/boost_${BOOST_VERSION//./_}.tar.gz" && \
+
+RUN set -eux && \
+    BOOST_VERSION_UNDERSCORE="$(printf '%s' "$BOOST_VERSION" | tr . _)" && \
+    curl --location --output boost.tar.gz \
+        "https://archives.boost.io/release/${BOOST_VERSION}/source/boost_${BOOST_VERSION_UNDERSCORE}.tar.gz" && \
     mkdir -p /tmp/boost-src && \
     tar --extract --directory /tmp/boost-src --strip-components=1 --file boost.tar.gz && \
     rm boost.tar.gz && \
     cd /tmp/boost-src && \
     ./bootstrap.sh --prefix=/opt/boost --with-libraries=system,filesystem,serialization && \
-    ./b2 install -j$(nproc) && \
-    cd / && rm -rf /tmp/boost-src
+    ./b2 install -j "$(nproc)" && \
+    cd / && \
+    rm -rf /tmp/boost-src
 
 # Install Python virtual environment
 ENV VIRTUAL_ENV=/ngencerf/ngencerf-python
 ENV PATH=${VIRTUAL_ENV}/bin:${PATH}
 
-RUN --mount=type=cache,target=/root/.cache/pip,id=pip-cache \
+RUN --mount=type=cache,target=/root/.cache/pip,id=pip-cache-bookworm \
     set -eux && \
-    python3.11 -m venv ${VIRTUAL_ENV}
+    python -m venv ${VIRTUAL_ENV}
 
 WORKDIR /ngencerf/ngencerf-server/
 
 # Pre-copy requirements for better caching
 COPY requirements.txt .
 
-RUN --mount=type=cache,target=/root/.cache/pip,id=pip-cache \
+RUN --mount=type=cache,target=/root/.cache/pip,id=pip-cache-bookworm \
     set -eux && \
-    pip3 install --upgrade pip && \
-    pip3 install -r requirements.txt && \
+    pip install --upgrade pip && \
+    pip install -r requirements.txt && \
     # ASGI server deps (kept out of base requirements to avoid forcing them on dev envs)
-    pip3 install gunicorn uvicorn && \
+    pip install gunicorn uvicorn && \
     rm -f requirements.txt
 
 # Build and install EWTS (required by ngen's CMakeLists.txt: find_package(ewts CONFIG REQUIRED))
 ENV EWTS_PREFIX=/opt/ewts
 
 ENV CPLUS_INCLUDE_PATH=/opt/boost/include
-# MPI binaries live in /usr/lib64/openmpi/bin/ on Rocky 8
-ENV PATH="${PATH}:/usr/lib64/openmpi/bin/"
+# OpenMPI binaries are available on PATH through Debian packages.
 
 ARG EWTS_CACHE_BUST=1
-RUN --mount=type=cache,target=/root/.cache/cmake,id=cmake-ewts \
-    --mount=type=cache,target=/root/.cache/pip,id=pip-cache \
+RUN --mount=type=cache,target=/root/.cache/cmake,id=cmake-ewts-bookworm \
+    --mount=type=cache,target=/root/.cache/pip,id=pip-cache-bookworm \
     set -eux && \
+    echo "EWTS cache bust: ${EWTS_CACHE_BUST}" && \
     ewts_dir="$(mktemp -d)" && \
     git clone --depth 1 -b "${EWTS_REF}" \
         "https://github.com/${EWTS_ORG}/nwm-ewts.git" "${ewts_dir}" \
@@ -201,9 +260,12 @@ RUN --mount=type=cache,target=/root/.cache/cmake,id=cmake-ewts \
 # Build partitionGenerator
 
 WORKDIR /ngencerf/ngen-sparse
+# Cache-bust on the resolved ngen commit so a ref update isn't masked by a cached layer
+ARG NGEN_CACHE_BUST=1
 RUN --mount=type=cache,target=/ngencerf/partitionGenerator_build,id=partition-generator-build \
-    --mount=type=cache,target=/root/.cache/cmake,id=cmake-cache \
+    --mount=type=cache,target=/root/.cache/cmake,id=cmake-cache-bookworm \
     set -eux && \
+    echo "ngen cache bust: ${NGEN_CACHE_BUST}" && \
     # Clone only the required directories; allow branch, tag, or commit refs
     git clone --filter=blob:none --no-checkout --sparse "https://github.com/${NGEN_ORG}/ngen.git" . && \
     (git fetch --depth 1 origin "${NGEN_REF}" \
@@ -244,11 +306,18 @@ RUN --mount=type=cache,target=/ngencerf/partitionGenerator_build,id=partition-ge
 
 WORKDIR /ngencerf/ngencerf-server/
 
-ARG CACHE_BUST=1
-RUN set -eux && \
-    echo $CACHE_BUST && pip3 install "git+https://github.com/${MSW_MGR_ORG}/nwm-msw-mgr.git@${MSW_MGR_REF}" && \
-    echo $CACHE_BUST && pip3 install "git+https://github.com/${DATA_ASSIMILATION_ORG}/nwm-data-assimilation.git@${DATA_ASSIMILATION_REF}" && \
-    pip3 cache purge
+# Per-dependency cache-bust: CI passes the resolved commit SHA, so a stale
+# Docker layer can't reinstall an older revision (see .github/workflows/cicd.yml)
+ARG MSW_MGR_CACHE_BUST=1
+ARG DATA_ASSIMILATION_CACHE_BUST=1
+RUN --mount=type=cache,target=/root/.cache/pip,id=pip-cache-bookworm \
+    set -eux && \
+    echo "nwm-msw-mgr cache bust: ${MSW_MGR_CACHE_BUST}" && \
+    python -m pip install \
+        "git+https://github.com/${MSW_MGR_ORG}/nwm-msw-mgr.git@${MSW_MGR_REF}" && \
+    echo "nwm-data-assimilation cache bust: ${DATA_ASSIMILATION_CACHE_BUST}" && \
+    python -m pip install \
+        "git+https://github.com/${DATA_ASSIMILATION_ORG}/nwm-data-assimilation.git@${DATA_ASSIMILATION_REF}"
 
 # Get AWS cert for database
 ENV RDS_CERT_DIR=/ngencerf/aws_cert
@@ -260,9 +329,11 @@ RUN mkdir -p $RDS_CERT_DIR && \
 # Should parallel similar functionality in the run_cerf.sh
 COPY .git .git
 
-# Create git_info files for server and nwm-msw-mgr
+# Create git_info files for server, nwm-msw-mgr, and nwm-data-assimilation
 RUN set -eux && \
     # ----- Server git_info -----
+    # Ensure local tag metadata includes all remote tags before creating git_info.
+    git fetch --force --tags origin '+refs/tags/*:refs/tags/*' && \
     # Get the remote URL from Git configuration
     repo_url=$(git config --get remote.origin.url) && \
     # Extract the repo name (everything after the last slash) and remove any trailing .git
@@ -279,7 +350,7 @@ RUN set -eux && \
       --arg message "$(git log -1 --pretty=format:'%s' | tr '\n' ';')" \
       --arg build_date "$(date -u +'%Y-%m-%d %H:%M:%S UTC')" \
       "{\"$key\": {commit_hash: \$commit_hash, branch: \$branch, tags: \$tags, author: \$author, commit_date: \$commit_date, message: \$message, build_date: \$build_date}}" \
-      > $GIT_INFO_PATH && \
+      > "$GIT_INFO_PATH" && \
     \
     # ----- nwm-msw-mgr git_info -----
     GIT_INFO_PATH="/ngencerf/ngencerf-server/nwm-msw-mgr_git_info.json" && \
@@ -287,12 +358,13 @@ RUN set -eux && \
     git init "$tmpdir" && \
     cd "$tmpdir" && \
     git remote add origin "https://github.com/${MSW_MGR_ORG}/nwm-msw-mgr.git" && \
+    git fetch --force --tags origin '+refs/tags/*:refs/tags/*' && \
     (git fetch --depth 1 origin "${MSW_MGR_REF}" \
      || git fetch --depth 1 origin "refs/tags/${MSW_MGR_REF}:refs/tags/${MSW_MGR_REF}" \
      || git fetch origin "${MSW_MGR_REF}" \
      || git fetch origin "refs/tags/${MSW_MGR_REF}:refs/tags/${MSW_MGR_REF}") && \
     git checkout FETCH_HEAD && \
-    # detect branch vs tag vs bare SHA for git_info metadata
+    # Detect branch vs tag vs bare SHA for git_info metadata
     branch=$(git branch -r --contains HEAD 2>/dev/null \
              | grep -v '\->' | sed 's|origin/||' | head -n1 | xargs) && \
     branch=${branch:-""} && \
@@ -306,8 +378,39 @@ RUN set -eux && \
       --arg message "$(git log -1 --pretty=format:'%s' | tr '\n' ';')" \
       --arg build_date "$(date -u +'%Y-%m-%d %H:%M:%S UTC')" \
       '{"nwm-msw-mgr": {commit_hash: $commit_hash, branch: $branch, tags: $tags, author: $author, commit_date: $commit_date, message: $message, build_date: $build_date}}' \
-      > $GIT_INFO_PATH && \
-    cd / && rm -rf "$tmpdir"
+      > "$GIT_INFO_PATH" && \
+    cd / && \
+    rm -rf "$tmpdir" && \
+    \
+    # ----- nwm-data-assimilation git_info -----
+    GIT_INFO_PATH="/ngencerf/ngencerf-server/nwm-data-assimilation_git_info.json" && \
+    tmpdir=$(mktemp -d) && \
+    git init "$tmpdir" && \
+    cd "$tmpdir" && \
+    git remote add origin "https://github.com/${DATA_ASSIMILATION_ORG}/nwm-data-assimilation.git" && \
+    git fetch --force --tags origin '+refs/tags/*:refs/tags/*' && \
+    (git fetch --depth 1 origin "${DATA_ASSIMILATION_REF}" \
+     || git fetch --depth 1 origin "refs/tags/${DATA_ASSIMILATION_REF}:refs/tags/${DATA_ASSIMILATION_REF}" \
+     || git fetch origin "${DATA_ASSIMILATION_REF}" \
+     || git fetch origin "refs/tags/${DATA_ASSIMILATION_REF}:refs/tags/${DATA_ASSIMILATION_REF}") && \
+    git checkout FETCH_HEAD && \
+    # Detect branch vs tag vs bare SHA for git_info metadata
+    branch=$(git branch -r --contains HEAD 2>/dev/null \
+             | grep -v '\->' | sed 's|origin/||' | head -n1 | xargs) && \
+    branch=${branch:-""} && \
+    tags=$(git tag --points-at HEAD 2>/dev/null | tr '\n' ' ') && \
+    jq -n \
+      --arg commit_hash "$(git rev-parse HEAD)" \
+      --arg branch "$branch" \
+      --arg tags "$tags" \
+      --arg author "$(git log -1 --pretty=format:'%an')" \
+      --arg commit_date "$(date -u -d @$(git log -1 --pretty=format:'%ct') +'%Y-%m-%d %H:%M:%S UTC')" \
+      --arg message "$(git log -1 --pretty=format:'%s' | tr '\n' ';')" \
+      --arg build_date "$(date -u +'%Y-%m-%d %H:%M:%S UTC')" \
+      '{"nwm-data-assimilation": {commit_hash: $commit_hash, branch: $branch, tags: $tags, author: $author, commit_date: $commit_date, message: $message, build_date: $build_date}}' \
+      > "$GIT_INFO_PATH" && \
+    cd / && \
+    rm -rf "$tmpdir"
 
 # Remove .git directory
 RUN rm -rf .git
@@ -316,7 +419,10 @@ RUN rm -rf .git
 COPY . /ngencerf/ngencerf-server/
 
 # Fetch bmi_forcing_templates into an internal, non-mounted path to be copied at runtime by runCerf.sh
+# Cache-bust on the resolved ngen-forcing commit so a ref update isn't masked by a cached layer
+ARG NGEN_FORCING_CACHE_BUST=1
 RUN set -eux && \
+    echo "ngen-forcing cache bust: ${NGEN_FORCING_CACHE_BUST}" && \
     PREBUILT_DIR="/ngencerf/prebuilt/bmi_forcing_templates" && \
     NGEN_FORCING_URL="https://github.com/${NGEN_FORCING_ORG}/ngen-forcing.git" && \
     \
@@ -346,12 +452,38 @@ RUN set -eux && \
     cd /ngencerf/ngencerf-server && \
     rm -rf tmp-ngen-forcing || true
 
-# Build CLI executable in cli/dist
-RUN cli/build_cli.sh
+# NOTE:
+# CLI builds are now performed outside this Dockerfile.
+# The prebuilt CLI download artifacts must already exist in the Docker build context
+# before COPY . /ngencerf/ngencerf-server/ runs.
+#
+# Expected files:
+#   downloads/latest/linux/ngencerf
+#   downloads/latest/macos/ngencerf
+#   downloads/latest/windows/ngencerf.exe
+#
+
+# Collect static files for production
+#
+# collectstatic must run after the prebuilt CLI files have been copied into
+# /ngencerf/ngencerf-server/downloads.
+#
+# It copies those files into STATIC_ROOT so WhiteNoise can serve them when
+# DEBUG=False.
+#
+# Guard: fail the build if ANY platform's CLI binary is missing from the build
+# context (a build-cli matrix leg failed, or the artifact download dropped it).
+# We use `test -f` rather than `manage.py findstatic` because findstatic exits 0
+# even when a file is NOT found (Django 5.2), so it can't fail the build; test -f
+# is a real check and costs no Django startup.
+RUN set -eux && \
+    test -f downloads/latest/linux/ngencerf && \
+    test -f downloads/latest/macos/ngencerf && \
+    test -f downloads/latest/windows/ngencerf.exe && \
+    python manage.py collectstatic --noinput --verbosity 2
 
 # Copy additional configuration files
 COPY ./cerfserver-docker.env /ngencerf/ngencerf-server/cerfserver.env
-COPY ./cerfServer/__local_settings_prod_pw.py /ngencerf/ngencerf-server/cerfServer/local_settings.py
 
 # Set the entry point and expose the application port
 ENTRYPOINT [ "/ngencerf/ngencerf-server/runCerf.sh" ]

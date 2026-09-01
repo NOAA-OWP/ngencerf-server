@@ -1,7 +1,7 @@
-import csv
 import logging
 import math
 import os
+import time
 import traceback
 from collections import deque
 from datetime import timedelta
@@ -10,11 +10,12 @@ from operator import attrgetter
 from typing import cast, Any
 
 import pandas as pd
+from datetimerange import DateTimeRange
 from django.db import transaction
 from django.utils.timezone import now
 
 from calibration.enums import OptimizationEnum, ValidationMetricPeriod, ValidationType, MetricEnum
-from calibration.enums_vanilla import SecondaryDataEnum
+from calibration.enums_vanilla import SecondaryDataEnum, JobExecutionMode
 from calibration.models import Iteration, CalibrationRun, IterationMetric, IterationParameter, CalibrationParameter, ValidationRun, \
     PerformanceMetrics, ValidationMetrics, NWMRetrospectiveMetrics, IterationResult, ColdStartRun, ForecastRun, \
     VerificationRun, CalibrationFormulation, HindcastRun
@@ -23,11 +24,12 @@ from calibration.util.caching import have_LSTM, get_cached_modules_by_id
 from calibration.util.ngen_locations import get_realization_file_path, get_metrics_iteration_file, \
     get_objective_log_best_file, get_calibration_worker_path, get_global_best_params_file, get_validation_metrics_valid_control_file, \
     get_validation_metrics_valid_best_file, get_validation_metrics_valid_iteration_file, \
-    get_validation_performance_file, get_calibration_performance_file, get_validation_metrics_nwm_retrospective_file, get_output_iteration_csv, \
-    get_validation_special_performance_file, get_forecast_performance_file, get_verification_performance_file, \
-    get_params_iteration_file, get_cold_start_performance_file, get_hindcast_performance_file
+    get_validation_metrics_nwm_retrospective_file, get_output_iteration_csv, \
+    get_params_iteration_file, get_observational_file_for_hindcast
 from calibration.views.calibration_secondary_data_views import generate_secondary_ts_data, should_generate_swe, should_generate_soil_moisture
 from calibration.views.common import CerfException, get_job_description, find_validation_worker_with_matching_id
+from calibration.views.data_services import get_observational_date_range_from_data_services, get_observational_data_from_data_services
+from cerfServer.settings import JOB_EXECUTION_MODE
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +61,7 @@ def to_float_or_nan(value: object) -> float:
         return float("nan")
 
     # Normal numeric conversion (raises if invalid)
-    return float(value)
+    return float(cast(Any, value))
 
 
 def read_validation_output(validation_run: ValidationRun, failed_so_far: bool) -> None:
@@ -78,6 +80,13 @@ def read_validation_output(validation_run: ValidationRun, failed_so_far: bool) -
     validation_type = ValidationType(validation_run.validation_type)
     iteration = validation_run.iteration if validation_type == ValidationType.VALID_ITERATION else None
 
+    # Wait for finalized Slurm accounting before opening the database transaction.
+    slurm_accounting = (
+        get_final_slurm_accounting(validation_run)
+        if JOB_EXECUTION_MODE == JobExecutionMode.SLURM
+        else None
+    )
+
     with transaction.atomic():
         # Identify the matching worker based on validation type
         matching_worker = find_validation_worker_with_matching_id(
@@ -88,13 +97,10 @@ def read_validation_output(validation_run: ValidationRun, failed_so_far: bool) -
         validation_run.validation_worker_name = matching_worker
         validation_run.save(update_fields=['validation_worker_name'])
 
-        performance_metrics_file = (
-            get_validation_performance_file(validation_run.calibration_run, iteration.worker_name, iteration.iteration_num)
-            if validation_type == ValidationType.VALID_ITERATION
-            else get_validation_special_performance_file(validation_run.calibration_run, validation_type)
+        create_performance_metrics(
+            validation_run,
+            slurm_accounting
         )
-
-        create_performance_metrics(validation_run, performance_metrics_file)
 
         if not failed_so_far:
             process_validation_for_validation_run(validation_run)
@@ -119,12 +125,22 @@ def read_calibration_output(calibration_run: CalibrationRun, failed_so_far: bool
     ).exists()
 
     if already_processed:
-        raise CerfException(f"End of job processing has already been completed for {job_description}")
+        raise CerfException(
+            f"End of job processing has already been completed for {job_description}"
+        )
+
+    # Wait for finalized Slurm accounting before opening the database transaction.
+    slurm_accounting = (
+        get_final_slurm_accounting(calibration_run)
+        if JOB_EXECUTION_MODE == JobExecutionMode.SLURM
+        else None
+    )
 
     with transaction.atomic():
-        performance_metrics_file = get_calibration_performance_file(calibration_run)
-        create_performance_metrics(calibration_run, performance_metrics_file)
-        calibration_run.save(update_fields=['performance_metrics'])
+        create_performance_metrics(
+            calibration_run,
+            slurm_accounting
+        )
 
         if not failed_so_far:
             # Set the realization file path for the run
@@ -138,17 +154,27 @@ def read_calibration_output(calibration_run: CalibrationRun, failed_so_far: bool
 
 def read_cold_start_output(run: ColdStartRun, _failed_so_far: bool) -> None:
     """
-    Processes the output of a forecast run by parsing performance metrics.
+    Processes the output of a cold start run by creating performance metrics.
 
     :param run: The ColdStartRun instance.
     :param _failed_so_far: Indicates whether the job has failed up to this point.
     """
-
     job_description = get_job_description(run)
 
     logger.info(f"Processing output for {job_description}, status={run.status}")
+
+    # Wait for finalized Slurm accounting before opening the database transaction.
+    slurm_accounting = (
+        get_final_slurm_accounting(run)
+        if JOB_EXECUTION_MODE == JobExecutionMode.SLURM
+        else None
+    )
+
     with transaction.atomic():
-        create_performance_metrics(run, get_cold_start_performance_file(run))
+        create_performance_metrics(
+            run,
+            slurm_accounting
+        )
 
     # No other processing needed
 
@@ -157,17 +183,27 @@ def read_cold_start_output(run: ColdStartRun, _failed_so_far: bool) -> None:
 
 def read_forecast_output(run: ForecastRun, _failed_so_far: bool) -> None:
     """
-    Processes the output of a forecast run by parsing performance metrics.
+    Processes the output of a forecast run by creating performance metrics.
 
     :param run: The ForecastRun instance.
     :param _failed_so_far: Indicates whether the job has failed up to this point.
     """
-
     job_description = get_job_description(run)
 
     logger.info(f"Processing output for {job_description}, status={run.status}")
+
+    # Wait for finalized Slurm accounting before opening the database transaction.
+    slurm_accounting = (
+        get_final_slurm_accounting(run)
+        if JOB_EXECUTION_MODE == JobExecutionMode.SLURM
+        else None
+    )
+
     with transaction.atomic():
-        create_performance_metrics(run, get_forecast_performance_file(run))
+        create_performance_metrics(
+            run,
+            slurm_accounting
+        )
 
     # No other processing needed
 
@@ -176,17 +212,30 @@ def read_forecast_output(run: ForecastRun, _failed_so_far: bool) -> None:
 
 def read_hindcast_output(run: HindcastRun, _failed_so_far: bool) -> None:
     """
-    Processes the output of a hindcast run by parsing performance metrics.
+    Processes the output of a hindcast run by creating performance metrics.
 
     :param run: The HindcastRun instance.
     :param _failed_so_far: Indicates whether the job has failed up to this point.
     """
-
     job_description = get_job_description(run)
 
     logger.info(f"Processing output for {job_description}, status={run.status}")
+
+    # Get observed data for the Hindcast
+    _write_observed_hindcast_file(run)
+
+    # Wait for finalized Slurm accounting before opening the database transaction.
+    slurm_accounting = (
+        get_final_slurm_accounting(run)
+        if JOB_EXECUTION_MODE == JobExecutionMode.SLURM
+        else None
+    )
+
     with transaction.atomic():
-        create_performance_metrics(run, get_hindcast_performance_file(run))
+        create_performance_metrics(
+            run,
+            slurm_accounting
+        )
 
     # No other processing needed
 
@@ -195,44 +244,391 @@ def read_hindcast_output(run: HindcastRun, _failed_so_far: bool) -> None:
 
 def read_verification_output(run: VerificationRun, _failed_so_far: bool) -> None:
     """
-    Processes the output of a verification run by parsing performance metrics.
+    Processes the output of a verification run by creating performance metrics.
 
     :param run: The VerificationRun instance.
     :param _failed_so_far: Indicates whether the job has failed up to this point.
     """
-
     job_description = get_job_description(run)
 
     logger.info(f"Processing output for {job_description}, status={run.status}")
-    with transaction.atomic():
-        performance_metrics_file = (
-            get_verification_performance_file(run)
-        )
 
-        create_performance_metrics(run, performance_metrics_file)
+    # Wait for finalized Slurm accounting before opening the database transaction.
+    slurm_accounting = (
+        get_final_slurm_accounting(run)
+        if JOB_EXECUTION_MODE == JobExecutionMode.SLURM
+        else None
+    )
+
+    with transaction.atomic():
+        create_performance_metrics(
+            run,
+            slurm_accounting
+        )
 
     # No other processing needed
 
     logger.info(f"End of processing output for {job_description}")
 
 
-def create_performance_metrics(run: BaseRun, performance_metrics_file: str) -> None:
+def create_performance_metrics(
+        run: BaseRun,
+        slurm_accounting: dict[str, Any] | None = None,
+) -> None:
     """
-    Parses performance metrics from a file and updates the run with the metrics.
+    Create performance metrics and associate them with the run.
 
-    :param run: The run instance (CalibrationRun, ValidationRun, or similar).
-    :param performance_metrics_file: Path to the performance metrics file.
+    In Slurm mode, use finalized accounting data retrieved before entering the
+    surrounding database transaction.
+
+    Docker and SLURM_MOCK do not provide detailed accounting data, so they
+    create a runtime-only PerformanceMetrics record.
+
+    :param run: The run instance.
+    :param slurm_accounting: Finalized SlurmDB accounting response, when running
+        in Slurm mode.
     :return: None
     """
-    performance_metrics = parse_performance_metrics(performance_metrics_file)
+    job_description = get_job_description(run)
+    performance_metrics = None
+
+    if JOB_EXECUTION_MODE == JobExecutionMode.SLURM:
+        if slurm_accounting:
+            performance_metrics = (
+                create_performance_metrics_from_slurm_accounting(
+                    slurm_accounting
+                )
+            )
+        else:
+            logger.warning(
+                f"Final Slurm accounting data was unavailable for "
+                f"{job_description}"
+            )
 
     if not performance_metrics:
-        # Fallback to calculate run_time manually
+        # Fallback to calculate run_time manually.
         run_time = now() - run.run_start
-        performance_metrics = PerformanceMetrics.objects.create(run_time=run_time)
+
+        logger.info(
+            f"Creating runtime-only performance metrics for "
+            f"{job_description}: run_time={run_time}"
+        )
+
+        performance_metrics = PerformanceMetrics.objects.create(
+            run_time=run_time
+        )
 
     run.performance_metrics = performance_metrics
-    run.save(update_fields=['performance_metrics'])
+    run.save(update_fields=["performance_metrics"])
+
+
+def get_slurm_tres_count(
+        tres_values: list[dict[str, Any]],
+        tres_type: str,
+        tres_name: str = "",
+) -> int | float | None:
+    """
+    Return the count for a matching Slurm TRES entry.
+
+    :param tres_values: List of Slurm TRES dictionaries.
+    :param tres_type: TRES type, such as "mem" or "fs".
+    :param tres_name: Optional TRES name, such as "disk".
+    :return: Matching count, or None if no matching entry exists.
+    """
+    for tres in tres_values:
+        if tres.get("type") != tres_type:
+            continue
+
+        if tres_name and tres.get("name") != tres_name:
+            continue
+
+        count = tres.get("count")
+
+        if isinstance(count, (int, float)):
+            return count
+
+    return None
+
+
+def create_performance_metrics_from_slurm_accounting(
+        accounting_data: dict[str, Any],
+) -> PerformanceMetrics | None:
+    """
+    Create a PerformanceMetrics record from finalized SlurmDB accounting data.
+
+    SlurmDB provides the main job record and its individual steps. General job
+    timing and CPU allocation are taken from the main job record. Maximum
+    memory, disk read, and disk write values are taken from the batch step.
+
+    SlurmDB reports memory and filesystem counts in bytes. PerformanceMetrics
+    stores those values in kilobytes, matching the previous sacct --units=K
+    behavior.
+
+    :param accounting_data: Finalized SlurmDB job accounting response.
+    :return: Created PerformanceMetrics record, or None if required records
+        cannot be found.
+    """
+    jobs = accounting_data.get("jobs") or []
+
+    if not jobs:
+        logger.warning("Slurm accounting response does not contain a job record")
+        return None
+
+    # The endpoint is queried for one Slurm JobID, so the first item is the job.
+    job = jobs[0]
+    steps = job.get("steps") or []
+
+    # MaxRSS and disk I/O statistics are stored on the .batch step.
+    batch_step = next(
+        (
+            step
+            for step in steps
+            if str(
+            (step.get("step") or {}).get("name", "")
+        ).lower() == "batch"
+        ),
+        None
+    )
+
+    if not batch_step:
+        logger.warning(
+            f"Slurm accounting response for JobID "
+            f"{job.get('job_id')} does not contain a batch step"
+        )
+        return None
+
+    job_time = job.get("time") or {}
+
+    # Elapsed wall-clock runtime for the job, in seconds.
+    elapsed_seconds = job_time.get("elapsed")
+
+    required = job.get("required") or {}
+
+    # Number of CPUs allocated to the job.
+    num_cpus = required.get("CPUs")
+
+    planned = job_time.get("planned") or {}
+
+    # Time between the job becoming eligible and starting, in seconds.
+    planned_seconds = planned.get("number") if planned.get("set") else None
+
+    batch_tres = batch_step.get("tres") or {}
+    requested_tres = batch_tres.get("requested") or {}
+    consumed_tres = batch_tres.get("consumed") or {}
+
+    requested_max = requested_tres.get("max") or []
+    consumed_max = consumed_tres.get("max") or []
+
+    # Maximum resident memory used by the batch step, reported in bytes.
+    max_rss_bytes = get_slurm_tres_count(
+        requested_max,
+        "mem",
+    )
+
+    # Maximum bytes read from the filesystem by the batch step.
+    max_disk_read_bytes = get_slurm_tres_count(
+        requested_max,
+        "fs",
+        "disk",
+    )
+
+    # Maximum bytes written to the filesystem by the batch step.
+    max_disk_write_bytes = get_slurm_tres_count(
+        consumed_max,
+        "fs",
+        "disk",
+    )
+
+    # Preserve the same identifier previously obtained from the sacct .batch row.
+    batch_step_id = (batch_step.get("step") or {}).get("id")
+
+    # Wall-clock duration of the job.
+    run_time = (
+        timedelta(seconds=elapsed_seconds)
+        if isinstance(elapsed_seconds, (int, float))
+        else None
+    )
+
+    # Equivalent to sacct CPUTime: elapsed time multiplied by allocated CPUs.
+    cpu_time = (
+        timedelta(seconds=elapsed_seconds * num_cpus)
+        if isinstance(elapsed_seconds, (int, float))
+           and isinstance(num_cpus, (int, float))
+        else None
+    )
+
+    # Queue wait time before execution began.
+    reserved_time = (
+        timedelta(seconds=planned_seconds)
+        if isinstance(planned_seconds, (int, float))
+        else None
+    )
+
+    # Convert SlurmDB byte counts to KiB, matching sacct --units=K.
+    max_rss = (
+        max_rss_bytes / 1024
+        if isinstance(max_rss_bytes, (int, float))
+        else None
+    )
+    max_disk_read = (
+        max_disk_read_bytes / 1024
+        if isinstance(max_disk_read_bytes, (int, float))
+        else None
+    )
+    max_disk_write = (
+        max_disk_write_bytes / 1024
+        if isinstance(max_disk_write_bytes, (int, float))
+        else None
+    )
+
+    missing_fields = []
+
+    if run_time is None:
+        missing_fields.append("Elapsed")
+    if num_cpus is None:
+        missing_fields.append("NCPUS")
+    if cpu_time is None:
+        missing_fields.append("CPUTime")
+    if max_rss is None:
+        missing_fields.append("MaxRSS")
+    if max_disk_read is None:
+        missing_fields.append("MaxDiskRead")
+    if max_disk_write is None:
+        missing_fields.append("MaxDiskWrite")
+    if reserved_time is None:
+        missing_fields.append("Planned")
+
+    if missing_fields:
+        logger.warning(
+            f"Missing finalized Slurm accounting fields for JobID "
+            f"{job.get('job_id')}: {', '.join(missing_fields)}"
+        )
+
+    metrics = PerformanceMetrics.objects.create(
+        slurm_job_id=batch_step_id or str(job.get("job_id")),
+        run_time=run_time,
+        num_cpus=int(num_cpus) if isinstance(num_cpus, (int, float)) else None,
+        cpu_time=cpu_time,
+        max_rss=max_rss,
+        max_disk_read=max_disk_read,
+        max_disk_write=max_disk_write,
+        reserved_time=reserved_time,
+    )
+
+    logger.info(
+        f"Created performance metrics from SlurmDB for JobID "
+        f"{job.get('job_id')}: run_time={run_time}, "
+        f"num_cpus={num_cpus}, cpu_time={cpu_time}, "
+        f"max_rss={max_rss} KB, "
+        f"max_disk_read={max_disk_read} KB, "
+        f"max_disk_write={max_disk_write} KB, "
+        f"reserved_time={reserved_time}"
+    )
+
+    return metrics
+
+
+def get_final_slurm_accounting(
+        run: BaseRun,
+        max_attempts: int = 10,
+        retry_delay: float = 1.0,
+) -> dict[str, Any] | None:
+    """
+    Wait for SlurmDB to publish finalized accounting data for a Slurm job.
+
+    :param run: Run whose Slurm accounting data is required.
+    :param max_attempts: Maximum number of accounting requests.
+    :param retry_delay: Seconds between accounting requests.
+    :return: Final SlurmDB accounting response, or None if unavailable.
+    """
+    if run.slurm_job_id is None or run.slurm_job_id < 0:
+        return None
+
+    from calibration.run_util.job_executor_slurm import (
+        get_slurm_job_accounting,
+    )
+
+    job_description = get_job_description(run)
+
+    terminal_states = {
+        "COMPLETED",
+        "FAILED",
+        "CANCELLED",
+        "TIMEOUT",
+        "OUT_OF_MEMORY",
+        "NODE_FAIL",
+        "BOOT_FAIL",
+        "DEADLINE",
+        "PREEMPTED",
+        "REVOKED",
+        "SPECIAL_EXIT",
+    }
+
+    for attempt in range(1, max_attempts + 1):
+        accounting_data = get_slurm_job_accounting(run.slurm_job_id)
+
+        logger.debug(
+            f"Full Slurm accounting response for {job_description}, "
+            f"attempt {attempt}: {accounting_data}"
+        )
+
+        jobs = accounting_data.get("jobs") if accounting_data else None
+        job = jobs[0] if jobs else None
+
+        state = None
+
+        if job:
+            state_data = job.get("state")
+
+            if isinstance(state_data, dict):
+                state = state_data.get("current")
+            else:
+                state = state_data
+
+            # SlurmDB represents the current state as a one-item list.
+            if isinstance(state, list):
+                state = state[0] if state else None
+
+            if state:
+                state = str(state).upper()
+
+        steps = job.get("steps") if job else None
+
+        # Resource high-water values are recorded on the batch step.
+        batch_step = next(
+            (
+                step
+                for step in steps or []
+                if str(
+                (step.get("step") or {}).get("name", "")).lower() == "batch"
+            ),
+            None,
+        )
+
+        # Require both the completed job record and its batch-step accounting.
+        if state in terminal_states and batch_step:
+            logger.info(
+                f"Final Slurm accounting found for {job_description} "
+                f"on attempt {attempt}, state={state}"
+            )
+            return accounting_data
+
+        if attempt < max_attempts:
+            logger.info(
+                f"Final Slurm accounting not yet available for "
+                f"{job_description}; state={state}, "
+                f"batch_step_found={batch_step is not None}; "
+                f"retrying in {retry_delay} seconds "
+                f"({attempt}/{max_attempts})"
+            )
+            time.sleep(retry_delay)
+
+    logger.warning(
+        f"Final Slurm accounting was not available for {job_description} "
+        f"after {max_attempts} attempts"
+    )
+
+    return None
 
 
 def process_validation_metrics(run: ValidationRun | CalibrationRun, metrics_file: str, expected_run_type: str) -> None:
@@ -278,8 +674,9 @@ def process_validation_metrics(run: ValidationRun | CalibrationRun, metrics_file
 
         # For each metric in the row, create or update the relevant Metric model
         for metric_name, value in metrics_row.items():
+            metric_name = cast(str, metric_name)
             # Perform case-insensitive lookup for the metric
-            metric = MetricEnum.get_instance(str(metric_name))
+            metric = MetricEnum.get_instance(metric_name)
             if not metric:
                 raise CerfException(f"Could not find metric '{metric_name}' in MetricEnum")
 
@@ -335,6 +732,8 @@ def process_validation_for_validation_run(validation_run: ValidationRun) -> None
     elif validation_run.validation_type == ValidationType.VALID_BEST.value:
         metrics_file = get_validation_metrics_valid_best_file(validation_run.calibration_run)
         expected_run_type = ValidationType.VALID_BEST.value
+
+    assert metrics_file is not None and expected_run_type is not None
 
     already_done = ValidationMetrics.objects.filter(
         validation_run=validation_run, run_type=expected_run_type
@@ -713,7 +1112,7 @@ def process_iterations_for_a_worker(
             # - params_match_best() uses math.isclose, so we must coerce to float.
             # - We do NOT sanitize (NaN/±Inf -> None); we just float() the value.
             params_row = {
-                str(k): float(row[k])
+                str(k): float(cast(Any, row[k]))
                 for k in row.index
                 if k != 'iteration'
             }
@@ -957,124 +1356,6 @@ def count_rows_in_csv(file_path: str) -> int:
         return sum(1 for _ in file) - 1
 
 
-def parse_duration(duration_str: str | None) -> timedelta | None:
-    """
-    Converts a duration string (D-HH:MM:SS or HH:MM:SS) into a timedelta object.
-
-    :param duration_str: The duration string in D-HH:MM:SS or HH:MM:SS format.
-    :return: A timedelta object representing the duration.
-    """
-    if not duration_str:
-        return None
-    try:
-        if '-' in duration_str:
-            days_part, time_part = duration_str.split('-')
-            days = int(days_part)
-        else:
-            time_part = duration_str
-            days = 0
-        hours, minutes, seconds = map(int, time_part.split(':'))
-        return timedelta(days=days, hours=hours, minutes=minutes, seconds=seconds)
-    except (ValueError, TypeError):
-        return None
-
-
-def parse_size_to_kb(size_str: str | None) -> float | None:
-    """
-    Converts a size string (e.g., '123K', '1.5M', '2G') to a float in kilobytes.
-
-    :param size_str: The size string with an optional unit suffix (K, M, G).
-    :return: The size converted to kilobytes or None if invalid.
-    """
-
-    if not size_str:
-        return None
-
-    size_str = size_str.strip().upper()
-    try:
-        if size_str.endswith('K'):
-            return float(size_str[:-1])
-        elif size_str.endswith('M'):
-            return float(size_str[:-1]) * 1024
-        elif size_str.endswith('G'):
-            return float(size_str[:-1]) * 1024 ** 2
-        else:
-            # Assume no unit means it's already in KB
-            return float(size_str)
-    except ValueError:
-        return None
-
-
-def parse_performance_metrics(file_path: str) -> PerformanceMetrics | None:
-    """
-    Opens the pipe-delimited file, parses the content, and extracts performance metrics to save to the database.
-
-    This function assumes:
-    - `MaxRSS`, `MaxDiskRead`, and `MaxDiskWrite` fields are only present in the `.batch` job line.
-    - `Planned` (previously called `Reserved`) is only present in the non-batch job line.
-
-    The function:
-    - Logs a warning if any expected field is missing.
-    - Extracts job performance details from batch and non-batch job records.
-    - Returns a `PerformanceMetrics` instance populated with parsed values.
-
-    :param file_path: The path to the performance metrics file.
-    :return: A `PerformanceMetrics` object with extracted metrics, or `None` if the file is missing or invalid.
-    """
-    if not os.path.exists(file_path):
-        logger.error(f'Performance metrics file {file_path} not found')
-        return None
-    else:
-        logger.info(f'Reading performance metrics from {file_path}')
-
-    reserved_time = None
-    batch_metrics = None
-
-    with open(file_path, 'r') as file:
-        reader = csv.DictReader(file, delimiter='|')
-
-        for row in reader:
-            job_id = row['JobID']
-
-            if job_id.endswith('.batch'):
-                # Expected fields only for the .batch line
-                expected_batch_fields = ['Elapsed', 'NCPUS', 'CPUTime', 'MaxRSS', 'MaxDiskRead', 'MaxDiskWrite']
-                missing_fields = [field for field in expected_batch_fields if not row.get(field)]
-                if missing_fields:
-                    logger.warning(f'Missing fields for batch JobID {job_id}: {", ".join(missing_fields)}')
-
-                # Collect data from the .batch line with fallback to None for missing fields
-                batch_metrics = {
-                    'slurm_job_id': job_id,
-                    'run_time': parse_duration(row.get('Elapsed')),
-                    'num_cpus': int(row.get('NCPUS')) if row.get('NCPUS') else None,
-                    'cpu_time': parse_duration(row.get('CPUTime')),
-                    'max_rss': parse_size_to_kb(row.get('MaxRSS')),
-                    'max_disk_read': parse_size_to_kb(row.get('MaxDiskRead')),
-                    'max_disk_write': parse_size_to_kb(row.get('MaxDiskWrite')),
-                    'reserved_time': reserved_time  # This will be updated later if available
-                }
-            else:
-                # Expected fields only for the non-batch line
-                expected_non_batch_fields = ['Elapsed', 'NCPUS', 'CPUTime', 'Planned']
-                missing_fields = [field for field in expected_non_batch_fields if not row.get(field)]
-                if missing_fields:
-                    logger.warning(f'Missing fields for non-batch JobID {job_id}: {", ".join(missing_fields)}')
-
-                # Save the reserved time from the non-.batch line
-                reserved_time = parse_duration(row.get('Planned'))
-
-    if batch_metrics:
-        # Update the reserved_time for the batch metrics
-        batch_metrics['reserved_time'] = reserved_time
-
-        # Create or update the PerformanceMetrics record
-        metrics = PerformanceMetrics.objects.create(**batch_metrics)
-        return metrics
-
-    return None
-
-
 def params_match_best(params_row: dict[str, float], best_params_dict: dict[str, float]) -> bool:
     """
     Determine whether a row of tuned parameters exactly matches the known global-best parameters.
@@ -1127,3 +1408,59 @@ def params_match_best(params_row: dict[str, float], best_params_dict: dict[str, 
             return False
 
     return True
+
+
+def _write_observed_hindcast_file(run) -> None:
+    """
+    Fetch observed streamflow for the hindcast window and write it to disk.
+
+    If Data Services does not have the full requested window, no file is written.
+    """
+    # Build the full hindcast output window in UTC.
+    time_start = run.cycle_date
+    time_end = run.cycle_date + timedelta(
+        hours=run.interval_cycle * (run.num_iterations - 1) + run.configuration.fcst_win
+    )
+
+    # Fetch observed data for the same UTC window used by the hindcast output.
+    date_time_range = DateTimeRange(time_start, time_end)
+
+    # Verify that Data Services has observations for the requested hindcast window.
+    available_date_range = get_observational_date_range_from_data_services(run.calibration_run)
+
+    available_start = available_date_range.start_datetime
+    available_end = available_date_range.end_datetime
+    requested_start = date_time_range.start_datetime
+    requested_end = date_time_range.end_datetime
+
+    # These should always be set if Data Services behaved correctly
+    assert available_start is not None and available_end is not None
+    assert requested_start is not None and requested_end is not None
+
+    observations_available = (
+            available_start <= requested_start
+            and requested_end <= available_end
+    )
+
+    if not observations_available:
+        logger.warning(
+            "Observed streamflow is not available for the full hindcast window. "
+            f"Requested: {requested_start} to {requested_end}. "
+            f"Available: {available_start} to {available_end}."
+        )
+        return None
+
+    obs_path = get_observational_file_for_hindcast(run)
+
+    # Fetch observed streamflow only when Data Services has the full requested range.
+    obs_csv = get_observational_data_from_data_services(run.calibration_run, date_time_range)
+
+    with open(obs_path, "w", encoding="utf-8", newline="") as f:
+        f.write(obs_csv)
+
+    logger.info(
+        f"Wrote observed hindcast data to {obs_path} "
+        f"for {requested_start} to {requested_end}"
+    )
+
+    return None

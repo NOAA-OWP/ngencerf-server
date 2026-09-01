@@ -2,11 +2,63 @@
 
 MSWM_REPO="https://github.com/NOAA-OWP/nwm-msw-mgr.git"
 DATA_ASSIM_REPO="https://github.com/NOAA-OWP/nwm-data-assimilation.git"
+EWTS_REPO="https://github.com/NOAA-OWP/nwm-ewts.git"
 
 # Branches/tags for git repos
-MSWM_BRANCH='development'
-DATA_ASSIMILATION_BRANCH='development'
-NGEN_FORCING_TAG='development'
+MSWM_REF='development'
+DATA_ASSIMILATION_REF='development'
+NGEN_FORCING_REF='development'
+EWTS_REF='development'
+
+#=======================================================================
+# Usage / help
+#   - Checked before anything else so it works without cerfserver.env,
+#     a venv, or AWS credentials being set up.
+#=======================================================================
+if [[ "$1" == "-h" ]] || [[ "$1" == "--help" ]]; then
+    cat <<EOF
+Usage: ./runCerf.sh [COMMAND] [OPTIONS]
+
+Starts the ngenCERF Django server (dev runserver or Gunicorn/Uvicorn ASGI),
+handling venv setup, dependency installs, gage/static data initialization,
+database migrations and Redis cache flushing.
+
+Commands:
+  (none)            Start the server normally.
+  activate          Activate the project virtualenv in your current shell.
+                     Must be sourced: 'source ./runCerf.sh activate'
+  manage ARGS...    Run './manage.py ARGS...' (venv is activated first,
+                     no other startup steps run). Example:
+                       ./runCerf.sh manage migrate
+
+Options (normal start only):
+  --load-gages      Force init_gages to run even if gage records already
+                     exist and the gage data fingerprint is unchanged.
+  auto_reload       Enable the Django dev server's auto-reloader
+                     (otherwise runs with --noreload).
+  -h, --help        Show this help and exit.
+
+Key environment variables (set in cerfserver.env, cerfServer/.env, or
+cerfServer/.env-override):
+  PORT                       Required. Port the server listens on.
+  CERF_VENV                  Docker | <path> | unset. Venv location, or
+                             'Docker' to skip local venv/AWS-check logic.
+  REQUIRED_PYTHON            Required Python version, e.g. 3.11 or python3.11.
+  RUN_CERF_FLAG_DIRECTORY    Directory for SHA/gage marker files (default ./).
+  FORCE_REINSTALL_VCS        1 to force reinstall of git-based dependencies.
+  DJANGO_SUPERUSER_EMAIL/
+  DJANGO_SUPERUSER_PASSWORD  Bootstrap a superuser if not already present.
+  CERF_ASGI / CERF_PRODUCTION
+                             Set to 1 to launch Gunicorn+Uvicorn instead of
+                             the Django dev server.
+  GUNICORN_WORKERS, GUNICORN_TIMEOUT, GUNICORN_BIND,
+  GUNICORN_MAX_REQUESTS, GUNICORN_MAX_REQUESTS_JITTER,
+  GUNICORN_GRACEFUL_TIMEOUT
+                             Gunicorn tuning, used only when the ASGI
+                             server is launched.
+EOF
+    exit 0
+fi
 
 #=======================================================================
 # Script must be sourced for 'activate' mode
@@ -38,31 +90,95 @@ set -a
 source "$SCRIPT_DIR/cerfserver.env"
 set +a
 
+if [ -z "${PORT}" ]; then
+    echo "ERROR: PORT is not set in cerfserver.env"
+    exit 1
+fi
+
 IN_DOCKER=false
 if [ "${CERF_VENV}" = "Docker" ]; then
     IN_DOCKER=true
 fi
 
+if [ "$IN_DOCKER" = false ]; then
+    #=======================================================================
+    # Python interpreter validation
+    #=======================================================================
+    # Strip 'python' prefix.  Value can be python3.11 or 3.11
+    REQUIRED_PYTHON_VERSION="${REQUIRED_PYTHON#python}"
+
+    PYTHON_BIN="${PYTHON_BIN:-python${REQUIRED_PYTHON_VERSION}}"
+
+    if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+        echo "ERROR: Required Python interpreter not found."
+        echo
+        echo "This project requires Python ${REQUIRED_PYTHON_VERSION}."
+        echo "The expected executable is:"
+        echo "    $PYTHON_BIN"
+        echo
+        echo "Please install Python ${REQUIRED_PYTHON_VERSION} and rerun this script."
+        exit 1
+    fi
+
+    PYTHON_VERSION="$("$PYTHON_BIN" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+
+    if [ "$PYTHON_VERSION" != "$REQUIRED_PYTHON_VERSION" ]; then
+        echo "ERROR: $PYTHON_BIN is Python $PYTHON_VERSION, but Python $REQUIRED_PYTHON_VERSION is required."
+        exit 1
+    fi
+
+    echo "Using Python $PYTHON_VERSION ($PYTHON_BIN)"
+fi
+
 
 #=======================================================================
 # Function: ensure_virtualenv
-#   - If CERF_VENV is empty or “Docker”, do nothing
-#   - If the directory "$cerfServer/$CERF_VENV" does not exist, create it
-#   - Activate that venv so “python3” and “pip” later refer to the venv
+#   - If CERF_VENV is empty or "Docker", do nothing
+#   - Derives the actual venv path from CERF_VENV + REQUIRED_PYTHON
+#       Example:
+#         CERF_VENV=./.venv-cerf
+#         REQUIRED_PYTHON=3.11
+#         => ./.venv-cerf_python3.11
+#   - If the venv does not exist, create it with the required Python version
+#   - If the venv exists, verify that it uses the required Python version
+#   - If the existing venv is invalid or has the wrong Python version, fail
+#   - Activate the venv so "python" and "pip" refer to the venv
 #=======================================================================
 ensure_virtualenv() {
-    # Requires: CERF_VENV loaded, IN_DOCKER set, cerfServer set
-    if [ -n "${CERF_VENV}" ] && [ "$IN_DOCKER" = false ]; then
-        VENV_PATH="$cerfServer/${CERF_VENV}"
+    # Requires: CERF_VENV loaded, IN_DOCKER set, cerfServer set,
+    #           REQUIRED_PYTHON_VERSION set, PYTHON_BIN validated
 
-        if [ ! -d "$VENV_PATH" ]; then
-            echo "Virtual environment not found at $VENV_PATH. Creating it..."
-            python3.11 -m venv "$VENV_PATH"
+    if [ -z "${CERF_VENV}" ] || [ "$IN_DOCKER" = true ]; then
+        return 0
+    fi
+
+    VENV_PATH="${cerfServer}/${CERF_VENV}_python${REQUIRED_PYTHON_VERSION}"
+    VENV_PYTHON="$VENV_PATH/bin/python"
+
+    if [ -d "$VENV_PATH" ]; then
+        if [ ! -x "$VENV_PYTHON" ]; then
+            echo "ERROR: Existing virtual environment is invalid: $VENV_PATH"
+            echo "ERROR: Expected executable not found: $VENV_PYTHON"
+            exit 1
         fi
 
-        source "$VENV_PATH/bin/activate"
-        echo "Activated virtual environment at $VENV_PATH"
+        VENV_VERSION="$("$VENV_PYTHON" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+
+        if [ "$VENV_VERSION" != "$REQUIRED_PYTHON_VERSION" ]; then
+            echo "ERROR: Virtual environment '$VENV_PATH' is inconsistent."
+            echo "ERROR: Directory name indicates Python $REQUIRED_PYTHON_VERSION,"
+            echo "ERROR: but it actually contains Python $VENV_VERSION."
+            echo "ERROR: Delete this virtual environment and rerun the script."
+            exit 1
+        fi
+    else
+        echo "Creating virtual environment at $VENV_PATH using $PYTHON_BIN..."
+        "$PYTHON_BIN" -m venv "$VENV_PATH"
     fi
+
+    source "$VENV_PATH/bin/activate"
+    echo "Activated virtual environment at $VENV_PATH"
+    echo "Virtual environment Python: $(python --version)"
 }
 
 #=======================================================================
@@ -102,17 +218,44 @@ else
 fi
 
 #=======================================================================
-# Validate RUN_CERF_FLAG_DIRECTORY
+# Validate and create RUN_CERF_FLAG_DIRECTORY
 #   Ordering prerequisite:
 #     - Must happen before any code that writes marker files into it:
-#         * SHA markers (.mswm.sha, .data_assimilation_engine.sha)
+#         * SHA markers (.mswm.sha, .data_assimilation_engine.sha, .ewts.sha)
 #         * gage flags/fingerprints (.load_gages, .gages_fingerprint)
+#
+# Docker requirement:
+#   - When running in Docker, this directory must already exist on the
+#     persistent host or mounted volume before the container starts.
+#   - Creating it only inside the container does not make it persistent,
+#     so marker files would be lost when the container is replaced.
+#
+# Ordering prerequisite:
+#   - Must happen before any code that writes marker files into it:
+#       * SHA markers (.mswm.sha, .data_assimilation_engine.sha, .ewts.sha)
+#       * gage flags/fingerprints (.load_gages, .gages_fingerprint)
 #=======================================================================
 if [ -z "${RUN_CERF_FLAG_DIRECTORY}" ]; then
     echo "WARNING: RUN_CERF_FLAG_DIRECTORY is not set in cerfserver.env; defaulting to ./"
     RUN_CERF_FLAG_DIRECTORY="./"
 fi
+
+# Remove a trailing slash. For "./", this produces ".".
 RUN_CERF_FLAG_DIRECTORY="${RUN_CERF_FLAG_DIRECTORY%/}"
+
+if ! mkdir -p "$RUN_CERF_FLAG_DIRECTORY"; then
+    echo "ERROR: Could not create RUN_CERF_FLAG_DIRECTORY:"
+    echo "    $RUN_CERF_FLAG_DIRECTORY"
+    exit 1
+fi
+
+if [ ! -d "$RUN_CERF_FLAG_DIRECTORY" ]; then
+    echo "ERROR: RUN_CERF_FLAG_DIRECTORY is not a directory:"
+    echo "    $RUN_CERF_FLAG_DIRECTORY"
+    exit 1
+fi
+
+echo "Using runCerf flag directory: $RUN_CERF_FLAG_DIRECTORY"
 
 #=======================================================================
 # Bootstrap logging (MUST happen before any run_manage_command calls)
@@ -135,8 +278,6 @@ exec > >(tee -a "$LOGFILE_DEV") 2>&1
 #     - Must be defined before store_gages_fingerprint is ever called.
 #=======================================================================
 CERF_GAGES_FPRINT="${RUN_CERF_FLAG_DIRECTORY}/.gages_fingerprint"
-echo "Gages fingerprint $CERF_GAGES_FPRINT"
-[ -e "$CERF_GAGES_FPRINT" ] && ls -al "$CERF_GAGES_FPRINT"
 
 #=======================================================================
 # Function: check_aws_credentials_early
@@ -219,6 +360,37 @@ run_manage_command() {
 }
 
 
+#=======================================================================
+# Function: gage_records_exist
+#   - Returns 0 if the gage table contains at least one record
+#   - Returns 10 if the gage table is empty
+#   - Returns 2 if Django could not perform the check
+#=======================================================================
+gage_records_exist() {
+    echo "Checking whether the gage table contains any records..."
+
+    python "$SCRIPT_DIR/manage.py" shell -c '
+from calibration.models import Gage
+raise SystemExit(0 if Gage.objects.exists() else 10)
+' --verbosity 0
+
+    local status=$?
+
+    case $status in
+        0)
+            echo "The gage table contains records."
+            return 0
+            ;;
+        10)
+            echo "The gage table is empty."
+            return 10
+            ;;
+        *)
+            echo "ERROR: Could not determine whether the gage table contains records."
+            return 2
+            ;;
+    esac
+}
 
 #=======================================================================
 # Function: generate_git_info
@@ -449,8 +621,9 @@ validate_git_ref_or_exit() {
 #=======================================================================
 # Validate git refs early so we fail before any installs or setup work
 #=======================================================================
-validate_git_ref_or_exit "$MSWM_REPO" "$MSWM_BRANCH" "mswm"
-validate_git_ref_or_exit "$DATA_ASSIM_REPO" "$DATA_ASSIMILATION_BRANCH" "data_assimilation_engine"
+validate_git_ref_or_exit "$MSWM_REPO" "$MSWM_REF" "mswm"
+validate_git_ref_or_exit "$DATA_ASSIM_REPO" "$DATA_ASSIMILATION_REF" "data_assimilation_engine"
+validate_git_ref_or_exit "$EWTS_REPO" "$EWTS_REF" "ewts"
 
 #=======================================================================
 # Special case: if the first argument is “manage”, just run manage.py <args>
@@ -498,16 +671,23 @@ if [ "$IN_DOCKER" = false ]; then
         echo
         echo --------------------------------------------------------
         echo "Upgrading pip"
-        pip install --upgrade pip
-        pip --version
+        python -m pip install --upgrade pip
+        python -m pip --version
 
         echo
         echo --------------------------------------------------------
         echo "Installing requirements.txt"
-        pip install -r "$SCRIPT_DIR/requirements.txt"
+        python -m pip install -r "$SCRIPT_DIR/requirements.txt"
 
         FORCE_REINSTALL_VCS="${FORCE_REINSTALL_VCS:-0}"
 
+        # SHA caching is branch-oriented. It resolves refs/heads/<ref>
+        # and skips reinstall when the branch tip SHA has not changed.
+        #
+        # Tags and commit hashes are still valid pip install refs, but this
+        # helper does not cache them. If a *_REF is set to a tag or commit hash,
+        # the install falls back to a full reinstall on each startup. That is
+        # acceptable because these override refs are mainly for development use.
         resolve_branch_sha() {
             local repo_url="$1"
             local branch="$2"
@@ -530,7 +710,7 @@ if [ "$IN_DOCKER" = false ]; then
                 return 0
             fi
 
-            if ! pip show "$pkg_name" >/dev/null 2>&1; then
+            if ! python -m pip show "$pkg_name" >/dev/null 2>&1; then
                 echo "$pkg_name not installed; will install"
                 return 0
             fi
@@ -563,48 +743,67 @@ if [ "$IN_DOCKER" = false ]; then
 
         echo
         echo --------------------------------------------------------
-        echo "Installing mswm from branch '$MSWM_BRANCH'"
+        echo "Installing mswm from branch '$MSWM_REF'"
         MSWM_SHA_MARKER="${RUN_CERF_FLAG_DIRECTORY}/.mswm.sha"
-        if MSWM_SHA="$(resolve_branch_sha "$MSWM_REPO" "$MSWM_BRANCH")"; then
-            echo "mswm ${MSWM_BRANCH} -> ${MSWM_SHA}"
+        if MSWM_SHA="$(resolve_branch_sha "$MSWM_REPO" "$MSWM_REF")"; then
+            echo "mswm ${MSWM_REF} -> ${MSWM_SHA}"
+
             if should_reinstall_git_pkg "mswm" "$MSWM_SHA" "$MSWM_SHA_MARKER"; then
-                pip install --force-reinstall --no-cache-dir "git+${MSWM_REPO}@${MSWM_BRANCH}"
+                python -m pip install --force-reinstall --no-cache-dir "git+${MSWM_REPO}@${MSWM_REF}"
                 record_sha_marker "$MSWM_SHA" "$MSWM_SHA_MARKER"
             fi
         else
             # Fallback: could not resolve the branch SHA; revert to branch-based install behavior.
-            pip install --force-reinstall --no-cache-dir "git+${MSWM_REPO}@${MSWM_BRANCH}"
+            python -m pip install --force-reinstall --no-cache-dir "git+${MSWM_REPO}@${MSWM_REF}"
         fi
 
         echo
         echo --------------------------------------------------------
-        echo "Installing data_assimilation_engine from branch '$DATA_ASSIMILATION_BRANCH'"
+        echo "Installing data_assimilation_engine from branch '$DATA_ASSIMILATION_REF'"
         DATA_ASSIM_SHA_MARKER="${RUN_CERF_FLAG_DIRECTORY}/.data_assimilation_engine.sha"
-        if DATA_ASSIM_SHA="$(resolve_branch_sha "$DATA_ASSIM_REPO" "$DATA_ASSIMILATION_BRANCH")"; then
-            echo "data_assimilation_engine ${DATA_ASSIMILATION_BRANCH} -> ${DATA_ASSIM_SHA}"
+        if DATA_ASSIM_SHA="$(resolve_branch_sha "$DATA_ASSIM_REPO" "$DATA_ASSIMILATION_REF")"; then
+            echo "data_assimilation_engine ${DATA_ASSIMILATION_REF} -> ${DATA_ASSIM_SHA}"
+
             if should_reinstall_git_pkg "data_assimilation_engine" "$DATA_ASSIM_SHA" "$DATA_ASSIM_SHA_MARKER"; then
-                pip install --force-reinstall --no-cache-dir "git+${DATA_ASSIM_REPO}@${DATA_ASSIMILATION_BRANCH}"
+                python -m pip install --force-reinstall --no-cache-dir "git+${DATA_ASSIM_REPO}@${DATA_ASSIMILATION_REF}"
                 record_sha_marker "$DATA_ASSIM_SHA" "$DATA_ASSIM_SHA_MARKER"
             fi
         else
             # Fallback: could not resolve the branch SHA; revert to branch-based install behavior.
-            pip install --force-reinstall --no-cache-dir "git+${DATA_ASSIM_REPO}@${DATA_ASSIMILATION_BRANCH}"
+            python -m pip install --force-reinstall --no-cache-dir "git+${DATA_ASSIM_REPO}@${DATA_ASSIMILATION_REF}"
+        fi
+
+        echo
+        echo --------------------------------------------------------
+        echo "Installing ewts from branch '$EWTS_REF'"
+        EWTS_SHA_MARKER="${RUN_CERF_FLAG_DIRECTORY}/.ewts.sha"
+        if EWTS_SHA="$(resolve_branch_sha "$EWTS_REPO" "$EWTS_REF")"; then
+            echo "ewts ${EWTS_REF} -> ${EWTS_SHA}"
+
+            if should_reinstall_git_pkg "ewts" "$EWTS_SHA" "$EWTS_SHA_MARKER"; then
+                pip install --force-reinstall --no-cache-dir "git+${EWTS_REPO}@${EWTS_REF}#subdirectory=runtime/python/ewts"
+                record_sha_marker "$EWTS_SHA" "$EWTS_SHA_MARKER"
+            fi
+        else
+            # Fallback: could not resolve the branch SHA; revert to branch-based install behavior.
+            pip install --force-reinstall --no-cache-dir "git+${EWTS_REPO}@${EWTS_REF}#subdirectory=runtime/python/ewts"
         fi
 
         echo
         echo --------------------------------------------------------
         echo "Running pip check..."
-        if ! pip check; then
+        if ! python -m pip check; then
             echo
             echo "######################################################################"
             echo "##############################  WARNING  #############################"
             echo "######################################################################"
             echo "# pip check found broken requirements. Continuing startup anyway."
             echo "# You may see runtime import errors or unexpected behavior until deps are fixed."
-            echo "# To diagnose: run 'pip check' and reinstall the missing/conflicting packages."
+            echo "# To diagnose: run 'python -m pip check' and reinstall the missing/conflicting packages."
             echo "# If you suspect the git-installed packages are in a bad state, uninstall them and rerun this script:"
-            echo "#   pip uninstall -y data_assimilation_engine"
-            echo "#   pip uninstall -y mswm"
+            echo "#   python -m pip uninstall -y data_assimilation_engine"
+            echo "#   python -m pip uninstall -y mswm"
+            echo "#   pip uninstall -y ewts"
             echo "######################################################################"
             echo
         fi
@@ -662,7 +861,6 @@ run_migrate_with_showmigrations
 echo
 echo --------------------------------------------------------
 ensure_superuser
-echo
 
 echo
 echo --------------------------------------------------------
@@ -676,19 +874,54 @@ fi
 
 #=======================================================================
 # Init data handling
+#   - Empty gage table => unconditional init_gages
 #   - '--load-gages' or missing marker => unconditional init_gages
-#   - Else compare fingerprint and conditionally run init_gages
+#   - Otherwise compare the stored and current fingerprints
 #=======================================================================
 GAGE_DATA_FLAG_FILE="${RUN_CERF_FLAG_DIRECTORY}/.load_gages"
 
-# Only load gage data if the flag is provided or the flag file doesn't exist
-# But we will also load gage data if the hash code detects that it has changed
-if [ "$LOAD_GAGE_DATA" = true ] || [ ! -f "$GAGE_DATA_FLAG_FILE" ]; then
-    echo
-    echo "Loading ngenCERF gage data"
+echo
+echo --------------------------------------------------------
 
-    echo
-    echo --------------------------------------------------------
+# Load gage data if the table is empty, the flag is provided, or the
+# load-gages marker does not exist. Also reload if the inputs changed.
+gage_records_exist
+GAGE_RECORDS_STATUS=$?
+
+if [ $GAGE_RECORDS_STATUS -eq 2 ]; then
+    echo "ERROR: Could not check the gage table."
+    exit 1
+fi
+
+if [ $GAGE_RECORDS_STATUS -eq 10 ]; then
+    echo "Running init_gages because the gage table is empty."
+
+    run_init_gages_and_store ""
+    status=$?
+
+    if [ $status -ne 0 ]; then
+        echo "init_gages failed with exit code $status"
+        exit $status
+    fi
+
+    touch "$GAGE_DATA_FLAG_FILE"
+
+elif [ "$LOAD_GAGE_DATA" = true ]; then
+    echo "Running init_gages because --load-gages was specified."
+
+    run_init_gages_and_store ""
+    status=$?
+
+    if [ $status -ne 0 ]; then
+        echo "init_gages failed with exit code $status"
+        exit $status
+    fi
+
+    touch "$GAGE_DATA_FLAG_FILE"
+
+elif [ ! -f "$GAGE_DATA_FLAG_FILE" ]; then
+    echo "Running init_gages because the load-gages marker does not exist."
+
     # Unconditional run in this branch
     run_init_gages_and_store ""
     status=$?
@@ -699,44 +932,48 @@ if [ "$LOAD_GAGE_DATA" = true ] || [ ! -f "$GAGE_DATA_FLAG_FILE" ]; then
     fi
 
     touch "$GAGE_DATA_FLAG_FILE"
+
 else
-    echo
-    echo --------------------------------------------------------
     # Auto-run init_gages if inputs changed; if hashing fails, run to be safe.
     if FP_NOW="$(compute_gages_fingerprint)"; then
         if [ ! -f "$CERF_GAGES_FPRINT" ]; then
-            echo "No prior gage fingerprint found; running init_gages..."
+            echo "Running init_gages because no stored gage fingerprint exists."
+
             run_init_gages_and_store "$FP_NOW"
             status=$?
+
             if [ $status -ne 0 ]; then
                 echo "init_gages failed with exit code $status"
                 exit $status
             fi
-
         else
             read -r FP_OLD < "$CERF_GAGES_FPRINT" || FP_OLD=""
+
             if [ "$FP_NOW" != "$FP_OLD" ]; then
-                echo "Gage inputs changed; running init_gages..."
+                echo "Running init_gages because the gage fingerprint changed."
+
                 run_init_gages_and_store "$FP_NOW"
                 status=$?
+
                 if [ $status -ne 0 ]; then
                     echo "init_gages failed with exit code $status"
                     exit $status
                 fi
-
             else
-                echo "Gage inputs unchanged; skipping init_gages."
+                echo "Gage fingerprint matches; skipping init_gages."
             fi
         fi
     else
-        echo "Fingerprinting failed. Running init_gages to be safe…"
+        echo "WARNING: Could not compute the gage fingerprint."
+        echo "Running init_gages to be safe."
+
         run_init_gages_and_store ""
         status=$?
+
         if [ $status -ne 0 ]; then
             echo "init_gages failed with exit code $status"
             exit $status
         fi
-
     fi
 fi
 
@@ -774,7 +1011,7 @@ if [ "$IN_DOCKER" = true ]; then
 else
     NGEN_FORCING_URL="https://github.com/NOAA-OWP/ngen-forcing.git"
 
-    echo "Not running in Docker: cloning bmi_forcing_templates from ${NGEN_FORCING_URL}, branch: ${NGEN_FORCING_TAG}"
+    echo "Not running in Docker: cloning bmi_forcing_templates from ${NGEN_FORCING_URL}, branch: ${NGEN_FORCING_REF}"
 
     cd "$STATIC_DIR" || {
     echo "ERROR: could not cd to $STATIC_DIR"
@@ -782,7 +1019,7 @@ else
     }
 
     git clone --depth 1 --filter=blob:none --sparse \
-        -b "${NGEN_FORCING_TAG}" \
+        -b "${NGEN_FORCING_REF}" \
         "$NGEN_FORCING_URL" tmp-ngen-forcing
 
     cd tmp-ngen-forcing || {
@@ -802,31 +1039,25 @@ else
     rm -rf tmp-ngen-forcing
 
     echo "bmi_forcing_templates updated successfully in $TARGET_DIR (non-Docker)."
-    echo
 fi
 
 #=======================================================================
 # Flush Redis cache at startup (all environments)
 #   - Redis is cache-only; safe to clear on every server start
-#   - In Docker, Redis is reached via the service name "redis"
+#   - Uses Django's configured cache (REDIS_URL + TLS) via the clear_cache
+#     management command, so it works on AWS ElastiCache and local
+#     docker-compose alike.
 #=======================================================================
+echo
+echo --------------------------------------------------------
 echo "Flushing Redis cache..."
-if command -v redis-cli >/dev/null 2>&1; then
-    if [ "$IN_DOCKER" = true ]; then
-        redis-cli -h redis -p 6379 FLUSHALL || echo "WARNING: Redis FLUSHALL failed"
-    else
-        redis-cli FLUSHALL || echo "WARNING: Redis FLUSHALL failed"
-    fi
-else
-    echo "WARNING: redis-cli not found; skipping Redis flush"
-fi
-
-
+run_manage_command clear_cache || echo "WARNING: Redis cache clear failed"
 
 #=======================================================================
 # Pre-start hook and start server
 #=======================================================================
 echo
+echo --------------------------------------------------------
 run_manage_command pre_start
 status=$?
 
@@ -836,6 +1067,7 @@ if [ $status -ne 0 ]; then
 fi
 
 echo
+echo --------------------------------------------------------
 echo "Starting server"
 
 ASGI_FLAG="${CERF_ASGI:-}" # explicit override
@@ -863,7 +1095,7 @@ if [ "$ASGI_FLAG" = "1" ] || [ "$PROD_FLAG" = "1" ]; then
     )}
 
     TIMEOUT=${GUNICORN_TIMEOUT:-120}
-    BIND_ADDR=${GUNICORN_BIND:-0.0.0.0:8000}
+    BIND_ADDR="${GUNICORN_BIND:-0.0.0.0:${PORT}}"
     # --graceful-timeout extra time to finish in-flight requests on restart
     exec gunicorn cerfServer.asgi:application \
             --name ngencerf \
@@ -881,13 +1113,13 @@ else
 
     if [ "$AUTO_RELOAD" = true ]; then
         echo "Auto-reload ENABLED"
-        python "$cerfServer"/manage.py runserver 0.0.0.0:8000
+        python "$cerfServer"/manage.py runserver "0.0.0.0:${PORT}"
     else
         echo "Auto-reload DISABLED (--noreload)"
-        python "$cerfServer"/manage.py runserver 0.0.0.0:8000 --noreload
+        python "$cerfServer"/manage.py runserver "0.0.0.0:${PORT}" --noreload
     fi
 fi
 
-if [ -n "${CERF_VENV}" ]; then
+if [ -n "${CERF_VENV}" ] && [ "$IN_DOCKER" = false ]; then
     deactivate
 fi

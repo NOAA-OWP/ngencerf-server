@@ -28,7 +28,7 @@ The `ngenCerf` CLI provides a command-line interface to interact with the ngenCe
 ## Building
 
 ```
-NOte: This step is not necessary when running on Parallel Works
+NOte: This step is not necessary when running in Slurm mode
 ```
 Before using the CLI, it must be built from the source code. Run the following script, located in the `cli` directory to build the executable:
 
@@ -445,8 +445,8 @@ Here is an example of exported data:
         "simulation_start_time": "2014-10-01T00:00:00Z",
         "simulation_end_time": "2017-09-01T00:00:00Z"
     },
-    "streamflow_threshold": 3.88,
-    "peak_flow_threshold": null,
+    "threshold_categorical": 3.88,
+    "threshold_event": null,
     "parameters": [
         {
             "name": "b",
@@ -491,8 +491,8 @@ You can also use the metadata section for your own information, such as comments
 | automatic_validation          | If true, then a validation is run automatically after the calibration run.      (Should we still be exporting this?)                                                   |
 | calibration_times             | The time ranges to use for calibration.                                                                                                                                |
 | validation_times              | The time ranges to use for validation (required if `automatic_validation` is true). Must be outside the calibration times.                                             |
-| stream_flow_threshold         | Required if a categorical objective function is specified. If empty, ngen-cal will not calculate categorical metric.                                                   |
-| peak_flow_threshold           | Required if an event-based objective function is specified. If empty, ngen-cal will not calculate event-based metric.                                                  |
+| threshold_categorical         | Required if a categorical objective function is specified. If empty, ngen-cal will not calculate categorical metric.                                                   |
+| threshold_event               | Required if an event-based objective function is specified. If empty, ngen-cal will not calculate event-based metric.                                                  |
 | parameters                    | Module parameters to use for calibration tuning including name, min, max, and module. All fields are required.                                                         |
 | objective_function            | Metric to use for the objective function.                                                                                                                              |
 | optimization                  | Optimization algorithm (DDS, GWO, PSO).                                                                                                                                |

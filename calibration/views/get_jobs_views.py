@@ -3,9 +3,10 @@ Job Retrieval Endpoints for Calibration, Forecast, Hindcast, and Verification
 =============================================================================
 
 This module provides a unified interface for retrieving job records across the
-CERF workflow, including Calibration, Forecast, Hindcast, and Verification runs.
+CERF workflow, including Calibration, Forecast, Hindcast, and hindcast-based
+Verification runs.
 
-All endpoints support:
+Job-list retrieval endpoints support:
   • Server-side filtering
   • Server-side sorting
   • Pagination with offset + limit
@@ -13,16 +14,14 @@ All endpoints support:
   • Read-only execution to reduce database contention
 
 Calibration retrieval is implemented by `get_jobs()`.
-Forecast, Hindcast, and Verification retrieval are implemented by
-`get_forecast_jobs_internal()`, `get_hindcast_jobs_internal()`, and
-`get_verification_jobs_internal()`.
-
-Verification-specific query path resolution is centralized in
-`get_verification_parent_paths()`.
+Forecast and Hindcast retrieval share
+`_get_forecast_or_hindcast_base_jobs_internal()` through
+`get_forecast_jobs_internal()` and `get_hindcast_jobs_internal()`.
+Verification retrieval is implemented by `get_verification_jobs_internal()`.
 
 Request payload shape
 ---------------------
-Use this general shape for every request (omit keys you are not using):
+Use this general shape for every request and omit keys that are not being used:
 
     limit: integer page size (e.g., 25)
     offset: integer row offset (0-based)
@@ -51,10 +50,6 @@ Calibration-only request keys
 -----------------------------
     ids_only: boolean
 
-Verification-only request keys
-------------------------------
-    verification_job_type: "forecast" | "hindcast"
-
 Do not send empty/default filters or sort objects.
 
 Examples
@@ -82,7 +77,10 @@ Full example:
             },
             "include_archived": false
         },
-        "sort": { "field": "submit_date", "direction": "asc" }
+        "sort": {
+            "field": "submit_date",
+            "direction": "asc"
+        }
     }
 
 Date range example:
@@ -96,39 +94,81 @@ Date range example:
                 "start_date": "2025-01-01T00:00:00-05:00",
                 "end_date": "2025-02-01T23:59:59Z"
             }
-
         }
     }
 
 Minimal example:
 
-    { "limit": 25, "offset": 0 }
+    {
+        "limit": 25,
+        "offset": 0
+    }
 
 Verification example:
 
     {
         "limit": 25,
-        "offset": 0,
-        "verification_job_type": "forecast"
+        "offset": 0
     }
 
 Key concepts
 ------------
 
-Status handling (Calibration only)
+Status handling
     Calibration jobs compute a deterministic `combined_status` derived from:
       - the calibration status, and
-      - the statuses of VALID_CONTROL and VALID_BEST validations (if present).
+      - the statuses of VALID_CONTROL and VALID_BEST validations, when present.
 
-    User-supplied status filters for calibration jobs apply to `combined_status`.
+    If the calibration run itself is not Done, `combined_status` is the raw
+    calibration status. If the calibration run is Done, validation statuses can
+    override the displayed status using the precedence defined in
+    `annotate_combined_status()`.
+
+    User-supplied status filters for Calibration jobs apply to `combined_status`,
+    not the raw CalibrationRun.status field. This keeps ids_only and full-detail
+    calibration retrieval aligned.
+
+    Forecast and Hindcast jobs can also compute a `combined_status` using the
+    related ColdStartRun status through `annotate_combined_status()`.
+
+    Combined status rules for Forecast/Hindcast:
+      - If there is no ColdStartRun:
+            combined_status = Forecast/Hindcast status
+      - If the ColdStartRun is not Done:
+            combined_status = ColdStartRun status
+      - If the ColdStartRun is Done:
+            combined_status = Forecast/Hindcast status
+
+    This matches the execution order: Cold Start runs first, and the
+    Forecast/Hindcast job starts only after Cold Start completes.
+
+    Forecast and Hindcast list retrieval uses `combined_status` for
+    user-supplied status filters, but returns the individual status fields:
+      - forecast_status / hindcast_status
+      - cold_start.cold_start_status
+
+    The UI uses those individual fields to display labels such as
+    "Forecast Running" or "Cold Start Running".
+
+    Forecast/Hindcast summary counts also use `combined_status`, so dashboard
+    counts treat a job as Running when the currently active phase is Running.
+
+    Verification jobs use the raw VerificationRun status.
 
 Filtering
-    All job types support gage, domain, status, module membership, date, ID, and
-    archive toggles.
+    Calibration, Forecast, Hindcast, and Verification jobs support gage, domain,
+    status, module membership, date, ID, and archive filters.
+
+    Verification filtering follows the VerificationRun.hindcast_run relationship.
+
+    Archive filtering for Forecast, Hindcast, and Verification jobs is based on
+    the related CalibrationRun archive flag.
 
 Sorting
-    Sorting uses server-approved fields defined in Enum classes
-    (CalibrationSortField, ForecastSortField, HindcastSortField, VerificationSortField).
+    Sorting uses server-approved fields defined in Enum classes:
+    CalibrationSortField, ForecastSortField, HindcastSortField, and
+    VerificationSortField.
+
     Multi-field sorts are supported.
 
 Pagination
@@ -141,17 +181,17 @@ Range metadata
         • id_range   = [min_id, max_id]
 
     These ranges are computed before user-supplied filters and are restricted
-    only by the base ownership constraint, and any endpoint-level run_status
-    restriction where applicable.
+    only by the base ownership constraint and any endpoint-level run_status
+    restriction.
 
 Read-only execution
-    All retrieval runs inside a read-only transaction wrapper to reduce
-    lock contention.
+    Retrieval helpers run inside read-only transaction wrappers to reduce
+    database lock contention.
 """
 
 import json
 import logging
-from typing import Any, Type, cast, Literal
+from typing import Any, Type, cast, Literal, TypeVar
 
 from django.db.models import Q, Exists, OuterRef, Count, Subquery, When, CharField, Value, F, Case, Sum, IntegerField, QuerySet, Min, Max
 from django.db.models.functions import Lower
@@ -162,16 +202,16 @@ from rest_framework.response import Response
 
 from calibration.enums import GetValidationJobsScope, StatusEnum, ValidationType
 from calibration.enums_vanilla import CalibrationSortField, ForecastSortField, VerificationSortField, HindcastSortField
-from calibration.models import CalibrationFormulation, CalibrationRun, ValidationRun, VerificationRun, CustomUser, IterationParameter, ForecastRun, \
-    CalibrationStopCriteria, HindcastRun
+from calibration.models import CalibrationFormulation, CalibrationRun, ValidationRun, VerificationRun, CustomUser, \
+    IterationParameter, CalibrationStopCriteria, ColdStartRun, ForecastRun, HindcastRun
 from calibration.models.base_run import BaseRun
 from calibration.util.caching import get_cached_modules_by_id
 from calibration.util.calibration_validators import ErrorResponseSerializer, \
     GetCalibrationJobsResponseSerializer, CalibrationPaginationSerializer, \
     GetCalibrationJobIDsResponseSerializer, EmptySerializer, \
-    GetGagesResponseSerializer, GetGagesRequestSerializer, GetCalibrationJobsSummaryResponseSerializer, GetValidationJobsResponseSerializer, \
+    GetGagesResponseSerializer, GetGagesRequestSerializer, GetJobsSummaryResponseSerializer, GetValidationJobsResponseSerializer, \
     CalibrationRunIdSerializer, ForecastPaginationSerializer, GetForecastJobsResponseSerializer, GetVerificationJobsResponseSerializer, \
-    VerificationPaginationSerializer, GetHindcastJobsResponseSerializer, HindcastPaginationSerializer, GetVerificationGagesRequestSerializer
+    VerificationPaginationSerializer, GetHindcastJobsResponseSerializer, HindcastPaginationSerializer
 from calibration.views.calibration_download_views import downloadable_statuses
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import handle_exceptions, validate_request, validate_response, truncate_large_fields, get_user_email, get_elapsed_str, \
@@ -525,9 +565,6 @@ def _apply_shared_filters(
     """
     Apply shared filter logic for Calibration, Forecast, Hindcast and Verification jobs.
 
-    For Verification queries, the caller must first resolve the correct ORM path
-    set based on verification_job_type.
-
     :param query: Base Q object to filter (e.g., ownership constraint).
     :param filters: Dictionary of filters passed by the client.
     :param gage_prefix: ORM prefix path to gage_id (e.g., 'gage__' or 'calibration_run__gage__').
@@ -541,8 +578,9 @@ def _apply_shared_filters(
     Notes:
       - include_archived: if true, include archived jobs; otherwise (false or missing), exclude them.
       - module_filter.operator="and" is only supported when the outer queryset is CalibrationRun.
-        For ForecastRun, HindcastRun and VerificationRun, "and" is treated as "or".
-      - Verification-specific ORM prefixes are resolved upstream before calling this helper.
+      - For ForecastRun, HindcastRun and VerificationRun queries, an "and"
+        module filter is treated as "or".
+      - Verification callers pass ORM paths through the hindcast_run relationship.
     """
     if not filters:
         return query
@@ -678,11 +716,14 @@ def apply_forecast_filters(query: Q, filters: dict) -> Q:
     :param filters: Dictionary of filter parameters (gage_id, domain_name, status, modules, date_filter, id_filter, etc.).
     :return: Q object with forecast/hindcast-specific filters applied.
     """
+    # Make a shallow copy and remove 'status'
+    filters = {k: v for k, v in filters.items() if k != "status"}
+
     return _apply_shared_filters(
         query, filters,
         gage_prefix="calibration_run__gage__",
         module_prefix="calibration_run__calibrationformulation__",
-        status_field="status__in",
+        status_field="status__in",  # not used, since 'status' removed
         created_field="created_at",
         archived_field="calibration_run__is_archived",
         domain_field="calibration_run__gage__domain__name",
@@ -690,39 +731,30 @@ def apply_forecast_filters(query: Q, filters: dict) -> Q:
     )
 
 
-def apply_verification_filters(
-        query: Q,
-        filters: dict,
-        verification_job_type: Literal['forecast', 'hindcast'],
-) -> Q:
+def apply_verification_filters(query: Q, filters: dict) -> Q:
     """
-    Apply standard verification filters to a VerificationRun queryset.
-
-    The ORM path used for gage, module, archive, and domain filtering depends on
-    whether the verification job belongs to a ForecastRun or a HindcastRun.
+    Apply standard filters to hindcast-based VerificationRun records.
 
     Notes:
       - module_filter.operator="and" is only supported for Calibration jobs.
         For Forecast, Hindcast, and Verification jobs, it is treated as "or"
         by the shared filter logic.
 
-    :param query: Base Q object constrained to the authenticated user's verification jobs.
-    :param filters: Dictionary of filter parameters (gage_id, domain_name, status,
-        modules, date_filter, id_filter, include_archived, etc.).
-    :param verification_job_type: Parent job type for the verification jobs being
-        queried. Must be either 'forecast' or 'hindcast'.
-    :return: Q object with verification-specific filters applied.
+    :param query: Base Q object constrained to the authenticated user's
+        hindcast-based verification jobs.
+    :param filters: Dictionary of filter parameters, including gage_id,
+        domain_name, status, modules, date_filter, id_filter, and
+        include_archived.
+    :return: Q object with hindcast-based verification filters applied.
     """
-    paths = get_verification_parent_paths(verification_job_type)
-
     return _apply_shared_filters(
         query, filters,
-        gage_prefix=paths["gage_prefix"],
-        module_prefix=paths["module_prefix"],
+        gage_prefix="hindcast_run__calibration_run__gage__",
+        module_prefix="hindcast_run__calibration_run__calibrationformulation__",
         status_field="status__in",
         created_field="created_at",
-        archived_field=paths["archived_field"],
-        domain_field=paths["domain_field"],
+        archived_field="hindcast_run__calibration_run__is_archived",
+        domain_field="hindcast_run__calibration_run__gage__domain__name",
         allow_module_and=False
     )
 
@@ -892,14 +924,21 @@ def get_calibration_gages_for_evaluation(request: Request) -> Response:
 
     domain_name = validator.get("domain_name") or None
     include_archived = validator.get("include_archived")
+    for_comparison = validator.get("for_comparison")
 
     # Domain is optional. If not provided, include gages across all domains.
     gages = get_gages(
         auth_user(request),
-        run_status=[StatusEnum.DONE, StatusEnum.FAILED, StatusEnum.CANCELLED, StatusEnum.SERVER_ERROR],
+        run_status=[
+            StatusEnum.DONE,
+            StatusEnum.FAILED,
+            StatusEnum.CANCELLED,
+            StatusEnum.SERVER_ERROR
+        ],
         require_both_validations_done=True,
         include_archived=include_archived,
-        domain_name=domain_name
+        domain_name=domain_name,
+        minimum_job_count=2 if for_comparison else 1
     )
 
     response = {"gages": gages}
@@ -917,23 +956,29 @@ def get_calibration_gages_for_evaluation(request: Request) -> Response:
 @extend_schema(
     request=EmptySerializer,
     responses={
-        200: GetCalibrationJobsSummaryResponseSerializer,
+        200: GetJobsSummaryResponseSerializer,
         400: OpenApiResponse(response=ErrorResponseSerializer, description="Validation error or parsing error"),
         500: OpenApiResponse(response=ErrorResponseSerializer, description="Internal server error"),
     },
-    description="Get summary counts of Calibration jobs in Running / Ready / Saved status"
+    description="Get workflow dashboard summary counts"
 )
 @api_view(["POST", "GET"])
 @handle_exceptions
-def get_calibration_jobs_summary(request: Request) -> Response:
+def get_jobs_summary(request: Request) -> Response:
     """
-    Return counts of calibration jobs in:
-      - Running
-      - Ready
-      - Saved
+    Return summary counts used by the workflow dashboard:
+      - Calibration: Running, Ready, Saved
+      - Forecast: Running, Done
+      - Hindcast: Running, Done
+      - Verification: Done hindcast-based
 
-    Counts are based on the derived combined_status (same as get_jobs()).
-    Archived runs are excluded (consistent with default behavior elsewhere).
+    Calibration counts are based on derived combined_status.
+    Forecast and Hindcast counts are based on combined_status, including cold-start status.
+    Verification counts are based on raw verification status.
+
+    Archived calibration runs are excluded from Calibration counts.
+    Forecast, Hindcast, and Verification summary counts currently do not exclude
+    jobs whose parent CalibrationRun is archived.
     """
     data = request.data if request.method == "POST" else request.query_params.dict()
     logger.debug(f"{get_caller_name()}() request from {get_user_email(request)} - {data}")
@@ -945,31 +990,32 @@ def get_calibration_jobs_summary(request: Request) -> Response:
     running_lc = StatusEnum.RUNNING.value.lower()
     ready_lc = StatusEnum.READY.value.lower()
     saved_lc = StatusEnum.SAVED.value.lower()
+    done_lc = StatusEnum.DONE.value.lower()
 
     with readonly_transaction():
-        query = Q(owner=auth_user(request)) & Q(is_archived=False)
+        calibration_query = Q(owner=auth_user(request)) & Q(is_archived=False)
 
-        qs = annotate_calibration_combined_status(
-            CalibrationRun.objects.filter(query),
+        calibration_qs = annotate_combined_status(
+            CalibrationRun.objects.filter(calibration_query),
             include_status_lower=True,
         )
 
-        agg = qs.aggregate(
-            running_count=Sum(
+        calibration_agg = calibration_qs.aggregate(
+            running_calibration_count=Sum(
                 Case(
                     When(_status_lower=running_lc, then=Value(1)),
                     default=Value(0),
                     output_field=IntegerField(),
                 )
             ),
-            ready_count=Sum(
+            ready_calibration_count=Sum(
                 Case(
                     When(_status_lower=ready_lc, then=Value(1)),
                     default=Value(0),
                     output_field=IntegerField(),
                 )
             ),
-            saved_count=Sum(
+            saved_calibration_count=Sum(
                 Case(
                     When(_status_lower=saved_lc, then=Value(1)),
                     default=Value(0),
@@ -978,13 +1024,83 @@ def get_calibration_jobs_summary(request: Request) -> Response:
             ),
         )
 
+        forecast_query = Q(calibration_run__owner=auth_user(request))
+
+        forecast_qs = annotate_combined_status(
+            ForecastRun.objects.filter(forecast_query),
+            include_status_lower=True,
+        )
+
+        forecast_agg = forecast_qs.aggregate(
+            running_forecast_count=Sum(
+                Case(
+                    When(_status_lower=running_lc, then=Value(1)),
+                    default=Value(0),
+                    output_field=IntegerField(),
+                )
+            ),
+            done_forecast_count=Sum(
+                Case(
+                    When(_status_lower=done_lc, then=Value(1)),
+                    default=Value(0),
+                    output_field=IntegerField(),
+                )
+            ),
+        )
+
+        hindcast_query = Q(calibration_run__owner=auth_user(request))
+
+        hindcast_qs = annotate_combined_status(
+            HindcastRun.objects.filter(hindcast_query),
+            include_status_lower=True,
+        )
+
+        hindcast_agg = hindcast_qs.aggregate(
+            running_hindcast_count=Sum(
+                Case(
+                    When(_status_lower=running_lc, then=Value(1)),
+                    default=Value(0),
+                    output_field=IntegerField(),
+                )
+            ),
+            done_hindcast_count=Sum(
+                Case(
+                    When(_status_lower=done_lc, then=Value(1)),
+                    default=Value(0),
+                    output_field=IntegerField(),
+                )
+            ),
+        )
+
+        verification_query = Q(hindcast_run__calibration_run__owner=auth_user(request))
+
+        verification_qs = annotate_combined_status(
+            VerificationRun.objects.filter(verification_query),
+            include_status_lower=True,
+        )
+
+        verification_agg = verification_qs.aggregate(
+            done_hindcast_verification_count=Sum(
+                Case(
+                    When(_status_lower=done_lc, then=Value(1)),
+                    default=Value(0),
+                    output_field=IntegerField(),
+                )
+            ),
+        )
+
     response = {
-        "running_count": int(agg["running_count"] or 0),
-        "ready_count": int(agg["ready_count"] or 0),
-        "saved_count": int(agg["saved_count"] or 0),
+        "running_calibration_count": int(calibration_agg["running_calibration_count"] or 0),
+        "ready_calibration_count": int(calibration_agg["ready_calibration_count"] or 0),
+        "saved_calibration_count": int(calibration_agg["saved_calibration_count"] or 0),
+        "running_forecast_count": int(forecast_agg["running_forecast_count"] or 0),
+        "done_forecast_count": int(forecast_agg["done_forecast_count"] or 0),
+        "running_hindcast_count": int(hindcast_agg["running_hindcast_count"] or 0),
+        "done_hindcast_count": int(hindcast_agg["done_hindcast_count"] or 0),
+        "done_hindcast_verification_count": int(verification_agg["done_hindcast_verification_count"] or 0),
     }
 
-    response_validator, error_response = validate_response(GetCalibrationJobsSummaryResponseSerializer, response)
+    response_validator, error_response = validate_response(GetJobsSummaryResponseSerializer, response)
     if error_response:
         return error_response
 
@@ -995,20 +1111,27 @@ def get_calibration_jobs_summary(request: Request) -> Response:
     return Response(response_validator.data)
 
 
-def annotate_calibration_combined_status(
-        qs: QuerySet[CalibrationRun],
+RunType = TypeVar("RunType", bound=BaseRun)
+
+
+def annotate_combined_status(
+        qs: QuerySet[RunType],
         *,
         include_status_lower: bool = False,
-) -> QuerySet[CalibrationRun]:
+) -> QuerySet[RunType]:
     """
-    Annotate a CalibrationRun queryset with the derived combined_status field.
+    Annotate a job queryset with the derived combined_status field.
 
-    This centralizes the combined-status semantics so that:
-      - job listing endpoints
-      - summary/count endpoints
-      - any future endpoints
+    Returns a queryset containing the same model type as the input queryset.
 
-    all compute combined_status identically and cannot drift.
+    Current usage:
+      - Calibration listing endpoints use combined_status for returned status values
+        and user-supplied status filters.
+      - Forecast/Hindcast listing endpoints use combined_status for user-supplied
+        status filters, but return separate Forecast/Hindcast and ColdStartRun
+        status fields.
+      - Forecast/Hindcast summary counts use combined_status.
+      - Verification currently uses raw status.
 
     include_status_lower: if True, also annotates `_status_lower = Lower("combined_status")` which is useful
     for case-insensitive filtering/count aggregations without repeating the annotation.
@@ -1021,133 +1144,200 @@ def annotate_calibration_combined_status(
     CANCELLED_ID = StatusEnum.CANCELLED.db_instance.id
     SUBMITTED_ID = StatusEnum.SUBMITTED.db_instance.id
 
-    # ─────────────────────────────────────────────────────────────
-    # Always annotate validation_control_status_id + validation_best_status_id.
-    # combined_status depends on these values, so they must be present
-    # for BOTH ids_only and full-detail modes.
-    #
-    # Note: these are the ValidationRun.status_id values (ints), not names.
-    # ─────────────────────────────────────────────────────────────
-    qs = qs.annotate(
-        validation_control_status_id=Subquery(
-            ValidationRun.objects.filter(
-                calibration_run_id=OuterRef("pk"),
-                validation_type=ValidationType.VALID_CONTROL.value
-            ).values("status_id")[:1]
-        ),
-        validation_best_status_id=Subquery(
-            ValidationRun.objects.filter(
-                calibration_run_id=OuterRef("pk"),
-                validation_type=ValidationType.VALID_BEST.value
-            ).values("status_id")[:1]
-        ),
-    )
-
-    # ───── Combined status computation ─────
-    # Combined status computation:
-    # Django’s Case() evaluates WHEN clauses in order and stops at the first match.
-    # This explicit ordering defines the severity precedence manually when
-    # calibration status is DONE.
-    #
-    # Precedence when calibration is DONE (highest → lowest):
-    #   Running → Server_Error → Failed → Cancelled → Submitted → Done
-    #
-    # If calibration is NOT DONE, combined_status is simply the calibration status
-    # (e.g., Saved, Ready, Submitted, Running, etc.), and validation statuses are ignored.
-    #
-    # combined_status is ALWAYS computed (even when ids_only=True) so that:
-    #   • status filters behave consistently in both modes
-    #   • pagination and filtering always operate on the same rows
-    #
-    # Rules:
-    #   • If calibration is not Done → combined = calibration status
-    #   • If calibration is Done:
-    #       – If any validation is Running → combined = Running
-    #       – If any validation is Server_Error → combined = Server_Error
-    #       – If any validation is Failed → combined = Failed
-    #       – If any validation is Cancelled → combined = Cancelled
-    #       – If any validation is Submitted → combined = Submitted
-    #       – If all existing validations are Done (or missing) → combined = Done
-    #   • Missing validations are ignored.
-    # ------------------------------------------------------------------
-    qs = qs.annotate(
-        combined_status=Case(
-            # Calibration not done → use calibration status directly
-            When(~Q(status_id=DONE_ID), then=F("status__name")),
-
-            # Calibration done but any validation running
-            When(
-                Q(status_id=DONE_ID)
-                & (
-                        Q(validation_control_status_id=RUNNING_ID)
-                        | Q(validation_best_status_id=RUNNING_ID)
-                ),
-                then=Value(StatusEnum.RUNNING.value)
+    if qs.model is CalibrationRun:
+        # ─────────────────────────────────────────────────────────────
+        # Always annotate validation_control_status_id + validation_best_status_id.
+        # combined_status depends on these values, so they must be present
+        # for BOTH ids_only and full-detail modes.
+        #
+        # Note: these are the ValidationRun.status_id values (ints), not names.
+        # ─────────────────────────────────────────────────────────────
+        qs = qs.annotate(
+            validation_control_status_id=Subquery(
+                ValidationRun.objects.filter(
+                    calibration_run_id=OuterRef("pk"),
+                    validation_type=ValidationType.VALID_CONTROL.value
+                ).values("status_id")[:1]
             ),
-
-            # Calibration done but any validation server error
-            When(
-                Q(status_id=DONE_ID)
-                & (
-                        Q(validation_control_status_id=SERVER_ERROR_ID)
-                        | Q(validation_best_status_id=SERVER_ERROR_ID)
-                ),
-                then=Value(StatusEnum.SERVER_ERROR.value)
+            validation_best_status_id=Subquery(
+                ValidationRun.objects.filter(
+                    calibration_run_id=OuterRef("pk"),
+                    validation_type=ValidationType.VALID_BEST.value
+                ).values("status_id")[:1]
             ),
-
-            # Calibration done but any validation failed
-            When(
-                Q(status_id=DONE_ID)
-                & (
-                        Q(validation_control_status_id=FAILED_ID)
-                        | Q(validation_best_status_id=FAILED_ID)
-                ),
-                then=Value(StatusEnum.FAILED.value)
-            ),
-
-            # Calibration done but any validation cancelled
-            When(
-                Q(status_id=DONE_ID)
-                & (
-                        Q(validation_control_status_id=CANCELLED_ID)
-                        | Q(validation_best_status_id=CANCELLED_ID)
-                ),
-                then=Value(StatusEnum.CANCELLED.value)
-            ),
-
-            # Calibration done but any validation submitted
-            When(
-                Q(status_id=DONE_ID)
-                & (
-                        Q(validation_control_status_id=SUBMITTED_ID)
-                        | Q(validation_best_status_id=SUBMITTED_ID)
-                ),
-                then=Value(StatusEnum.SUBMITTED.value)
-            ),
-
-            # Calibration done and any existing validations are DONE (missing validations allowed).
-            # If VALID_CONTROL or VALID_BEST is missing, it does not block DONE here.
-            When(
-                Q(status_id=DONE_ID)
-                & (
-                        Q(validation_control_status_id__isnull=True)
-                        | Q(validation_control_status_id=DONE_ID)
-                )
-                & (
-                        Q(validation_best_status_id__isnull=True)
-                        | Q(validation_best_status_id=DONE_ID)
-                ),
-                then=Value(StatusEnum.DONE.value)
-            ),
-
-            # Fallback (covers any future status additions)
-            default=F("status__name"),
-            output_field=CharField(),
         )
-    )
 
-    if include_status_lower:
-        qs = qs.annotate(_status_lower=Lower("combined_status"))
+        # ───── Combined status computation ─────
+        # Combined status computation:
+        # Django’s Case() evaluates WHEN clauses in order and stops at the first match.
+        # This explicit ordering defines the severity precedence manually when
+        # calibration status is DONE.
+        #
+        # Precedence when calibration is DONE (highest → lowest):
+        #   Running → Server_Error → Failed → Cancelled → Submitted → Done
+        #
+        # If calibration is NOT DONE, combined_status is simply the calibration status
+        # (e.g., Saved, Ready, Submitted, Running, etc.), and validation statuses are ignored.
+        #
+        # combined_status is ALWAYS computed (even when ids_only=True) so that:
+        #   • status filters behave consistently in both modes
+        #   • pagination and filtering always operate on the same rows
+        #
+        # Rules:
+        #   • If calibration is not Done → combined = calibration status
+        #   • If calibration is Done:
+        #       – If any validation is Running → combined = Running
+        #       – If any validation is Server_Error → combined = Server_Error
+        #       – If any validation is Failed → combined = Failed
+        #       – If any validation is Cancelled → combined = Cancelled
+        #       – If any validation is Submitted → combined = Submitted
+        #       – If all existing validations are Done (or missing) → combined = Done
+        #   • Missing validations are ignored.
+        # ------------------------------------------------------------------
+        qs = qs.annotate(
+            combined_status=Case(
+                # Calibration not done → use calibration status directly
+                When(~Q(status_id=DONE_ID), then=F("status__name")),
+
+                # Calibration done but any validation running
+                When(
+                    Q(status_id=DONE_ID)
+                    & (
+                            Q(validation_control_status_id=RUNNING_ID)
+                            | Q(validation_best_status_id=RUNNING_ID)
+                    ),
+                    then=Value(StatusEnum.RUNNING.value)
+                ),
+
+                # Calibration done but any validation server error
+                When(
+                    Q(status_id=DONE_ID)
+                    & (
+                            Q(validation_control_status_id=SERVER_ERROR_ID)
+                            | Q(validation_best_status_id=SERVER_ERROR_ID)
+                    ),
+                    then=Value(StatusEnum.SERVER_ERROR.value)
+                ),
+
+                # Calibration done but any validation failed
+                When(
+                    Q(status_id=DONE_ID)
+                    & (
+                            Q(validation_control_status_id=FAILED_ID)
+                            | Q(validation_best_status_id=FAILED_ID)
+                    ),
+                    then=Value(StatusEnum.FAILED.value)
+                ),
+
+                # Calibration done but any validation cancelled
+                When(
+                    Q(status_id=DONE_ID)
+                    & (
+                            Q(validation_control_status_id=CANCELLED_ID)
+                            | Q(validation_best_status_id=CANCELLED_ID)
+                    ),
+                    then=Value(StatusEnum.CANCELLED.value)
+                ),
+
+                # Calibration done but any validation submitted
+                When(
+                    Q(status_id=DONE_ID)
+                    & (
+                            Q(validation_control_status_id=SUBMITTED_ID)
+                            | Q(validation_best_status_id=SUBMITTED_ID)
+                    ),
+                    then=Value(StatusEnum.SUBMITTED.value)
+                ),
+
+                # Calibration done and any existing validations are DONE (missing validations allowed).
+                # If VALID_CONTROL or VALID_BEST is missing, it does not block DONE here.
+                When(
+                    Q(status_id=DONE_ID)
+                    & (
+                            Q(validation_control_status_id__isnull=True)
+                            | Q(validation_control_status_id=DONE_ID)
+                    )
+                    & (
+                            Q(validation_best_status_id__isnull=True)
+                            | Q(validation_best_status_id=DONE_ID)
+                    ),
+                    then=Value(StatusEnum.DONE.value)
+                ),
+
+                # Fallback (covers any future status additions)
+                default=F("status__name"),
+                output_field=CharField(),
+            )
+        )
+
+        if include_status_lower:
+            qs = qs.annotate(_status_lower=Lower("combined_status"))
+
+    elif qs.model is ForecastRun or qs.model is HindcastRun:
+        # ─────────────────────────────────────────────────────────────
+        # Always annotate cold_start_status_id
+        # combined_status depends on this value, so it must be present.
+        #
+        # Note: these is the ColdStartRun.status_id value (int), not name.
+        # ─────────────────────────────────────────────────────────────
+        qs = qs.annotate(
+            cold_start_status_id=Subquery(
+                ColdStartRun.objects.filter(
+                    id=OuterRef("cold_start_run_id")
+                ).values("status_id")[:1]
+            )
+        )
+
+        # Rules:
+        #   • If cold start is not Done → combined = cold start status
+        #   • If cold start is Done or there is no cold start → combined = forecast/hindcast status
+        # ------------------------------------------------------------------
+        qs = qs.annotate(
+            combined_status=Case(
+                # Cold start done or no cold start → use forecast/hindcast status directly
+                When(Q(cold_start_status_id=DONE_ID) | Q(cold_start_status_id__isnull=True), then=F("status__name")),
+
+                # Cold start running
+                When(
+                    Q(cold_start_status_id=RUNNING_ID),
+                    then=Value(StatusEnum.RUNNING.value)
+                ),
+
+                # Cold start server error
+                When(
+                    Q(cold_start_status_id=SERVER_ERROR_ID),
+                    then=Value(StatusEnum.SERVER_ERROR.value)
+                ),
+
+                # Cold start failed
+                When(
+                    Q(cold_start_status_id=FAILED_ID),
+                    then=Value(StatusEnum.FAILED.value)
+                ),
+
+                # Cold start cancelled
+                When(
+                    Q(cold_start_status_id=CANCELLED_ID),
+                    then=Value(StatusEnum.CANCELLED.value)
+                ),
+
+                # Cold start submitted
+                When(
+                    Q(cold_start_status_id=SUBMITTED_ID),
+                    then=Value(StatusEnum.SUBMITTED.value)
+                ),
+
+                # Fallback (covers any future status additions)
+                default=F("status__name"),
+                output_field=CharField(),
+            )
+        )
+
+        if include_status_lower:
+            qs = qs.annotate(_status_lower=Lower("combined_status"))
+
+    elif include_status_lower:
+        qs = qs.annotate(_status_lower=Lower(F("status__name")))
 
     return qs
 
@@ -1300,53 +1490,6 @@ def get_hindcast_gages(request: Request) -> Response:
         400: OpenApiResponse(response=ErrorResponseSerializer, description="Validation error or parsing error"),
         500: OpenApiResponse(response=ErrorResponseSerializer, description="Internal server error"),
     },
-    description="Get distinct gage_ids for DONE Forecast jobs eligible for Verification (optional domain + include_archived)"
-)
-@api_view(["POST", "GET"])
-@handle_exceptions
-def get_forecast_gages_for_verification(request: Request) -> Response:
-    """
-    Get distinct gage_ids for DONE Forecast jobs eligible for Verification (optional domain + include_archived).
-    """
-    data = request.data if request.method == "POST" else request.query_params.dict()
-    logger.debug(f"{get_caller_name()}() request from {get_user_email(request)} - {data}")
-
-    validator, error_return = validate_request(GetGagesRequestSerializer, data)
-    if error_return:
-        return error_return
-
-    domain_name = validator.get("domain_name") or None
-    include_archived = validator.get("include_archived")
-
-    gages = get_forecast_base_gages(
-        ForecastRun,
-        auth_user(request),
-        run_status=[StatusEnum.DONE],
-        include_archived=include_archived,
-        domain_name=domain_name,
-    )
-
-    response = {"gages": gages}
-    response_validator, error_response = validate_response(
-        GetGagesResponseSerializer, response, fields_to_truncate=["gages"], max_length=10
-    )
-    if error_response:
-        return error_response
-
-    logger.debug(
-        f"Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - "
-        f'{json.dumps(truncate_large_fields(response_validator.data, fields_to_truncate=["gages"], max_length=10))}'
-    )
-    return Response(response_validator.data)
-
-
-@extend_schema(
-    request=GetGagesRequestSerializer,
-    responses={
-        200: GetGagesResponseSerializer,
-        400: OpenApiResponse(response=ErrorResponseSerializer, description="Validation error or parsing error"),
-        500: OpenApiResponse(response=ErrorResponseSerializer, description="Internal server error"),
-    },
     description="Get distinct gage_ids for DONE Hindcast jobs eligible for Verification (optional domain + include_archived)"
 )
 @api_view(["POST", "GET"])
@@ -1389,52 +1532,46 @@ def get_hindcast_gages_for_verification(request: Request) -> Response:
 
 
 @extend_schema(
-    request=GetVerificationGagesRequestSerializer,
+    request=GetGagesRequestSerializer,
     responses={
         200: GetGagesResponseSerializer,
         400: OpenApiResponse(response=ErrorResponseSerializer, description="Validation error or parsing error"),
         500: OpenApiResponse(response=ErrorResponseSerializer, description="Internal server error"),
     },
-    description="Get distinct gage_ids for forecast-based or hindcast-based Verification jobs (optional domain + include_archived)"
+    description="Get distinct gage_ids for hindcast-based Verification jobs (optional domain + include_archived)"
 )
 @api_view(["POST", "GET"])
 @handle_exceptions
 def get_verification_gages(request: Request) -> Response:
     """
-    Get distinct gage_ids for verification jobs for either forecast-based or
-    hindcast-based verification runs.
-
-    The request must include verification_job_type so the endpoint can use the
-    correct parent ORM path.
+    Get distinct gage_ids for hindcast-based verification jobs.
     """
     data = request.data if request.method == "POST" else request.query_params.dict()
     logger.debug(f"{get_caller_name()}() request from {get_user_email(request)} - {data}")
 
-    validator, error_return = validate_request(GetVerificationGagesRequestSerializer, data)
+    validator, error_return = validate_request(GetGagesRequestSerializer, data)
     if error_return:
         return error_return
 
     domain_name = validator.get("domain_name") or None
     include_archived = validator.get("include_archived")
-    verification_job_type = validator.get("verification_job_type")
-    paths = get_verification_parent_paths(verification_job_type)
 
     with readonly_transaction():
-        query = Q(**{f'{paths["calibration_prefix"]}owner': auth_user(request)})
+        query = Q(hindcast_run__calibration_run__owner=auth_user(request))
 
         # Default behavior: exclude archived calibration runs unless include_archived is explicitly true.
         if not include_archived:
-            query &= Q(**{paths["archived_field"]: False})
+            query &= Q(hindcast_run__calibration_run__is_archived=False)
 
         # Domain is optional. If not provided, include gages across all domains.
         if domain_name:
-            query &= Q(**{f'{paths["domain_field"]}__iexact': domain_name})
+            query &= Q(hindcast_run__calibration_run__gage__domain__name__iexact=domain_name)
 
         gages = list(
             VerificationRun.objects
             .filter(query)
-            .filter(**{paths["gage_isnull_field"]: False})
-            .values_list(paths["gage_value_field"], flat=True)
+            .filter(hindcast_run__calibration_run__gage__isnull=False)
+            .values_list("hindcast_run__calibration_run__gage__gage_id", flat=True)
             .distinct()
         )
 
@@ -1459,6 +1596,7 @@ def get_gages(
         require_both_validations_done: bool = False,
         include_archived: bool = False,
         domain_name: str | None = None,
+        minimum_job_count: int = 1,
 ) -> list[str]:
     """
     Get distinct non-null gage_ids for the authenticated user's CalibrationRuns.
@@ -1474,14 +1612,15 @@ def get_gages(
     :param include_archived: If True, include archived CalibrationRuns; otherwise exclude them.
                              Default is False so endpoints exclude archived by default.
     :param domain_name: Optional domain name (validated by serializer as a DomainEnum value).
-                   If None, include gages across all domains.
+                        If None, include gages across all domains.
+    :param minimum_job_count: Minimum number of matching CalibrationRuns required for a gage.
     :return: List of distinct gage_id strings.
     """
     with readonly_transaction():
         query = Q(owner=user)
 
         if run_status:
-            query &= Q(status__in=[s.db_instance for s in run_status])
+            query &= Q(status__in=[status.db_instance for status in run_status])
 
         qs = (
             CalibrationRun.objects
@@ -1519,7 +1658,10 @@ def get_gages(
             )
 
         return list(
-            qs.values_list("gage__gage_id", flat=True).distinct()
+            qs.values("gage__gage_id")
+            .annotate(job_count=Count("id"))
+            .filter(job_count__gte=minimum_job_count)
+            .values_list("gage__gage_id", flat=True)
         )
 
 
@@ -1592,7 +1734,7 @@ def get_jobs(
 
         # Centralized combined_status + validation status annotations.
         # Also annotate _status_lower only if we will use it (status filter present).
-        base_qs = annotate_calibration_combined_status(
+        base_qs = annotate_combined_status(
             base_qs,
             include_status_lower=bool(filters_dict.get("status")),
         )
@@ -1684,15 +1826,28 @@ def get_jobs(
             ordered_qs = ordered_qs[offset: offset + limit]
 
         # ───── Extract values AFTER slicing ─────
-        calibration_runs_qs = ordered_qs.values(
-            "id", "gage__gage_id", "gage__domain__name", "submit_date", "updated_at",
-            "job_name", "calibration_start_period", "calibration_end_period",
-            "status_id", "status__name", "combined_status", "job_genesis", "created_at",
-            "objective_function__name", "optimization__name",
-            "is_archived", "is_locked"
-        )
-
-        calibration_runs = list(calibration_runs_qs)
+        calibration_runs = [
+            {
+                "id": run.id,
+                "gage__gage_id": run.gage.gage_id if run.gage else None,
+                "gage__domain__name": run.gage.domain.name if run.gage else None,
+                "submit_date": run.submit_date,
+                "updated_at": run.updated_at,
+                "job_name": run.job_name,
+                "calibration_start_period": run.calibration_start_period,
+                "calibration_end_period": run.calibration_end_period,
+                "status_id": run.status_id,
+                "status__name": run.status.name if run.status else None,
+                "combined_status": run.combined_status,
+                "job_genesis": run.job_genesis,
+                "created_at": run.created_at,
+                "objective_function__name": run.objective_function.name if run.objective_function else None,
+                "optimization__name": run.optimization.name if run.optimization else None,
+                "is_archived": run.is_archived,
+                "is_locked": run.is_locked
+            }
+            for run in ordered_qs
+        ]
         run_ids = [r["id"] for r in calibration_runs]
 
         # ───── Preload modules if requested ─────
@@ -1939,6 +2094,11 @@ def _get_forecast_or_hindcast_base_jobs_internal(
     Shared internal helper to retrieve ForecastRun or HindcastRun rows for a user
     with optional filtering, sorting, and pagination.
 
+    Forecast/Hindcast status filtering is applied against combined_status, not
+    the raw ForecastRun/HindcastRun status. The response still returns separate
+    Forecast/Hindcast and ColdStartRun status fields so the UI can identify the
+    active phase.
+
     Runs in READ ONLY mode to reduce contention.
 
     :param model: ForecastRun or HindcastRun model class.
@@ -1978,6 +2138,53 @@ def _get_forecast_or_hindcast_base_jobs_internal(
         query = apply_forecast_filters(query, filters_dict)
 
         base_qs = model.objects.filter(query)
+
+        # ─────────────────────────────────────────────────────────────
+        # Compute combined_status before applying user status filters.
+        #
+        # Forecast/Hindcast jobs execute in sequential phases:
+        #
+        #     ColdStart → Forecast/Hindcast
+        #
+        # These phases never run simultaneously. If Forecast/Hindcast is
+        # running, ColdStart has already completed.
+        #
+        # combined_status represents the currently active phase:
+        #   • ColdStart not Done → use ColdStart status
+        #   • ColdStart Done (or absent) → use Forecast/Hindcast status
+        #
+        # This allows status filters and summary counts to reflect the
+        # effective workflow state rather than only the raw job status.
+        #
+        # Example:
+        #   ColdStart = Running
+        #   Forecast  = Submitted
+        #   combined  = Running
+        #
+        # The API response still returns the individual status fields:
+        #   • forecast_status / hindcast_status
+        #   • cold_start.cold_start_status
+        #
+        # so the UI can distinguish which phase is active.
+        # ─────────────────────────────────────────────────────────────
+        base_qs = annotate_combined_status(
+            base_qs,
+            include_status_lower=bool(filters_dict.get("status")),
+        )
+
+        # ─────────────────────────────────────────────────────────────
+        # Apply user status filtering against combined_status rather
+        # than the raw Forecast/Hindcast status so filtering reflects
+        # the currently active workflow phase.
+        #
+        # Must occur after combined_status has been annotated.
+        # ─────────────────────────────────────────────────────────────
+        if "status" in filters_dict and filters_dict["status"]:
+            # Normalize to lowercase for case-insensitive matching
+            normalized_statuses = [s.strip().lower() for s in filters_dict["status"]]
+
+            # _status_lower already exists (include_status_lower=True above) when a status filter is present.
+            base_qs = base_qs.filter(_status_lower__in=normalized_statuses)
 
         # total_count must be BEFORE pagination
         total_count = base_qs.count()
@@ -2256,77 +2463,6 @@ def get_hindcast_jobs(request: Request) -> Response:
 
 
 @extend_schema(
-    request=ForecastPaginationSerializer,
-    responses={
-        200: GetForecastJobsResponseSerializer,
-        400: OpenApiResponse(
-            response=ErrorResponseSerializer,
-            description="Validation error or parsing error"
-        ),
-        500: OpenApiResponse(
-            response=ErrorResponseSerializer,
-            description="Internal server error"
-        )
-    },
-    description="Get DONE forecast jobs"
-)
-@api_view(['POST', 'GET'])
-@handle_exceptions
-def get_forecast_jobs_for_verification(request: Request) -> Response:
-    """
-    Retrieve only DONE forecast jobs for the authenticated user.
-
-    Runs in READ ONLY mode to reduce contention.
-
-    :param request: The HTTP request object containing forecast pagination data.
-    :return: JSON response with forecast jobs or error information.
-    """
-    data = request.data if request.method == 'POST' else request.query_params.dict()
-    logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
-
-    validator, error_return = validate_request(ForecastPaginationSerializer, data)
-    if error_return:
-        return error_return
-
-    limit = validator.get("limit")
-    offset = validator.get("offset", 0)
-    filters = validator.get("filters") or {}
-    sort = validator.get("sort")
-    filters, sort = _normalize_filters_and_sort(filters, sort)
-
-    forecast_jobs, total_count, date_range, id_range = get_forecast_jobs_internal(
-        auth_user(request),
-        run_status=[StatusEnum.DONE],
-        limit=limit,
-        offset=offset,
-        filters=filters,
-        sort=sort
-    )
-
-    response = {
-        "forecast_jobs": forecast_jobs,
-        "total_count": total_count
-    }
-    if total_count > 0:
-        response['date_range'] = date_range
-        response['id_range'] = id_range
-
-    response_validator, error_response = validate_response(
-        GetForecastJobsResponseSerializer, response,
-        fields_to_truncate=['forecast_jobs'],
-        max_length=10
-    )
-    if error_response:
-        return error_response
-
-    logger.debug(
-        f'Returning to {get_user_email(request)} from {get_caller_name()}(){get_elapsed_str(request)} - '
-        f'{json.dumps(truncate_large_fields(response_validator.data, fields_to_truncate=["forecast_jobs"], max_length=10))}'
-    )
-    return Response(response_validator.data)
-
-
-@extend_schema(
     request=HindcastPaginationSerializer,
     responses={
         200: GetHindcastJobsResponseSerializer,
@@ -2400,7 +2536,6 @@ def get_hindcast_jobs_for_verification(request: Request) -> Response:
 
 def get_verification_jobs_internal(
         user: CustomUser,
-        verification_job_type: Literal['forecast', 'hindcast'],
         run_status: list[StatusEnum] | None = None,
         limit: int | None = None,
         offset: int = 0,
@@ -2408,8 +2543,8 @@ def get_verification_jobs_internal(
         sort: dict[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], int, list[Any], list[Any]]:
     """
-    Internal helper to retrieve verification jobs for either forecast-based or
-    hindcast-based verification runs, with optional filtering, sorting, and pagination.
+    Retrieve hindcast-based verification jobs for a user with optional filtering,
+    sorting, and pagination.
 
     Runs in READ ONLY mode to reduce contention.
 
@@ -2419,9 +2554,7 @@ def get_verification_jobs_internal(
         is treated as "or" by the shared filter logic.
 
     :param user: Owner of the jobs to fetch.
-    :param verification_job_type: Parent job type for the verification jobs being
-        queried. Must be either 'forecast' or 'hindcast'.
-    :param run_status: Optional list of StatusEnum values to restrict the base job set (e.g., DONE).
+    :param run_status: Optional list of StatusEnum values to restrict the base job set.
                        This restriction is applied before computing date/id ranges and before user filters.
     :param limit: Optional maximum number of rows to return (for pagination). If None, return all.
     :param offset: Optional number of rows to skip before returning results (for pagination).
@@ -2438,10 +2571,9 @@ def get_verification_jobs_internal(
     """
     filters_dict: dict[str, Any] = filters or {}
     order_by = resolve_sort(sort, VerificationSortField)
-    paths = get_verification_parent_paths(verification_job_type)
 
     with readonly_transaction():
-        query = Q(**{f'{paths["calibration_prefix"]}owner': user})
+        query = Q(hindcast_run__calibration_run__owner=user)
 
         # Apply status restriction early so ranges reflect run_status restriction
         if run_status:
@@ -2451,10 +2583,9 @@ def get_verification_jobs_internal(
         date_range, id_range = compute_range(VerificationRun, query)
 
         # Now apply user filters
-        query = apply_verification_filters(query, filters_dict, verification_job_type=verification_job_type)
+        query = apply_verification_filters(query, filters_dict)
 
         base_qs = VerificationRun.objects.filter(query)
-
         total_count = base_qs.count()
 
         # ──────────────────────────────────────────
@@ -2467,7 +2598,7 @@ def get_verification_jobs_internal(
         rows = list(
             paged_qs.values(
                 "id",
-                paths["parent_run_id_field"],
+                "hindcast_run_id",
                 "status__name",
                 "submit_date"
             )
@@ -2494,17 +2625,13 @@ def get_verification_jobs_internal(
             description="Internal server error"
         )
     },
-    description="Get verification jobs"
+    description="Get hindcast-based verification jobs"
 )
 @api_view(['POST', 'GET'])
 @handle_exceptions
 def get_verification_jobs(request: Request) -> Response:
     """
-    Retrieve verification jobs for the authenticated user for either forecast-based
-    or hindcast-based verification runs.
-
-    The request must include verification_job_type so the endpoint can query the
-    correct parent run relationship and return the matching parent run id field.
+    Retrieve hindcast-based verification jobs for the authenticated user.
 
     Runs in READ ONLY mode to reduce contention.
 
@@ -2522,12 +2649,10 @@ def get_verification_jobs(request: Request) -> Response:
     offset = validator.get("offset", 0)
     filters = validator.get("filters") or {}
     sort = validator.get("sort")
-    verification_job_type = validator.get("verification_job_type")
     filters, sort = _normalize_filters_and_sort(filters, sort)
 
     verification_jobs, total_count, date_range, id_range = get_verification_jobs_internal(
         auth_user(request),
-        verification_job_type=verification_job_type,
         run_status=None,
         limit=limit,
         offset=offset,
@@ -2555,51 +2680,6 @@ def get_verification_jobs(request: Request) -> Response:
         f'{json.dumps(truncate_large_fields(response_validator.data, fields_to_truncate=["verification_jobs"], max_length=10))}'
     )
     return Response(response_validator.data)
-
-
-def get_verification_parent_paths(
-        verification_job_type: Literal['forecast', 'hindcast'],
-) -> dict[str, str]:
-    """
-    Return ORM path fragments for verification queries based on whether the
-    verification job belongs to a forecast run or a hindcast run.
-
-    The returned values are used to build:
-      - ownership constraints
-      - gage/domain filters
-      - archived filters
-      - module filters
-      - gage extraction for verification gage endpoints
-
-    :param verification_job_type: Parent job type for the verification jobs being
-        queried. Must be either 'forecast' or 'hindcast'.
-    :return: Dictionary containing the ORM prefixes/field paths needed for
-        verification queries.
-    """
-    if verification_job_type == 'forecast':
-        return {
-            "parent_prefix": "forecast_run__",
-            "calibration_prefix": "forecast_run__calibration_run__",
-            "gage_prefix": "forecast_run__calibration_run__gage__",
-            "module_prefix": "forecast_run__calibration_run__calibrationformulation__",
-            "archived_field": "forecast_run__calibration_run__is_archived",
-            "domain_field": "forecast_run__calibration_run__gage__domain__name",
-            "gage_value_field": "forecast_run__calibration_run__gage__gage_id",
-            "gage_isnull_field": "forecast_run__calibration_run__gage__isnull",
-            "parent_run_id_field": "forecast_run_id",
-        }
-
-    return {
-        "parent_prefix": "hindcast_run__",
-        "calibration_prefix": "hindcast_run__calibration_run__",
-        "gage_prefix": "hindcast_run__calibration_run__gage__",
-        "module_prefix": "hindcast_run__calibration_run__calibrationformulation__",
-        "archived_field": "hindcast_run__calibration_run__is_archived",
-        "domain_field": "hindcast_run__calibration_run__gage__domain__name",
-        "gage_value_field": "hindcast_run__calibration_run__gage__gage_id",
-        "gage_isnull_field": "hindcast_run__calibration_run__gage__isnull",
-        "parent_run_id_field": "hindcast_run_id",
-    }
 
 
 def compute_range(model: type[BaseRun], query: Q) -> tuple[

@@ -153,8 +153,8 @@ def save_optimization_tab(request) -> Response:
     calibration_run_id = validator.get('calibration_run_id')
     optimization_name = validator.get('optimization')
     objective_function_name = validator.get('objective_function')
-    streamflow_threshold = validator.get('streamflow_threshold')
-    peak_flow_threshold = validator.get('peak_flow_threshold')
+    threshold_categorical = validator.get('threshold_categorical')
+    threshold_event = validator.get('threshold_event')
     optimization_inputs = validator.get('optimization_inputs')
     stop_criteria = validator.get('stop_criteria')
     save_plot_iteration_frequency = validator.get('save_plot_iteration_frequency')
@@ -166,11 +166,11 @@ def save_optimization_tab(request) -> Response:
     assert run is not None
 
     if have_LSTM(run) and (optimization_name or objective_function_name or
-                           streamflow_threshold is not None or peak_flow_threshold is not None or
+                           threshold_categorical is not None or threshold_event is not None or
                            optimization_inputs or stop_criteria is not None or
                            save_output_iteration or save_plot_iteration_frequency is not None):
         return ResponseError(
-            "You cannot specify optimization_name, objective_function_name, streamflow_threshold, peak_flow_threshold, "
+            "You cannot specify optimization_name, objective_function_name, threshold_categorical, threshold_event, "
             "optimization_name, stop_criteria, save_output_iteration or save_plot_iteration_frequency when using LSTM")
 
     if optimization_inputs and not optimization_name:
@@ -186,7 +186,7 @@ def save_optimization_tab(request) -> Response:
         # No optimization specified → clear optimization and inputs
         run.optimization = None
 
-    error_message = validate_objective_function(run, objective_function_name, streamflow_threshold, peak_flow_threshold)
+    error_message = validate_objective_function(run, objective_function_name, threshold_categorical, threshold_event)
     if error_message:
         return ResponseError(error_message)
 
@@ -196,8 +196,8 @@ def save_optimization_tab(request) -> Response:
     if save_output_iteration is not None:
         run.save_output_iteration = save_output_iteration
 
-    run.streamflow_threshold = streamflow_threshold
-    run.peak_flow_threshold = peak_flow_threshold
+    run.threshold_categorical = threshold_categorical
+    run.threshold_event = threshold_event
 
     # keep_ids = {obj.optimization_input_id for obj in prepared_inputs} if prepared_inputs else set()
     with transaction.atomic():
@@ -292,15 +292,15 @@ def validate_optimizations(
 
 def validate_objective_function(run: CalibrationRun,
                                 objective_function_name: str | None,
-                                streamflow_threshold: float | None,
-                                peak_flow_threshold: float | None) -> str | None:
+                                threshold_categorical: float | None,
+                                threshold_event: float | None) -> str | None:
     """
     Validates and assigns the objective function to a calibration run.
 
     :param run: The CalibrationRun instance.
     :param objective_function_name: Name of the objective function to apply.
-    :param streamflow_threshold: Streamflow threshold value.
-    :param peak_flow_threshold: Peak flow threshold value.
+    :param threshold_categorical: Categorical threshold value.
+    :param threshold_event: Event threshold value.
     :return: Error message if validation fails, otherwise None.
     """
     if objective_function_name:
@@ -316,14 +316,14 @@ def validate_objective_function(run: CalibrationRun,
         run.objective_function = objective_function
 
         if objective_function.categorical:
-            if not streamflow_threshold:
-                return "Streamflow threshold must be specified for a categorical function"
-            run.streamflow_threshold = streamflow_threshold
+            if not threshold_categorical:
+                return "threshold_categorical must be specified for a categorical function"
+            run.threshold_categorical = threshold_categorical
 
         if objective_function.event_based:
-            if not peak_flow_threshold:
-                return "Peak flow threshold must be specified for an event-based function"
-            run.peak_flow_threshold = peak_flow_threshold
+            if not threshold_event:
+                return "threshold_event must be specified for an event-based function"
+            run.threshold_event = threshold_event
 
     return None
 

@@ -65,6 +65,7 @@ import botocore.client
 import botocore.exceptions
 import fsspec
 from boto3.exceptions import S3UploadFailedError
+from botocore import UNSIGNED
 from botocore.config import Config
 from botocore.exceptions import ProfileNotFound
 
@@ -1800,6 +1801,108 @@ def get_s3_client(*, profile_name: str | None = None) -> botocore.client.BaseCli
     """
     session = _get_boto3_session(profile_name=profile_name)
     return session.client("s3")
+
+
+def get_public_s3_client() -> botocore.client.BaseClient:
+    """
+    Return an unsigned S3 client for public buckets.
+
+    Use this for public NOAA/NWS buckets where application AWS credentials
+    should not be required.
+    """
+    return boto3.client(
+        "s3",
+        config=Config(
+            signature_version=cast(Any, UNSIGNED),
+        ),
+    )
+
+
+def list_s3_common_prefixes(
+        *,
+        bucket: str,
+        prefix: str = "",
+        delimiter: str = "/",
+        public: bool = False,
+        profile_name: str | None = None,
+) -> list[str]:
+    """
+    List immediate child prefixes under an S3 prefix.
+
+    Example:
+        bucket='noaa-nws-aorc-v1-1-1km', prefix=''
+        may return ['1979/', '1980/', ..., '2025/']
+
+    :param bucket: S3 bucket name.
+    :param prefix: Optional key prefix.
+    :param delimiter: S3 delimiter, usually '/'.
+    :param public: If True, use unsigned public S3 access.
+    :param profile_name: Optional AWS profile for non-public access.
+    :return: List of CommonPrefixes values.
+    """
+    if not bucket:
+        raise ValueError("bucket is required")
+
+    s3 = get_public_s3_client() if public else get_s3_client(profile_name=profile_name)
+
+    prefixes: list[str] = []
+    continuation_token = None
+    context_path = f"s3://{bucket}/{prefix}"
+
+    while True:
+        kwargs: dict[str, Any] = {
+            "Bucket": bucket,
+            "Prefix": prefix,
+            "Delimiter": delimiter,
+        }
+
+        if continuation_token:
+            kwargs["ContinuationToken"] = continuation_token
+
+        try:
+            resp = s3.list_objects_v2(**kwargs)
+
+        except botocore.exceptions.ClientError as e:
+            code = e.response.get("Error", {}).get("Code")
+
+            if code in ("ExpiredToken", "InvalidAccessKeyId", "InvalidClientTokenId"):
+                raise S3CredentialsExpired(
+                    _expired_credentials_message(
+                        "list_s3_common_prefixes",
+                        context_path,
+                        profile_name,
+                    )
+                ) from e
+
+            raise
+
+        except PermissionError as e:
+            if "expired" in str(e).lower():
+                raise S3CredentialsExpired(
+                    _expired_credentials_message(
+                        "list_s3_common_prefixes",
+                        context_path,
+                        profile_name,
+                    )
+                ) from e
+
+            raise PermissionError(f"{e}{_format_profile_suffix(profile_name)}") from e
+
+        except Exception as e:
+            _raise_if_s3_profile_error(e, profile_name=profile_name)
+            raise
+
+        for item in resp.get("CommonPrefixes") or []:
+            value = item.get("Prefix")
+            if value:
+                prefixes.append(value)
+
+        if not resp.get("IsTruncated"):
+            break
+
+        continuation_token = resp.get("NextContinuationToken")
+
+    return prefixes
 
 
 def check_aws_credentials(*, timeout_seconds: int = 3) -> None:

@@ -5,11 +5,11 @@ from typing import Any
 
 import yaml
 
-from calibration.enums import HindcastConfigEnum, ForecastConfigEnum
+from calibration.enums import HindcastConfigEnum
 from calibration.models import VerificationRun
 from calibration.util.caching import generate_forecast_config_yaml
-from calibration.util.ngen_locations import get_verification_run_dir, VERF_CROSSWALK_NGEN_FILE, get_forecast_output_file_path, \
-    get_verification_yaml_config_file, get_hindcast_output_file_name, get_hindcast_dir
+from calibration.util.ngen_locations import get_verification_run_dir, VERF_CROSSWALK_NGEN_FILE, \
+    get_verification_yaml_config_file, get_hindcast_output_file_name, get_hindcast_dir, get_observational_file_for_hindcast
 from calibration.views.called_from import called_from
 from calibration.views.common import format_datetime
 
@@ -43,14 +43,6 @@ CONFIG_TEMPLATE = {
         "data_source": ""
     },
 
-    "flow_observation": {
-        "usgs": {
-            "chunk_by": "month",
-            "overwrite_output": True,
-            "memory_per_worker_gb": 3
-        }
-    },
-
     "pair_data": {
         "overwrite": True,
         "group_size": 200
@@ -60,8 +52,14 @@ CONFIG_TEMPLATE = {
         "overwrite": True,
         "library": "nwm.eval",
         "metric_subset": "all",
-        "flow_threshold_categorical": 0.9,
-        "flow_threshold_event": 0.9,
+        "threshold_categorical": {
+            "value": 0.9,  # threshold value to be used for categorical metrics in nwm.eval
+            "type": "quantile"  # type of threshold for categorical metrics in nwm.eval; options are 'quantile' or 'absolute'
+        },
+        "threshold_event": {
+            "value": 0.9,  # threshold value to be used for event-based metrics in nwm.eval
+            "type": "quantile"  # type of threshold for event-based metrics in nwm.eval; options are 'quantile' or 'absolute'
+        },
         "lead_times": ['all_aggregated'],
         "file_format": "parquet"
     },
@@ -83,15 +81,16 @@ CONFIG_TEMPLATE = {
 
 def create_verification_input(run: VerificationRun) -> str:
     """
+    Create the nwm.eval configuration for a hindcast-based verification run.
+
     :param run: The VerificationRun instance to validate and prepare.
     :return: Path to the generated config file.
     """
     logger.info(called_from())
 
-    is_hindcast = run.hindcast_run_id is not None
-    parent_run = run.parent_run
-    calibration_run = parent_run.calibration_run
-    configuration_internal_name = parent_run.configuration.internal_name
+    hindcast_run = run.hindcast_run
+    calibration_run = hindcast_run.calibration_run
+    configuration_internal_name = hindcast_run.configuration.internal_name
 
     short_range = configuration_internal_name.startswith('short_range')
     medium_range = configuration_internal_name.startswith('medium_range')
@@ -116,83 +115,59 @@ def create_verification_input(run: VerificationRun) -> str:
     file_paths['base_dir'] = get_verification_run_dir(run)
     file_paths['crosswalk_file'] = {'ngen': VERF_CROSSWALK_NGEN_FILE}
     file_paths['fcst_config_file'] = generate_forecast_config_yaml(
-        enum_class=HindcastConfigEnum if is_hindcast else ForecastConfigEnum
+        enum_class=HindcastConfigEnum
     )
-
-    if is_hindcast:
-        hindcast_run = run.hindcast_run
-        assert hindcast_run is not None
-
-        file_paths['fcst_data_dir'] = {
-            calibration_run.job_name: get_hindcast_dir(hindcast_run)
-        }
-        file_paths['fcst_data_file'] = get_hindcast_output_file_name(hindcast_run)
-    else:
-        forecast_run = run.forecast_run
-        assert forecast_run is not None
-
-        file_paths['fcst_data_file'] = {
-            calibration_run.job_name: get_forecast_output_file_path(forecast_run)
-        }
-
+    file_paths['fcst_data_dir'] = {
+        calibration_run.job_name: get_hindcast_dir(hindcast_run)
+    }
+    file_paths['fcst_data_file'] = get_hindcast_output_file_name(hindcast_run)
+    file_paths['obs_data_file'] = get_observational_file_for_hindcast(hindcast_run)
     file_paths['output_dir'] = get_verification_run_dir(run)
 
     general: dict[str, Any] = config['general']
 
-    # Override values in YAML with info from our parent run / calibration run
+    # Override values in YAML with info from the hindcast run / calibration run
     general['location_set_name'] = 'usgs_' + calibration_run.gage.gage_id
     general['location_list'] = [calibration_run.gage.gage_id]
     general['nwm_configuration'] = configuration_internal_name
     general['dataset_name'] = [calibration_run.job_name]
     general['nwm_version'] = ['ngen']
-    general['forecast_start_date'] = [format_datetime(parent_run.cycle_date)]
+    general['forecast_start_date'] = [format_datetime(hindcast_run.cycle_date)]
 
-    # Forecast verification uses one cycle, so the end date is the same as the start date.
-    #
-    # Hindcast verification spans multiple cycles. For hindcast, forecast_end_date should be
+    # Hindcast verification spans multiple cycles. forecast_end_date should be
     # the start time of the last hindcast cycle.
-    if is_hindcast:
-        hindcast_run = run.hindcast_run
-        assert hindcast_run is not None
-
-        last_cycle_date = hindcast_run.cycle_date + timedelta(
-            hours=hindcast_run.interval_cycle * (hindcast_run.num_iterations - 1)
-        )
-        general['forecast_end_date'] = [format_datetime(last_cycle_date)]
-    else:
-        general['forecast_end_date'] = [format_datetime(parent_run.cycle_date)]
+    last_cycle_date = hindcast_run.cycle_date + timedelta(
+        hours=hindcast_run.interval_cycle * (hindcast_run.num_iterations - 1)
+    )
+    general['forecast_end_date'] = [format_datetime(last_cycle_date)]
 
     nwm_forecast: dict[str, Any] = config['nwm_forecast']
-    nwm_forecast['data_source'] = 'hindcast' if is_hindcast else 'ngenCERF'
+    nwm_forecast['data_source'] = 'hindcast'
 
     metrics: dict[str, Any] = config['metrics']
-    metrics['lead_times'] = ['all', '1-5', '6-10', '11-18', 'all_aggregated'] if is_hindcast else ['all_aggregated']
 
     plots: dict[str, Any] = config['plots']
 
-    if is_hindcast:
-        if short_range:
-            metrics_lead_times = metrics_lead_time_short_range
-            time_series_lead_times = time_series_lead_times_short_range
-            bar_chart_lead_times = bar_chart_lead_times_short_range
-        elif medium_range:
-            metrics_lead_times = metrics_lead_time_medium_range
-            time_series_lead_times = time_series_lead_times_medium_range
-            bar_chart_lead_times = bar_chart_lead_times_medium_range
-        elif long_range:
-            metrics_lead_times = metrics_lead_time_long_range
-            time_series_lead_times = time_series_lead_times_long_range
-            bar_chart_lead_times = bar_chart_lead_times_long_range
-        else:
-            raise ValueError(f"Unsupported hindcast configuration: {configuration_internal_name}")
-
-        metrics['lead_times'] = metrics_lead_times
-        plots['time_series']['lead_times'] = time_series_lead_times
-        plots['metric_table']['lead_times'] = bar_chart_lead_times  # Use same as bar chart
-        plots['barchart']['lead_times'] = bar_chart_lead_times
-        plots['barchart']['metric_subset'] = ['KGE', 'NSE', 'CORR', 'NNSE', 'PBIAS']
+    if short_range:
+        metrics_lead_times = metrics_lead_time_short_range
+        time_series_lead_times = time_series_lead_times_short_range
+        bar_chart_lead_times = bar_chart_lead_times_short_range
+    elif medium_range:
+        metrics_lead_times = metrics_lead_time_medium_range
+        time_series_lead_times = time_series_lead_times_medium_range
+        bar_chart_lead_times = bar_chart_lead_times_medium_range
+    elif long_range:
+        metrics_lead_times = metrics_lead_time_long_range
+        time_series_lead_times = time_series_lead_times_long_range
+        bar_chart_lead_times = bar_chart_lead_times_long_range
     else:
-        metrics['lead_times'] = ['all_aggregated']
+        raise ValueError(f"Unsupported hindcast configuration: {configuration_internal_name}")
+
+    metrics['lead_times'] = metrics_lead_times
+    plots['time_series']['lead_times'] = time_series_lead_times
+    plots['metric_table']['lead_times'] = bar_chart_lead_times  # Use same as bar chart
+    plots['barchart']['lead_times'] = bar_chart_lead_times
+    plots['barchart']['metric_subset'] = ['KGE', 'NSE', 'CORR', 'NNSE', 'PBIAS']
 
     # -----------------------------
     # FILE WRITE PHASE

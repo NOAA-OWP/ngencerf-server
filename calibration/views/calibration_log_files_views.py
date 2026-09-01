@@ -21,7 +21,7 @@ from calibration.views.calibration_evaluation_views import logger
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import get_validation_run, get_forecast_run, get_verification_run, get_calibration_run, handle_exceptions, \
     get_user_email, validate_request, validate_response, get_elapsed_str, CerfException, truncate_large_fields, get_hindcast_run, \
-    find_validation_worker_with_matching_id, worker_directory_pattern, map_path_to_host
+    find_validation_worker_with_matching_id, worker_directory_pattern
 
 
 @extend_schema(
@@ -215,7 +215,7 @@ def get_log(request: Request) -> Response:
     response = {
         'message': f"Log file {requested_log_name} retrieved",
         'log_data': paginated_lines,
-        'log_name': map_path_to_host(requested_log_name),
+        'log_name': requested_log_name,
         'byte_offset': file_size,
         'pagination_metadata': pagination_metadata,
         # 'status': get_status_name_for_log(ctx, log_category),
@@ -308,7 +308,7 @@ def get_log_status(request: Request) -> Response:
     file_size = os.path.getsize(requested_log_name) if os.path.exists(requested_log_name) else 0
 
     response = {
-        'message': f"Log file {map_path_to_host(requested_log_name)} has " +
+        'message': f"Log file {requested_log_name} has " +
                    ("changed" if file_size != byte_offset else "not changed"),
         'file_updated': (file_size != byte_offset),
         # 'status': get_status_name_for_log(ctx, log_category)
@@ -410,7 +410,7 @@ def resolve_log_context(
             return None, error_return
         assert verification_run is not None
 
-        calibration_run = verification_run.parent_run.calibration_run
+        calibration_run = verification_run.hindcast_run.calibration_run
 
     else:
         # Must be a calibration

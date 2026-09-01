@@ -1,5 +1,0 @@
-# RFC Additional NextGen Calibration Basin List - CONUS.csv references 2 gages by NWS_id that we don't have in the other files
-# so we'll add them here
-gage_id,nws_id,lat,long,station_name
-15493000,UCHA2,64.9020,-146.361,Chena River at Mile 40 Bridge
-15056210,TYAA2,59.5119,-135.344,Taiya River near Skagway

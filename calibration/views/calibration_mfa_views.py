@@ -8,7 +8,9 @@ from urllib.parse import quote
 from django.conf import settings
 from django.contrib.auth import authenticate, get_user_model
 from django.contrib.auth.hashers import make_password, check_password
+from django.contrib.auth.password_validation import validate_password
 from django.core import signing
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.signing import BadSignature, SignatureExpired
 from django.db import transaction
 from django_otp.plugins.otp_totp.models import TOTPDevice
@@ -20,10 +22,12 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
 
+from calibration.auth.active_directory_service import ActiveDirectoryAuthorizationError, ActiveDirectoryServiceBindError
 from calibration.models import MFARecoveryCode
 from calibration.util.calibration_validators import MFASetupResponseSerializer, ErrorResponseSerializer, MFAConfirmSetupSerializer, \
     LoginRequestSerializer, MFAVerifySerializer, MFARequiredResponseSerializer, MFASetupRequiredResponseSerializer, \
-    TokenPairResponseSerializer, MFASetupRequestSerializer, MFAConfirmSetupResponseSerializer
+    TokenPairResponseSerializer, MFASetupRequestSerializer, MFAConfirmSetupResponseSerializer, CreateLocalUserResponseSerializer, \
+    CreateLocalUserRequestSerializer, ChangePasswordResponseSerializer, ChangePasswordRequestSerializer
 from calibration.views.called_from import get_caller_name
 from calibration.views.common import handle_exceptions, validate_request, validate_response, get_user_email
 
@@ -201,7 +205,7 @@ def setup_mfa(request: Request) -> Response:
 
     logger.debug(f'{get_caller_name()}() resolved MFA setup user: {user.email}')
 
-    # If user has already completed mfs setup, then leave everything alone
+    # If user has already completed MFA setup, then leave everything alone
     if user.mfa_enabled:
         return mfa_error_response(
             error_code="MFA_ALREADY_CONFIGURED",
@@ -426,7 +430,23 @@ def login(request: Request) -> Response:
     email = validator.get("email")
     password = validator.get("password")
 
-    user = authenticate(request, email=email, password=password)
+    try:
+        user = authenticate(request, email=email, password=password)
+    except ActiveDirectoryAuthorizationError:
+        return mfa_error_response(
+            error_code="USER_NOT_AUTHORIZED",
+            ui_action=UI_ACTION_STAY_ON_LOGIN,
+            message="User is not authorized for this system.",
+            status_code=status.HTTP_403_FORBIDDEN,
+        )
+
+    except ActiveDirectoryServiceBindError:
+        return mfa_error_response(
+            error_code="ACTIVE_DIRECTORY_UNAVAILABLE",
+            ui_action=UI_ACTION_STAY_ON_LOGIN,
+            message="Active Directory authentication service is currently unavailable.",
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
 
     if not user:
         return mfa_error_response(
@@ -628,6 +648,286 @@ def verify_mfa(request: Request) -> Response:
     return Response(response_validator.data)
 
 
+@extend_schema(
+    request=CreateLocalUserRequestSerializer,
+    responses={
+        201: CreateLocalUserResponseSerializer,
+        400: OpenApiResponse(
+            response=ErrorResponseSerializer,
+            description="Validation error or duplicate user"
+        ),
+        401: OpenApiResponse(
+            response=ErrorResponseSerializer,
+            description="Authentication required"
+        ),
+        403: OpenApiResponse(
+            response=ErrorResponseSerializer,
+            description="Admin privileges required"
+        ),
+        500: OpenApiResponse(
+            response=ErrorResponseSerializer,
+            description="Internal server error"
+        )
+    },
+    description="Create a local-only user. Requires admin privileges."
+)
+@api_view(["POST"])
+@handle_exceptions
+def create_local_user(request: Request) -> Response:
+    """
+    Create a local-only Django user.
+
+    Local-only users:
+    - bypass Active Directory authentication
+    - authenticate using Django password authentication only
+    - are intended for admin-created accounts
+
+    This endpoint:
+    - requires authentication
+    - requires staff/admin privileges
+    - is not intended for public self-registration
+    """
+    data = request.data
+    logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
+
+    if not request.user or not request.user.is_authenticated:
+        return mfa_error_response(
+            error_code="AUTH_REQUIRED",
+            ui_action=UI_ACTION_STAY_ON_LOGIN,
+            message="Authentication required.",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    if not request.user.is_staff:
+        return mfa_error_response(
+            error_code="ADMIN_REQUIRED",
+            ui_action=UI_ACTION_STAY_ON_LOGIN,
+            message="Admin privileges required.",
+            status_code=status.HTTP_403_FORBIDDEN,
+        )
+
+    validator, error_return = validate_request(CreateLocalUserRequestSerializer, data)
+    if error_return:
+        return error_return
+
+    email = validator.get("email").strip().lower()
+    password = validator.get("password")
+    first_name = validator.get("first_name", "").strip()
+    last_name = validator.get("last_name", "").strip()
+
+    if User.objects.filter(email__iexact=email).exists():
+        return mfa_error_response(
+            error_code="USER_ALREADY_EXISTS",
+            ui_action=UI_ACTION_STAY_ON_LOGIN,
+            message="A user with this email already exists.",
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        validate_password(password)
+    except DjangoValidationError as e:
+        return mfa_error_response(
+            error_code="INVALID_PASSWORD",
+            ui_action=UI_ACTION_STAY_ON_LOGIN,
+            message=" ".join(e.messages),
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+
+    user = User.objects.create_user(
+        email=email,
+        username=email,
+        password=password,
+        first_name=first_name,
+        last_name=last_name,
+        is_active=True,
+        is_local_only=True,
+        ad_guid=None,
+        mfa_enabled=False,
+    )
+
+    response = {
+        "message": "Local-only user created successfully.",
+        "email": user.email,
+    }
+
+    response_validator, error_response = validate_response(CreateLocalUserResponseSerializer, response)
+    if error_response:
+        return error_response
+
+    logger.info(
+        "Created local-only user: user_id=%s email=%s created_by=%s",
+        user.id,
+        user.email,
+        request.user.email,
+    )
+
+    logger.debug(
+        f'Returning to {get_user_email(request)} from {get_caller_name()}() - '
+        f'{json.dumps(response_validator.data)}'
+    )
+
+    return Response(response_validator.data, status=status.HTTP_201_CREATED)
+
+
+@extend_schema(
+    request=ChangePasswordRequestSerializer,
+    responses={
+        200: ChangePasswordResponseSerializer,
+        400: OpenApiResponse(
+            response=ErrorResponseSerializer,
+            description="Validation error, invalid current password, invalid new password, or user not found"
+        ),
+        401: OpenApiResponse(
+            response=ErrorResponseSerializer,
+            description="Authentication required"
+        ),
+        403: OpenApiResponse(
+            response=ErrorResponseSerializer,
+            description="Admin privileges required or password change not allowed"
+        ),
+        500: OpenApiResponse(
+            response=ErrorResponseSerializer,
+            description="Internal server error"
+        )
+    },
+    description="Change a Django password for the current user, or reset another user's password as an admin"
+)
+@api_view(["POST"])
+@handle_exceptions
+def change_password(request: Request) -> Response:
+    """
+    Change or reset a Django password.
+
+    Self-service mode:
+    - used when email is not supplied
+    - changes the authenticated user's own password
+    - requires current_password
+    - allowed when Active Directory is disabled
+    - also allowed when the authenticated user is local-only
+
+    Admin reset mode:
+    - used when email is supplied
+    - requires the authenticated user to be staff/admin
+    - does not require current_password
+    - when Active Directory is enabled, only local-only users can be reset
+    - when Active Directory is disabled, any Django user's password can be reset
+    """
+    data = request.data
+    logger.debug(f'{get_caller_name()}() request from {get_user_email(request)} - {data}')
+
+    if not request.user or not request.user.is_authenticated:
+        return mfa_error_response(
+            error_code="AUTH_REQUIRED",
+            ui_action=UI_ACTION_STAY_ON_LOGIN,
+            message="Authentication required.",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    requesting_user = cast(User, request.user)
+
+    validator, error_return = validate_request(ChangePasswordRequestSerializer, data)
+    if error_return:
+        return error_return
+
+    target_email = validator.get("email")
+    current_password = validator.get("current_password")
+    new_password = validator.get("new_password")
+
+    if target_email:
+        # Admin reset mode. The admin supplies the target user's email.
+        if not requesting_user.is_staff:
+            return mfa_error_response(
+                error_code="ADMIN_REQUIRED",
+                ui_action=UI_ACTION_STAY_ON_LOGIN,
+                message="Admin privileges required.",
+                status_code=status.HTTP_403_FORBIDDEN,
+            )
+
+        user = User.objects.filter(email__iexact=target_email.strip().lower()).first()
+        user = cast(User | None, user)
+
+        if not user:
+            return mfa_error_response(
+                error_code="USER_NOT_FOUND",
+                ui_action=UI_ACTION_STAY_ON_LOGIN,
+                message=f"User {target_email} not found.",
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if settings.ACTIVE_DIRECTORY_ENABLED and not user.is_local_only:
+            return mfa_error_response(
+                error_code="PASSWORD_CHANGE_NOT_ALLOWED",
+                ui_action=UI_ACTION_STAY_ON_LOGIN,
+                message="When Active Directory is enabled, admins may only reset passwords for local-only users.",
+                status_code=status.HTTP_403_FORBIDDEN,
+            )
+
+    else:
+        # Self-service mode. The user must verify their current password.
+        user = requesting_user
+
+        if settings.ACTIVE_DIRECTORY_ENABLED and not user.is_local_only:
+            return mfa_error_response(
+                error_code="PASSWORD_CHANGE_NOT_ALLOWED",
+                ui_action=UI_ACTION_STAY_ON_LOGIN,
+                message="Password changes are only allowed for local-only users when Active Directory is enabled.",
+                status_code=status.HTTP_403_FORBIDDEN,
+            )
+
+        if not current_password:
+            return mfa_error_response(
+                error_code="CURRENT_PASSWORD_REQUIRED",
+                ui_action=UI_ACTION_STAY_ON_LOGIN,
+                message="Current password is required.",
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not user.check_password(current_password):
+            return mfa_error_response(
+                error_code="INVALID_CURRENT_PASSWORD",
+                ui_action=UI_ACTION_STAY_ON_LOGIN,
+                message="Current password is incorrect.",
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+
+    try:
+        validate_password(new_password, user=user)
+    except DjangoValidationError as e:
+        return mfa_error_response(
+            error_code="INVALID_PASSWORD",
+            ui_action=UI_ACTION_STAY_ON_LOGIN,
+            message=" ".join(e.messages),
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+
+    user.set_password(new_password)
+    user.save(update_fields=["password"])
+
+    response = {
+        "message": "Password changed successfully.",
+    }
+
+    response_validator, error_response = validate_response(ChangePasswordResponseSerializer, response)
+    if error_response:
+        return error_response
+
+    logger.info(
+        "Password changed: target_user_id=%s target_email=%s requested_by=%s admin_reset=%s ad_enabled=%s",
+        user.id,
+        user.email,
+        requesting_user.email,
+        bool(target_email),
+        settings.ACTIVE_DIRECTORY_ENABLED,
+    )
+
+    logger.debug(
+        f'Returning to {get_user_email(request)} from {get_caller_name()}() - '
+        f'{json.dumps(response_validator.data)}'
+    )
+
+    return Response(response_validator.data)
+
+
 def generate_recovery_codes(num_codes: int = 10) -> list[str]:
     """
     Generate one-time MFA recovery codes.
@@ -679,3 +979,16 @@ def verify_recovery_code(user: User, code: str) -> bool:
                 return True
 
     return False
+
+
+@api_view(["GET", "POST"])
+@permission_classes([AllowAny])
+@handle_exceptions
+def auth_config(_request: Request) -> Response:
+    response = {
+        "active_directory_enabled": settings.ACTIVE_DIRECTORY_ENABLED,
+        "allow_self_registration": not settings.ACTIVE_DIRECTORY_ENABLED,
+        "allow_password_change": not settings.ACTIVE_DIRECTORY_ENABLED,
+    }
+
+    return Response(response)

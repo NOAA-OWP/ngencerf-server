@@ -428,8 +428,18 @@ def save_formulation_tab(request) -> Response:
         # Add modules that already exist but have no parameters, limited to the current selection to avoid refetching for soon-to-be-deleted modules
         to_be_added.update(set(formulations_without_params) & new_module_names)
 
-    # Fetch module metadata from Data Services (outside write transaction)
-    module_metadata, ds_errors = get_module_metadata_from_data_services(run, to_be_added)
+    # Fetch module metadata from Data Services (outside write transaction).
+    # Include LASAM when fetching SFT metadata because the Data Services
+    # helper uses the supplied module set to determine whether SFT applies.
+    modules_for_metadata = set(to_be_added)
+
+    if "SFT" in modules_for_metadata and "LASAM" in new_module_names:
+        modules_for_metadata.add("LASAM")
+
+    module_metadata, ds_errors = get_module_metadata_from_data_services(
+        run,
+        modules_for_metadata
+    )
     if ds_errors:
         eds_errors.extend(ds_errors)
 
@@ -456,6 +466,12 @@ def save_formulation_tab(request) -> Response:
         if to_be_unused:
             logger.info(f"Deleting unused modules: {to_be_unused}")
             delete_unused_formulations(to_be_unused, run)
+
+        remove_sft_parameters_when_lasam_removed(
+            run,
+            existing_module_names,
+            new_module_names
+        )
 
         # ------------------------------------------------------------
         # Create missing formulations
@@ -508,8 +524,8 @@ def save_formulation_tab(request) -> Response:
             # clear core CalibrationRun fields
             run.optimization = None
             run.objective_function = None
-            run.streamflow_threshold = None
-            run.peak_flow_threshold = None
+            run.threshold_categorical = None
+            run.threshold_event = None
             run.save_plot_iteration_frequency = None
             run.save_output_iteration = False
 
@@ -688,10 +704,56 @@ formulation_validations: dict[str, Any] = {
                     "requires_any_of": ["Noah-OWP-Modular"],
                     "fatal": True
                 }
+            ],
+            "TopModel": [
+                {
+                    "requires_any_of": ["Noah-OWP-Modular", "PET"],
+                    "fatal": True
+                }
             ]
         }
     }
 }
+
+
+def remove_sft_parameters_when_lasam_removed(
+        run: CalibrationRun,
+        existing_module_names: set[str],
+        new_module_names: set[str]
+) -> None:
+    """
+    Remove persisted SFT parameters when LASAM is removed from the formulation.
+    Also see comments data_services.get_module_metadata_from_data_services
+
+    The SFT formulation may remain selected, but its parameters are only valid
+    while LASAM is included.
+
+    This function performs database writes and must be called inside a write
+    transaction.
+
+    :param run: CalibrationRun whose formulation is being updated.
+    :param existing_module_names: Module names before the formulation update.
+    :param new_module_names: Module names after the formulation update.
+    """
+    lasam_removed = (
+        "LASAM" in existing_module_names
+        and "LASAM" not in new_module_names
+    )
+
+    if not lasam_removed or "SFT" not in new_module_names:
+        return
+
+    deleted_count, _ = CalibrationParameter.objects.filter(
+        calibration_formulation__calibration_run=run,
+        calibration_formulation__module__name="SFT",
+    ).delete()
+
+    if deleted_count:
+        logger.info(
+            "Deleted %s SFT calibration parameter(s) for run %s because LASAM was removed.",
+            deleted_count,
+            run.id,
+        )
 
 
 def split_routing_modules(

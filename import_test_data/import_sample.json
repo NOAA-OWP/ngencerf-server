@@ -12,7 +12,7 @@
     },
     "run_after_import": false,
     "gage_id": "01123000",
-    "forcing_source": "NWM",
+    "forcing_source": "AORC",
     "observational_source": "Historical",
     "geopackage_source": "Hydrofabric",
     "modules": [
@@ -54,22 +54,16 @@
             "maps_to_variable_name": "soil_moisture_profile"
         }
     ],
-    "automatic_validation": true,
-
-    "calibration_times": {
-        "calibration_start_time": "2016-10-01T00:00:00Z",
-        "calibration_end_time": "2017-09-30T23:00:00Z",
+    "time_controls": {
         "simulation_start_time": "2016-10-01T00:00:00Z",
-        "simulation_end_time": "2018-05-18T23:00:00Z"
+        "warmup_duration": 6,
+        "calibration_duration": 6,
+        "validation_window_gap": 0,
+        "validation_window_after_calibration": true,
+        "validation_duration": 6
     },
-    "validation_times": {
-        "validation_start_time": "2017-10-01T00:00:00Z",
-        "validation_end_time": "2018-05-18T23:00:00Z",
-        "simulation_start_time": "2016-10-01T00:00:00Z",
-        "simulation_end_time": "2018-05-18T23:00:00Z"
-    },
-    "streamflow_threshold": 1.0,
-    "peak_flow_threshold": 2.0,
+    "threshold_categorical": 1.0,
+    "threshold_event": 2.0,
     "parameters": [
         {
             "name": "MFSNO",

@@ -222,6 +222,7 @@ class DataTypeEnum(AbstractEnum):
 
 
 class SlurmCallbackStatusEnum(AbstractEnum):
+    SUBMITTED = "SUBMITTED"
     DONE = 'DONE'
     FAILED = 'FAILED'
     CANCELED = 'CANCELED'
@@ -251,6 +252,16 @@ class LogCategory(AbstractEnum):
     HINDCAST = 'hindcast'
     COLD_START = 'cold start'
     VERIFICATION = 'verification'
+
+
+class JobType(AbstractEnum):
+    CALIBRATION = 'calibration'
+    VALIDATION = 'validation'
+    COLD_START = 'cold_start'
+    FORECAST = 'forecast'
+    HINDCAST = 'hindcast'
+    VERIFICATION = 'verification'
+    COMPARISON = 'comparison'  # This doesn't belong here
 
 
 # Used for both ValidationMetrics and NWMRetrospectiveMetrics

@@ -32,8 +32,10 @@ class CustomUser(AbstractUser):
         }
     )
     username = models.CharField(max_length=255, blank=True, null=True)
-
     mfa_enabled = models.BooleanField(default=False)
+    ad_guid = models.UUIDField(null=True, blank=True, unique=True, editable=False)
+    last_ldap_sync = models.DateTimeField(null=True, blank=True)
+    is_local_only = models.BooleanField(default=False)
 
     objects = CustomUserManager()
 
